@@ -7,7 +7,7 @@ import { createHmac, randomBytes, timingSafeEqual, webcrypto } from 'node:crypto
 const app = express();
 const SITE_ID = '__SITE_ID__';
 const DEFAULT_CONFIG = __SITE_CONFIG_JSON__;
-const MAX_BODY = '64kb';
+const MAX_BODY = '256kb';
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -132,6 +132,43 @@ function cleanTimeZone(value, fallback = 'Asia/Manila') {
   const candidate = cleanText(value, 64) || fallback;
   try { new Intl.DateTimeFormat('en-US', { timeZone: candidate }); return candidate; } catch (_) { return fallback; }
 }
+function cleanBannerImage(value) {
+  const raw = cleanText(value, 2048);
+  if (!raw) return '';
+  if (raw.startsWith('/') && !raw.startsWith('//')) return raw;
+  try { const url = new URL(raw); return url.protocol === 'https:' ? url.href : null; } catch (_) { return null; }
+}
+function cleanCustomPageUrl(value) {
+  let raw = cleanText(value, 120).replace(/^\/+|\/+$/g, '');
+  if (!raw || /[?#:]/.test(raw) || raw.includes('/')) return '';
+  raw = raw.replace(/\.html?$/i, '');
+  if (!raw) return '';
+  const slug = slugify(raw);
+  if (['admin','appointments','api','assets','images','index'].includes(slug)) return '';
+  return `/${slug}.html`;
+}
+function cleanCustomPages(value, fallback = []) {
+  const pages = Array.isArray(value) ? value : Array.isArray(fallback) ? fallback : [];
+  const seen = new Set();
+  return pages.slice(0, 8).flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const menuName = cleanText(item.menuName, 80);
+    const pageTitle = cleanText(item.pageTitle, 120);
+    const pageContent = cleanText(item.pageContent, 6000);
+    const url = cleanCustomPageUrl(item.url);
+    const imageUrl = cleanBannerImage(item.imageUrl);
+    if (!menuName || !pageTitle || !pageContent || !url || imageUrl === null || seen.has(url)) return [];
+    seen.add(url);
+    return [{ id: cleanText(item.id, 48, url.slice(1, -5)), menuName, url, pageTitle, pageContent, imageUrl }];
+  });
+}
+function cleanPaymentDetails(value) {
+  const payments = { ...(DEFAULT_CONFIG.payments || {}), ...(value || {}) };
+  return {
+    gcashName: cleanText(payments.gcashName, 80), gcashNumber: cleanText(payments.gcashNumber, 40),
+    mayaName: cleanText(payments.mayaName, 80), mayaNumber: cleanText(payments.mayaNumber, 40)
+  };
+}
 function cleanSiteConfig(input = {}) {
   const merged = { ...DEFAULT_CONFIG, ...input };
   return {
@@ -148,7 +185,9 @@ function cleanSiteConfig(input = {}) {
     fontStyle: merged.fontStyle === 'sans' ? 'sans' : 'serif',
     theme: ['canopy','clay','coastal','editorial','neat','launcher','air'].includes(merged.theme) ? merged.theme : DEFAULT_CONFIG.theme,
     editorialAccent: ['black','teal','forest'].includes(merged.editorialAccent) ? merged.editorialAccent : 'black',
-    features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false }
+    features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false },
+    payments: cleanPaymentDetails(merged.payments),
+    customPages: cleanCustomPages(merged.customPages, DEFAULT_CONFIG.customPages)
   };
 }
 function validDate(value) {

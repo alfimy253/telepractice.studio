@@ -10,6 +10,9 @@ const DEFAULT_CONFIG = {
   paperColor: '#fbf8f1',
   fontStyle: 'serif',
   editorialAccent: 'black',
+  deploymentTarget: 'vercel',
+  payments: { gcashName: 'Harborlight Veterinary Care', gcashNumber: '+63 917 555 0134', mayaName: 'Harborlight Veterinary Care', mayaNumber: '+63 918 555 0142' },
+  customPages: [],
   features: { blog: true, gallery: true, scheduling: true }
 };
 const THEMES = {
@@ -41,16 +44,36 @@ const VERTICALS = {
 let config = loadConfig();
 let nameTouched = Boolean(localStorage.getItem('canopy-name-touched'));
 let wizardStep = 0;
+let activePageId = '';
 let csrfToken = '';
+const WIZARD_STEP_COUNT = 5;
+const MAX_CUSTOM_PAGES = 8;
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
+function newPageId() {
+  return globalThis.crypto?.randomUUID?.() || `page-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+function normalizeSavedPages(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, MAX_CUSTOM_PAGES).map((page) => ({
+    id: String(page?.id || newPageId()).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || newPageId(),
+    menuName: String(page?.menuName || '').slice(0, 80),
+    url: String(page?.url || '').slice(0, 120),
+    pageTitle: String(page?.pageTitle || '').slice(0, 120),
+    pageContent: String(page?.pageContent || '').slice(0, 6000),
+    imageUrl: String(page?.imageUrl || '').slice(0, 2048)
+  }));
+}
 function loadConfig() {
   try {
     const saved = JSON.parse(localStorage.getItem('canopy-site-config') || 'null');
     if (!saved) return structuredClone(DEFAULT_CONFIG);
     return {
       ...structuredClone(DEFAULT_CONFIG), ...saved,
+      payments: { ...DEFAULT_CONFIG.payments, ...(saved.payments || {}) },
+      customPages: normalizeSavedPages(saved.customPages),
+      deploymentTarget: saved.deploymentTarget === 'cloudflare' ? 'cloudflare' : 'vercel',
       features: { ...DEFAULT_CONFIG.features, ...(saved.features || {}) }
     };
   } catch (_) { return structuredClone(DEFAULT_CONFIG); }
@@ -69,6 +92,10 @@ function syncInputs() {
   $('practiceLocation').value = config.location;
   $('practiceEmail').value = config.email;
   $('practicePhone').value = config.phone;
+  $('gcashName').value = config.payments.gcashName || '';
+  $('gcashNumber').value = config.payments.gcashNumber || '';
+  $('mayaName').value = config.payments.mayaName || '';
+  $('mayaNumber').value = config.payments.mayaNumber || '';
   $('brandColor').value = config.primaryColor;
   $('brandColorLabel').textContent = config.primaryColor.toUpperCase();
   $('fontStyle').value = config.fontStyle;
@@ -80,6 +107,17 @@ function syncInputs() {
   $('editorialAccentRow').hidden = config.theme !== 'editorial';
   $('airPaletteNote').hidden = config.theme !== 'air';
   document.querySelectorAll('[data-editorial-accent]').forEach((button) => button.classList.toggle('active', button.dataset.editorialAccent.toLowerCase() === config.primaryColor.toLowerCase()));
+  syncDownloadControls();
+}
+function renderPreviewMenuLinks() {
+  const links = document.querySelector('.preview-nav-links');
+  if (!links) return;
+  const labels = ['Our care', 'About', 'Journal', ...(config.customPages || []).map((page) => page.menuName).filter(Boolean)];
+  links.replaceChildren(...labels.map((label) => {
+    const item = document.createElement('span');
+    item.textContent = label;
+    return item;
+  }));
 }
 function updatePreview() {
   const kind = vertical();
@@ -97,6 +135,7 @@ function updatePreview() {
   $('serviceOne').textContent = kind.services[0];
   $('serviceTwo').textContent = kind.services[1];
   $('serviceThree').textContent = kind.services[2];
+  renderPreviewMenuLinks();
   const logoUse = document.querySelector('.preview-logo use');
   if (logoUse) logoUse.setAttribute('href', `#${kind.icon}`);
   const screen = $('previewScreen');
@@ -127,6 +166,8 @@ function setSpecialty(specialty) {
     localStorage.removeItem('canopy-name-touched');
   }
   if (!config.email || config.email === VERTICALS[previous].email) config.email = VERTICALS[specialty].email;
+  if (config.payments.gcashName === VERTICALS[previous].defaultName) config.payments.gcashName = VERTICALS[specialty].defaultName;
+  if (config.payments.mayaName === VERTICALS[previous].defaultName) config.payments.mayaName = VERTICALS[specialty].defaultName;
   syncInputs();
   updatePreview();
   renderWizard();
@@ -157,6 +198,27 @@ function setEditorialAccent(accent) {
 function safeColor(value, fallback) {
   return /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
 }
+function syncDownloadControls() {
+  const target = config.deploymentTarget === 'cloudflare' ? 'cloudflare' : 'vercel';
+  const displayName = target === 'cloudflare' ? 'Cloudflare' : 'Vercel';
+  document.querySelectorAll('[data-deployment-target]').forEach((button) => {
+    const selected = button.dataset.deploymentTarget === target;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-pressed', String(selected));
+    const state = button.querySelector('.deploy-choice span');
+    if (state) state.textContent = selected ? 'Selected' : 'Select';
+  });
+  const top = $('topGenerate');
+  if (top) top.innerHTML = `<svg><use href="#i-download"/></svg> Download ${displayName} ZIP`;
+  const main = $('generateButton')?.querySelector('span:first-of-type');
+  if (main) main.textContent = `Download ${displayName} ZIP`;
+}
+function setDeploymentTarget(target) {
+  if (!['vercel', 'cloudflare'].includes(target)) return;
+  config.deploymentTarget = target;
+  syncDownloadControls();
+  saveConfig();
+}
 function toast(title, message, isError = false) {
   const region = $('toastRegion');
   const node = document.createElement('div');
@@ -165,7 +227,7 @@ function toast(title, message, isError = false) {
   region.appendChild(node);
   window.setTimeout(() => node.remove(), 4800);
 }
-function configForExport() {
+function configForPackage() {
   const kind = vertical();
   const name = config.businessName.trim() || kind.defaultName;
   const slug = slugify(name);
@@ -185,6 +247,12 @@ function configForExport() {
     paperColor: safeColor(config.paperColor, '#fbf8f1'),
     fontStyle: config.fontStyle === 'sans' ? 'sans' : 'serif',
     features: { blog: Boolean(config.features.blog), gallery: config.features.gallery !== false, scheduling: Boolean(config.features.scheduling) },
+    payments: {
+      gcashName: String(config.payments.gcashName || '').trim(), gcashNumber: String(config.payments.gcashNumber || '').trim(),
+      mayaName: String(config.payments.mayaName || '').trim(), mayaNumber: String(config.payments.mayaNumber || '').trim()
+    },
+    customPages: normalizeSavedPages(config.customPages),
+    target: config.deploymentTarget === 'cloudflare' ? 'cloudflare' : 'vercel',
     heroEyebrow: kind.eyebrow,
     heroHeadline: kind.headline.replace('|', '\n'),
     heroText: kind.subhead,
@@ -192,20 +260,143 @@ function configForExport() {
     createdAt: new Date().toISOString()
   };
 }
+function canonicalPageUrl(value) {
+  let raw = String(value || '').trim().replace(/^\/+|\/+$/g, '');
+  if (!raw || /[?#:]/.test(raw) || raw.includes('/')) return '';
+  raw = raw.replace(/\.html?$/i, '');
+  if (!raw) return '';
+  const slug = slugify(raw);
+  const reserved = new Set(['admin', 'appointments', 'api', 'assets', 'images', 'index']);
+  return reserved.has(slug) ? '' : `/${slug}.html`;
+}
+function safeBannerImageUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return true;
+  if (raw.startsWith('/') && !raw.startsWith('//')) return true;
+  try { return new URL(raw).protocol === 'https:'; } catch (_) { return false; }
+}
+function renderCustomPageList() {
+  const list = $('wizardPageList');
+  if (!list) return;
+  if (!config.customPages.length) {
+    list.innerHTML = '<p class="wizard-pages-empty">No custom menu pages yet. Add one to create a new page and a matching link in the site menu.</p>';
+    return;
+  }
+  if (!activePageId || !config.customPages.some((page) => page.id === activePageId)) activePageId = config.customPages[0].id;
+  list.innerHTML = config.customPages.map((page, index) => {
+    const label = page.menuName.trim() || `Page ${index + 1}`;
+    const route = page.url.trim() || 'Set a page URL';
+    return `<div class="wizard-page-editor">
+      <details data-page-id="${esc(page.id)}" ${page.id === activePageId ? 'open' : ''}>
+        <summary><span class="wizard-page-summary"><strong data-page-summary-name>${esc(label)}</strong><small data-page-summary-url>${esc(route)}</small></span><span class="wizard-page-chevron" aria-hidden="true">›</span></summary>
+        <div class="wizard-page-fields">
+          <label class="form-field"><span>Menu link name</span><input data-page-field="menuName" maxlength="80" value="${esc(page.menuName)}" placeholder="About us" required></label>
+          <label class="form-field"><span>Page URL</span><input data-page-field="url" maxlength="120" value="${esc(page.url)}" placeholder="/about-us.html" inputmode="url" required></label>
+          <label class="form-field wizard-field-full"><span>Page title</span><input data-page-field="pageTitle" maxlength="120" value="${esc(page.pageTitle)}" placeholder="A little about our practice" required></label>
+          <label class="form-field wizard-field-full"><span>Page content</span><textarea data-page-field="pageContent" maxlength="6000" rows="4" placeholder="Write the content visitors will read on this page." required>${esc(page.pageContent)}</textarea></label>
+          <label class="form-field wizard-field-full"><span>Banner image URL (optional)</span><input data-page-field="imageUrl" maxlength="2048" value="${esc(page.imageUrl)}" placeholder="https://example.com/banner.jpg" inputmode="url"><small>One HTTPS or same-site image URL is used as the page banner.</small></label>
+          <div class="wizard-page-actions">
+            <button type="button" data-page-action="up" ${index === 0 ? 'disabled' : ''}>Move earlier</button>
+            <button type="button" data-page-action="down" ${index === config.customPages.length - 1 ? 'disabled' : ''}>Move later</button>
+            <button type="button" class="wizard-page-remove" data-page-action="remove">Remove page</button>
+          </div>
+        </div>
+      </details>
+    </div>`;
+  }).join('');
+}
+function bindCustomPageEditor() {
+  const list = $('wizardPageList');
+  if (!list) return;
+  list.addEventListener('input', (event) => {
+    const field = event.target.dataset.pageField;
+    const accordion = event.target.closest('details[data-page-id]');
+    if (!field || !accordion) return;
+    const page = config.customPages.find((item) => item.id === accordion.dataset.pageId);
+    if (!page) return;
+    page[field] = event.target.value;
+    const label = accordion.querySelector('[data-page-summary-name]');
+    const route = accordion.querySelector('[data-page-summary-url]');
+    if (label) label.textContent = page.menuName.trim() || `Page ${config.customPages.indexOf(page) + 1}`;
+    if (route) route.textContent = page.url.trim() || 'Set a page URL';
+    renderPreviewMenuLinks();
+    saveConfig();
+  });
+  list.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-page-action]');
+    if (!button) return;
+    const accordion = button.closest('details[data-page-id]');
+    const index = config.customPages.findIndex((page) => page.id === accordion?.dataset.pageId);
+    if (index < 0) return;
+    const action = button.dataset.pageAction;
+    if (action === 'remove') {
+      config.customPages.splice(index, 1);
+      activePageId = config.customPages[Math.min(index, config.customPages.length - 1)]?.id || '';
+    } else if (action === 'up' && index > 0) {
+      [config.customPages[index - 1], config.customPages[index]] = [config.customPages[index], config.customPages[index - 1]];
+      activePageId = config.customPages[index - 1].id;
+    } else if (action === 'down' && index < config.customPages.length - 1) {
+      [config.customPages[index + 1], config.customPages[index]] = [config.customPages[index], config.customPages[index + 1]];
+      activePageId = config.customPages[index + 1].id;
+    } else return;
+    saveConfig();
+    renderCustomPageList();
+    updatePreview();
+  });
+}
+function validateCustomPages() {
+  const seen = new Set();
+  for (let index = 0; index < config.customPages.length; index++) {
+    const page = config.customPages[index];
+    const accordion = [...document.querySelectorAll('#wizardPageList details[data-page-id]')].find((item) => item.dataset.pageId === page.id);
+    for (const [field, message] of [['menuName', 'Add a menu link name.'], ['url', 'Add a page URL.'], ['pageTitle', 'Add a title for this page.'], ['pageContent', 'Add content for this page.']]) {
+      if (!String(page[field] || '').trim()) {
+        if (accordion) { accordion.open = true; accordion.querySelector(`[data-page-field="${field}"]`)?.focus(); }
+        toast('Complete the page details', message, true);
+        return false;
+      }
+    }
+    const route = canonicalPageUrl(page.url);
+    if (!route) {
+      if (accordion) { accordion.open = true; accordion.querySelector('[data-page-field="url"]')?.focus(); }
+      toast('Check the page URL', 'Use a unique page path such as /about-us.html. Reserved site paths cannot be used.', true);
+      return false;
+    }
+    if (seen.has(route)) {
+      if (accordion) { accordion.open = true; accordion.querySelector('[data-page-field="url"]')?.focus(); }
+      toast('Page URLs must be unique', `Another custom page already uses ${route}.`, true);
+      return false;
+    }
+    if (!safeBannerImageUrl(page.imageUrl)) {
+      if (accordion) { accordion.open = true; accordion.querySelector('[data-page-field="imageUrl"]')?.focus(); }
+      toast('Check the banner image URL', 'Use an HTTPS image URL or a same-site path beginning with one slash.', true);
+      return false;
+    }
+    seen.add(route);
+    page.url = route;
+    page.menuName = page.menuName.trim();
+    page.pageTitle = page.pageTitle.trim();
+    page.pageContent = page.pageContent.trim();
+    page.imageUrl = page.imageUrl.trim();
+  }
+  saveConfig();
+  updatePreview();
+  return true;
+}
 function renderWizard() {
   const stepLabel = $('wizardStepLabel');
   const progress = $('wizardProgress');
   const content = $('wizardContent');
   if (!content) return;
-  stepLabel.textContent = `STEP 0${wizardStep + 1} / 04`;
-  progress.style.width = `${(wizardStep + 1) * 25}%`;
+  stepLabel.textContent = `STEP 0${wizardStep + 1} / 0${WIZARD_STEP_COUNT}`;
+  progress.style.width = `${((wizardStep + 1) / WIZARD_STEP_COUNT) * 100}%`;
   document.querySelectorAll('.wizard-step').forEach((node, i) => {
     node.classList.toggle('active', i === wizardStep);
     node.classList.toggle('done', i < wizardStep);
   });
   $('wizardBack').style.visibility = wizardStep === 0 ? 'hidden' : 'visible';
-  $('wizardNext').innerHTML = wizardStep === 3 ? 'Finish setup <svg><use href="#i-check"/></svg>' : 'Continue <svg><use href="#i-arrow"/></svg>';
-  $('wizardSkip').textContent = wizardStep === 3 ? 'Your ZIP includes both deploy targets' : 'You can change these later';
+  $('wizardNext').innerHTML = wizardStep === WIZARD_STEP_COUNT - 1 ? 'Finish setup <svg><use href="#i-check"/></svg>' : 'Continue <svg><use href="#i-arrow"/></svg>';
+  $('wizardSkip').textContent = wizardStep === WIZARD_STEP_COUNT - 1 ? 'You can download the selected code package' : 'You can change these later';
   if (wizardStep === 0) {
     content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Who are we building for?</h1><p class="wizard-lede">Choose a starting point. We’ll tailor the sample copy, booking fields and site sections to your practice.</p><div class="wizard-specialty-grid"><button class="wizard-specialty ${config.specialty === 'veterinary' ? 'selected' : ''}" data-wizard-specialty="veterinary"><span class="choice-icon vet-icon"><svg><use href="#i-paw"/></svg></span><span class="wizard-radio"></span><strong>Veterinary</strong><small>Care for pets, built around their people.</small></button><button class="wizard-specialty ${config.specialty === 'dental' ? 'selected' : ''}" data-wizard-specialty="dental"><span class="choice-icon dental-icon"><svg><use href="#i-tooth"/></svg></span><span class="wizard-radio"></span><strong>Dental</strong><small>A calmer, clearer patient experience.</small></button></div><div class="wizard-tip"><svg><use href="#i-spark"/></svg><span>Same reliable site engine. Just the right language and defaults for your specialty.</span></div>`;
     content.querySelectorAll('[data-wizard-specialty]').forEach((button) => button.addEventListener('click', () => setSpecialty(button.dataset.wizardSpecialty)));
@@ -214,9 +405,22 @@ function renderWizard() {
     ['wizardBusiness','wizardLocation','wizardEmail','wizardPhone'].forEach((id) => $(id).addEventListener('input', collectWizardFields));
   } else if (wizardStep === 2) {
     content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Set a welcoming tone.</h1><p class="wizard-lede">Choose a starting palette and typography. Every color can be changed in the theme studio.</p><div class="wizard-theme-grid">${Object.entries(THEMES).map(([key, theme]) => `<button class="wizard-theme-card ${config.theme === key ? 'selected' : ''}" data-wizard-theme="${key}"><span class="wizard-theme-art" style="--swatch-bg:${theme.paperColor};--swatch-primary:${theme.primaryColor};--swatch-accent:${theme.accentColor}"><span></span><i></i></span><span class="wizard-radio"></span><strong>${theme.label}</strong><small>${theme.mood}</small></button>`).join('')}</div><div class="wizard-preview-tip"><span><svg><use href="#i-palette"/></svg></span><span>Theme settings are owner-editable after launch, without touching the generated code.</span></div>`;
-    content.querySelectorAll('[data-wizard-theme]').forEach((button) => button.addEventListener('click', () => setTheme(button.dataset.wizardTheme)));
+    content.querySelectorAll('[data-wizard-theme]').forEach((button) => button.addEventListener('click', () => setTheme(button.dataset.wizard-theme)));
+  } else if (wizardStep === 3) {
+    content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Build your menu links.</h1><p class="wizard-lede">Add custom pages to your site. Each page gets a menu link and its own URL, title, content and optional banner image.</p><div class="wizard-page-manager"><div class="wizard-page-list" id="wizardPageList"></div><button class="wizard-add-page" type="button" id="addWizardPage"><svg><use href="#i-plus"/></svg> Add a page</button><p class="wizard-page-limit">Up to ${MAX_CUSTOM_PAGES} custom pages. Menu order follows the list; use the controls on each page to rearrange or remove it.</p></div>`;
+    renderCustomPageList();
+    bindCustomPageEditor();
+    $('addWizardPage').addEventListener('click', () => {
+      if (config.customPages.length >= MAX_CUSTOM_PAGES) { toast('Page limit reached', `You can add up to ${MAX_CUSTOM_PAGES} custom pages.`, true); return; }
+      const page = { id: newPageId(), menuName: '', url: '', pageTitle: '', pageContent: '', imageUrl: '' };
+      config.customPages.push(page);
+      activePageId = page.id;
+      saveConfig();
+      renderCustomPageList();
+      $('wizardPageList').querySelector(`details[data-page-id="${page.id}"] [data-page-field="menuName"]`)?.focus();
+    });
   } else {
-    content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Keep the essentials close.</h1><p class="wizard-lede">Choose the practical features most local practices need. No custom CMS blocks or plugin maze.</p><div class="wizard-feature-list"><div class="wizard-feature-card"><span class="feature-icon"><svg><use href="#i-file"/></svg></span><span class="feature-copy"><strong>Blog & updates</strong><small>Fixed post fields for helpful articles and clinic news.</small></span><label class="switch"><input id="wizardBlog" type="checkbox" ${config.features.blog ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable blog</span></label></div><div class="wizard-feature-card"><span class="feature-icon feature-icon-gallery"><svg><use href="#i-image"/></svg></span><span class="feature-copy"><strong>Work & gallery</strong><small>Fixed image, caption, category and visibility fields.</small></span><label class="switch"><input id="wizardGallery" type="checkbox" ${config.features.gallery !== false ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable gallery</span></label></div><div class="wizard-feature-card"><span class="feature-icon feature-icon-book"><svg><use href="#i-calendar"/></svg></span><span class="feature-copy"><strong>Appointment requests</strong><small>Request a real time slot and collect contact details.</small></span><label class="switch"><input id="wizardBooking" type="checkbox" ${config.features.scheduling ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable appointment requests</span></label></div></div><div class="wizard-finish-card"><span><svg><use href="#i-check"/></svg></span><span><strong>Two deploy targets, one shared setup.</strong><small>We’ll package Vercel and Cloudflare apps together in one ZIP.</small></span></div>`;
+    content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Keep the essentials close.</h1><p class="wizard-lede">Choose the practical features most local practices need. No custom CMS blocks or plugin maze.</p><div class="wizard-feature-list"><div class="wizard-feature-card"><span class="feature-icon"><svg><use href="#i-file"/></svg></span><span class="feature-copy"><strong>Blog & updates</strong><small>Fixed post fields for helpful articles and clinic news.</small></span><label class="switch"><input id="wizardBlog" type="checkbox" ${config.features.blog ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable blog</span></label></div><div class="wizard-feature-card"><span class="feature-icon feature-icon-gallery"><svg><use href="#i-image"/></svg></span><span class="feature-copy"><strong>Work & gallery</strong><small>Fixed image, caption, category and visibility fields.</small></span><label class="switch"><input id="wizardGallery" type="checkbox" ${config.features.gallery !== false ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable gallery</span></label></div><div class="wizard-feature-card"><span class="feature-icon feature-icon-book"><svg><use href="#i-calendar"/></svg></span><span class="feature-copy"><strong>Appointment requests</strong><small>Request a real time slot and collect contact details.</small></span><label class="switch"><input id="wizardBooking" type="checkbox" ${config.features.scheduling ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable appointment requests</span></label></div></div><div class="wizard-finish-card"><span><svg><use href="#i-check"/></svg></span><span><strong>Your package is ready to download.</strong><small>Choose Vercel or Cloudflare on the builder and download that code package. No deployment happens automatically.</small></span></div>`;
     $('wizardBlog').addEventListener('change', (event) => { config.features.blog = event.target.checked; syncInputs(); updatePreview(); });
     $('wizardGallery').addEventListener('change', (event) => { config.features.gallery = event.target.checked; syncInputs(); updatePreview(); });
     $('wizardBooking').addEventListener('change', (event) => { config.features.scheduling = event.target.checked; syncInputs(); updatePreview(); });
@@ -228,7 +432,10 @@ function renderWizard() {
 function collectWizardFields() {
   const business = $('wizardBusiness');
   if (!business) return;
+  const previousName = config.businessName;
   config.businessName = business.value;
+  if (config.payments.gcashName === previousName) config.payments.gcashName = config.businessName;
+  if (config.payments.mayaName === previousName) config.payments.mayaName = config.businessName;
   config.location = $('wizardLocation').value;
   config.email = $('wizardEmail').value;
   config.phone = $('wizardPhone').value;
@@ -252,7 +459,7 @@ function closeWizard(complete = false) {
   document.body.style.overflow = '';
   if (complete) {
     localStorage.setItem('canopy-tour-complete', 'true');
-    toast('Your setup is ready', 'Review the live preview, then generate the paired app bundle.');
+    toast('Your setup is ready', 'Choose a hosting target to download its code package. Nothing deploys automatically.');
   }
 }
 function advanceWizard() {
@@ -260,7 +467,8 @@ function advanceWizard() {
     collectWizardFields();
     if (!config.businessName.trim()) { $('wizardBusiness').focus(); toast('Add a practice name', 'A practice name is needed to create the site address.', true); return; }
   }
-  if (wizardStep < 3) {
+  if (wizardStep === 3 && !validateCustomPages()) return;
+  if (wizardStep < WIZARD_STEP_COUNT - 1) {
     wizardStep += 1;
     renderWizard();
   } else {
@@ -276,9 +484,17 @@ function retreatWizard() {
     renderWizard();
   }
 }
-async function generateApps() {
+async function downloadPackage() {
+  const target = config.deploymentTarget === 'cloudflare' ? 'cloudflare' : 'vercel';
+  const displayName = target === 'cloudflare' ? 'Cloudflare' : 'Vercel';
   const buttons = [$('generateButton'), $('topGenerate')];
-  buttons.forEach((button) => { button.classList.add('loading-button'); button.dataset.original = button.innerHTML; button.innerHTML = '<svg><use href="#i-spark"/></svg> Preparing ZIP…'; });
+  buttons.forEach((button) => {
+    button.dataset.original = button.innerHTML;
+    button.disabled = true;
+    button.classList.add('loading-button');
+    button.innerHTML = '<svg><use href="#i-spark"/></svg> Preparing ZIP…';
+  });
+  document.querySelectorAll('[data-deployment-target]').forEach((button) => { button.disabled = true; });
   try {
     const csrfResponse = await fetch('/api/csrf', { credentials: 'same-origin' });
     if (!csrfResponse.ok) throw new Error('Could not initialize the secure build session.');
@@ -288,26 +504,32 @@ async function generateApps() {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-      body: JSON.stringify(configForExport())
+      body: JSON.stringify({ ...configForPackage(), target })
     });
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || 'The build could not be generated.');
+      throw new Error(error.error || 'The code package could not be generated.');
     }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${slugify(config.businessName)}-vercel-cloudflare.zip`;
+    anchor.download = `${slugify(config.businessName)}-${target}.zip`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
-    URL.revokeObjectURL(url);
-    toast('Your apps are packaged', 'The ZIP includes deploy-ready Vercel and Cloudflare projects, plus Neon setup files.');
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`${displayName} package downloaded`, 'This is a code package only; deploy it yourself on the selected host.');
   } catch (error) {
-    toast('Could not build the ZIP', error.message || 'Check the server and try again.', true);
+    toast('Could not download the ZIP', error.message || 'Check the server and try again.', true);
   } finally {
-    buttons.forEach((button) => { button.classList.remove('loading-button'); if (button.dataset.original) button.innerHTML = button.dataset.original; });
+    buttons.forEach((button) => {
+      button.classList.remove('loading-button');
+      button.disabled = false;
+      if (button.dataset.original) button.innerHTML = button.dataset.original;
+    });
+    document.querySelectorAll('[data-deployment-target]').forEach((button) => { button.disabled = false; });
+    syncDownloadControls();
   }
 }
 function resetTheme() {
@@ -323,22 +545,28 @@ function resetCopy() {
   const defaults = VERTICALS[config.specialty];
   config.businessName = defaults.defaultName;
   config.location = 'Quezon City, Philippines';
+  if (config.payments.gcashName === VERTICALS[config.specialty].defaultName || config.payments.gcashName === 'Harborlight Veterinary Care') config.payments.gcashName = defaults.defaultName;
+  if (config.payments.mayaName === VERTICALS[config.specialty].defaultName || config.payments.mayaName === 'Harborlight Veterinary Care') config.payments.mayaName = defaults.defaultName;
   nameTouched = false;
   localStorage.removeItem('canopy-name-touched');
   syncInputs(); updatePreview();
   toast('Sample copy restored', 'Practice name and location are back to the original preview.');
 }
-function exportSummary() {
-  const data = JSON.stringify(configForExport(), null, 2);
-  navigator.clipboard?.writeText(data).then(() => toast('Setup copied', 'Site configuration JSON copied to your clipboard.')).catch(() => toast('Clipboard unavailable', 'Your browser did not allow clipboard access.', true));
-}
 function bindEvents() {
   $('vetChoice').addEventListener('click', () => setSpecialty('veterinary'));
   $('dentalChoice').addEventListener('click', () => setSpecialty('dental'));
-  $('practiceName').addEventListener('input', (event) => { config.businessName = event.target.value; nameTouched = true; localStorage.setItem('canopy-name-touched', 'true'); updatePreview(); });
+  $('practiceName').addEventListener('input', (event) => {
+    const previousName = config.businessName;
+    config.businessName = event.target.value;
+    if (config.payments.gcashName === previousName) config.payments.gcashName = config.businessName;
+    if (config.payments.mayaName === previousName) config.payments.mayaName = config.businessName;
+    $('gcashName').value = config.payments.gcashName; $('mayaName').value = config.payments.mayaName;
+    nameTouched = true; localStorage.setItem('canopy-name-touched', 'true'); updatePreview();
+  });
   $('practiceLocation').addEventListener('input', (event) => { config.location = event.target.value; updatePreview(); });
   $('practiceEmail').addEventListener('input', (event) => { config.email = event.target.value; saveConfig(); });
   $('practicePhone').addEventListener('input', (event) => { config.phone = event.target.value; saveConfig(); });
+  [['gcashName','gcashName'],['gcashNumber','gcashNumber'],['mayaName','mayaName'],['mayaNumber','mayaNumber']].forEach(([id, field]) => $(id).addEventListener('input', (event) => { config.payments[field] = event.target.value; saveConfig(); }));
   $('brandColor').addEventListener('input', (event) => { config.primaryColor = event.target.value; syncInputs(); updatePreview(); });
   $('fontStyle').addEventListener('change', (event) => { config.fontStyle = event.target.value; updatePreview(); });
   $('blogToggle').addEventListener('change', (event) => { config.features.blog = event.target.checked; updatePreview(); });
@@ -348,8 +576,9 @@ function bindEvents() {
   document.querySelectorAll('[data-editorial-accent]').forEach((button) => button.addEventListener('click', () => setEditorialAccent(button.dataset.editorialAccent)));
   $('resetTheme').addEventListener('click', resetTheme);
   $('resetPreview').addEventListener('click', resetCopy);
-  $('generateButton').addEventListener('click', generateApps);
-  $('topGenerate').addEventListener('click', generateApps);
+  $('generateButton').addEventListener('click', downloadPackage);
+  $('topGenerate').addEventListener('click', downloadPackage);
+  document.querySelectorAll('[data-deployment-target]').forEach((button) => button.addEventListener('click', () => setDeploymentTarget(button.dataset.deploymentTarget)));
   $('openWalkthrough').addEventListener('click', openWizard);
   $('sidebarTour').addEventListener('click', (event) => { event.preventDefault(); openWizard(); });
   $('editPractice').addEventListener('click', () => $('practiceName').focus());
@@ -363,7 +592,6 @@ function bindEvents() {
     document.querySelectorAll('.device-button').forEach((node) => node.classList.toggle('active', node === button));
     $('browserWindow').classList.toggle('mobile-preview', button.dataset.device === 'mobile');
   }));
-  $('copySetup').addEventListener('click', exportSummary);
   $('menuToggle').addEventListener('click', () => $('sidebar').classList.toggle('open'));
   document.querySelectorAll('.side-nav .nav-link').forEach((link) => link.addEventListener('click', () => {
     document.querySelectorAll('.side-nav .nav-link').forEach((node) => node.classList.toggle('active', node === link));
