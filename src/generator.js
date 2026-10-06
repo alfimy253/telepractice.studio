@@ -170,7 +170,8 @@ function generatedReadme(config) {
     `# ${config.businessName} — ${targetName} code package`, '',
     `This ZIP contains the ${targetName} project only. It is a source-code package; it does not deploy or publish your website.`, '',
     '## Database setup',
-    `Create a Neon Postgres database, then run ${code('db/schema.sql')} and ${code('db/seed.sql')} once. The seed file includes the generated site configuration, payment details, custom pages and sample practice content.`, '',
+    `Create a Neon Postgres database, then run ${code('db/schema.sql')} and ${code('db/seed.sql')} once. The seed file includes the generated site configuration, payment details, custom pages and sample practice content.`,
+    `Set ${code('DATABASE_URL')} to the pooled Neon URL without ${code('sslmode')} or ${code('channel_binding')} query parameters, for example ${code('postgresql://USER:PASSWORD@HOST.neon.tech/DB')}. The generated serverless runtime uses Neon's secure HTTP transport, normalizes HTML-escaped URLs copied from a dashboard, and never hardcodes your credentials.`, '',
     config.target === 'vercel' ? '## Deploy to Vercel' : '## Deploy to Cloudflare Workers',
     config.target === 'vercel'
       ? `Deploy this folder to Vercel. Configure ${code('DATABASE_URL')}, ${code('ADMIN_API_KEY')} and ${code('CSRF_SECRET')} using ${code('.env.example')}. For local development, run ${code('npm install')} and ${code('npm run dev')}.`

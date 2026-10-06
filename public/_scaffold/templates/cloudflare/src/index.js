@@ -1,4 +1,4 @@
-import { neon } from '@neondatabase/serverless';
+import { createNeonClient } from '../db/connection.js';
 
 const SITE_ID = '__SITE_ID__';
 const DEFAULT_CONFIG = __SITE_CONFIG_JSON__;
@@ -217,8 +217,7 @@ function displayTime(value) {
   return `${hour % 12 || 12}:${String(minute).padStart(2, '0')} ${suffix}`;
 }
 function sql(env) {
-  if (!env.DATABASE_URL) throw new Error('Database is not configured.');
-  return neon(env.DATABASE_URL);
+  return createNeonClient(env.DATABASE_URL);
 }
 function base64url(bytes) {
   let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
