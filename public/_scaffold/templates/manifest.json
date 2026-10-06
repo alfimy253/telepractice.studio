@@ -1,0 +1,32 @@
+{
+  "sharedPublic": [
+    "public/admin.css",
+    "public/admin.html",
+    "public/admin.js",
+    "public/appointments.html",
+    "public/appointments.js",
+    "public/images/blog-care-team.svg",
+    "public/images/blog-small-moments.svg",
+    "public/images/blog-welcome.svg",
+    "public/index.html",
+    "public/site-config.js",
+    "public/site.css",
+    "public/site.js"
+  ],
+  "sharedDb": [
+    "db/schema.sql"
+  ],
+  "vercel": [
+    ".env.example",
+    "api/index.js",
+    "dev.js",
+    "package.json",
+    "vercel.json"
+  ],
+  "cloudflare": [
+    ".dev.vars.example",
+    "package.json",
+    "src/index.js",
+    "wrangler.jsonc"
+  ]
+}

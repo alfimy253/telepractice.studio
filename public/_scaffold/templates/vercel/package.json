@@ -1,0 +1,20 @@
+{
+  "name": "__SITE_ID__-practice-site-vercel",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "White-label practice website — Vercel Node.js runtime",
+  "scripts": {
+    "dev": "node dev.js",
+    "start": "node dev.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0"
+  }
+}

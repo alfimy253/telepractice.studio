@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow"><title>Site owner studio</title>
+  <link rel="stylesheet" href="/site.css"><link rel="stylesheet" href="/admin.css">
+  <script src="/site-config.js" defer></script><script src="/admin.js" defer></script>
+</head>
+<body class="admin-body">
+  <header class="admin-topbar"><a class="site-brand" href="/" aria-label="View website"><span class="brand-symbol" id="adminSymbol">✳</span><span><strong id="adminBrandName">Practice studio</strong><small>WEBSITE OWNER</small></span></a><div class="admin-top-actions"><span class="owner-pill"><i></i> OWNER EDITOR</span><a href="/" class="preview-link">View website ↗</a></div></header>
+  <main class="admin-wrap">
+    <div class="admin-heading"><div><span class="admin-overline">PRACTICE WEBSITE</span><h1>Your site, your voice.</h1><p>Edit the essentials. Changes to your brand and theme update the public website right away.</p></div><span class="save-indicator" id="saveIndicator"><i></i> Ready to edit</span></div>
+    <section class="admin-connect panel-admin" id="connectPanel">
+      <div class="connect-icon">⌁</div><div class="connect-copy"><strong>Connect your owner key</strong><p>Your deployment administrator gives you the <code>ADMIN_API_KEY</code>. It is kept only in this browser session.</p></div>
+      <form id="keyForm" class="key-form" method="post" action="/api/admin/posts"><label for="adminKey">Owner key</label><div><input id="adminKey" type="password" autocomplete="current-password" placeholder="Paste your owner key"><button type="submit">Connect</button></div><small id="keyMessage">The key is never added to the website ZIP.</small></form>
+    </section>
+    <section class="admin-grid">
+      <div class="admin-main-column">
+        <section class="panel-admin admin-card">
+          <div class="admin-card-heading"><div><span class="admin-section-index">01 / IDENTITY</span><h2>Practice details</h2><p>Keep your contact information current.</p></div><span class="card-icon">✳</span></div>
+          <form id="siteForm" class="admin-form" method="post" action="/api/site">
+            <div class="admin-form-grid"><label><span>Practice name</span><input name="businessName" maxlength="80" required></label><label><span>City or neighborhood</span><input name="location" maxlength="100"></label><label><span>Contact email</span><input name="email" type="email" maxlength="120"></label><label><span>Phone</span><input name="phone" type="tel" maxlength="30"></label></div>
+            <div class="admin-form-actions"><small>This site uses fixed page and post fields—simple to maintain.</small><button type="submit" class="admin-primary">Save details</button></div>
+          </form>
+        </section>
+        <section class="panel-admin admin-card">
+          <div class="admin-card-heading"><div><span class="admin-section-index">02 / APPEARANCE</span><h2>Make it feel like you</h2><p>Adjust the theme without editing code.</p></div><span class="card-icon card-icon-theme">◌</span></div>
+          <form id="themeForm" class="admin-form" method="post" action="/api/site">
+            <div class="admin-theme-layout"><label><span>Site layout</span><select name="theme"><option value="canopy">Canopy · calm and grounded</option><option value="clay">Soft clay · warm and welcoming</option><option value="coastal">Coastal · bright and clear</option><option value="editorial">Editorial · classic sidebar layout</option><option value="neat">Neat · portfolio and agency</option><option value="launcher">Launcher · bold full-site landing</option><option value="air">Air · clean with vibrant accents</option></select></label><label id="editorialAccentField"><span>Editorial accent</span><select name="editorialAccent"><option value="black">Black</option><option value="teal">Teal</option><option value="forest">Dark green</option></select></label></div>
+            <div class="admin-theme-row"><label><span>Brand color</span><div class="admin-color-control"><input name="primaryColor" type="color"><span id="colorReadout">#376F62</span></div></label><label><span>Accent color</span><div class="admin-color-control"><input name="accentColor" type="color"><span id="accentReadout">#E9B36E</span></div></label><label><span>Page background</span><div class="admin-color-control"><input name="paperColor" type="color"><span id="paperReadout">#FBF8F1</span></div></label><label><span>Typography</span><select name="fontStyle"><option value="serif">Editorial serif</option><option value="sans">Modern sans</option></select></label></div>
+            <div class="theme-preview-box" id="themePreviewBox"><span class="theme-mini-mark" id="themeMiniMark">✳</span><span><strong id="themePreviewName">Practice name</strong><small id="themePreviewLayout">Thoughtful care. Clear answers.</small></span><button type="submit" class="admin-primary">Save appearance</button></div>
+          </form>
+        </section>
+        <section class="panel-admin admin-card blog-admin-card" id="blogEditor">
+          <div class="admin-card-heading"><div><span class="admin-section-index">03 / BLOG CMS</span><h2>Helpful notes, simply managed.</h2><p>Fixed post fields plus a required feature image and an optional image gallery.</p></div><span class="card-icon card-icon-blog">▤</span></div>
+          <form id="postForm" class="admin-form post-form" method="post" action="/api/admin/posts">
+            <input type="hidden" name="id">
+            <div class="admin-form-grid"><label><span>Post title</span><input name="title" maxlength="140" required placeholder="A useful note for your community"></label><label><span>URL slug</span><input name="slug" maxlength="160" placeholder="created-from-title"></label><label class="admin-full"><span>Short excerpt</span><input name="excerpt" maxlength="260" placeholder="A sentence or two that introduces the article"></label><label class="admin-full"><span>Article body</span><textarea name="body" rows="5" maxlength="12000" required placeholder="Write your article here. Plain text is supported."></textarea></label><label class="admin-full"><span>Feature image URL</span><input name="featureImageUrl" type="text" inputmode="url" maxlength="2048" placeholder="https://example.com/feature.jpg"><small>Required. Leave blank to use the first image in the post gallery below.</small></label><label class="admin-full"><span>Feature image alt text</span><input name="featureImageAlt" maxlength="180" placeholder="Describe the feature image"></label><div class="post-gallery-editor admin-full"><div class="post-gallery-heading"><span><strong>Article gallery</strong><small>Optional images appear after the article body.</small></span><button type="button" id="addPostGalleryImage">Add image</button></div><div class="post-gallery-note">If the feature image URL is blank, the first gallery image becomes the hero banner.</div><div id="postGalleryRows" class="post-gallery-rows"></div></div><label><span>Category</span><input name="category" maxlength="60" placeholder="Practice notes"></label><label><span>Publish status</span><select name="status"><option value="draft">Draft</option><option value="published">Published</option></select></label></div>
+            <div class="admin-form-actions"><small>No custom post types or block editor—just the fields your team needs.</small><button type="submit" class="admin-primary">Save post</button></div>
+          </form>
+          <div class="posts-admin-list"><div class="posts-admin-header"><strong>Your posts</strong><span id="postCount">0 posts</span></div><div id="postsList" class="posts-list"><p class="empty-posts">Connect your owner key to manage blog posts.</p></div></div>
+        </section>
+        <section class="panel-admin admin-card gallery-admin-card" id="galleryEditor">
+          <div class="admin-card-heading"><div><span class="admin-section-index">04 / GALLERY CMS</span><h2>Show a little more of practice life.</h2><p>Fixed gallery fields: title, image URL, alt text, caption, category, status and order.</p></div><span class="card-icon card-icon-gallery">▧</span></div>
+          <form id="galleryForm" class="admin-form gallery-form" method="post" action="/api/admin/gallery">
+            <input type="hidden" name="id">
+            <div class="admin-form-grid"><label><span>Item title</span><input name="title" maxlength="120" required placeholder="A warm welcome"></label><label><span>Category</span><input name="category" maxlength="60" placeholder="Practice life"></label><label class="admin-full"><span>Image URL (optional)</span><input name="imageUrl" type="text" inputmode="url" maxlength="2048" placeholder="https://example.com/clinic-photo.jpg"><small>Use HTTPS or a same-site path. Leave blank for a designed color illustration.</small></label><label class="admin-full"><span>Image alt text</span><input name="altText" maxlength="180" placeholder="Describe the image for screen readers"></label><label class="admin-full"><span>Caption</span><input name="caption" maxlength="300" placeholder="A short note about this moment"></label><label><span>Display order</span><input name="sortOrder" type="number" min="0" max="9999" value="0"></label><label><span>Publish status</span><select name="status"><option value="draft">Draft</option><option value="published">Published</option></select></label></div>
+            <div class="admin-form-actions"><small>Image URL and description are fixed fields; no custom blocks.</small><button type="submit" class="admin-primary">Save gallery item</button></div>
+          </form>
+          <div class="posts-admin-list"><div class="posts-admin-header"><strong>Your gallery</strong><span id="galleryCount">0 items</span></div><div id="galleryList" class="gallery-admin-list"><p class="empty-posts">Connect your owner key to manage gallery items.</p></div></div>
+        </section>
+        <section class="panel-admin admin-card availability-admin-card" id="availabilityManager">
+          <div class="admin-card-heading"><div><span class="admin-section-index">05 / CONSULTATION AVAILABILITY</span><h2>Publish next month’s calendar.</h2><p>Set weekly hours, then add date-specific open hours or closures. Times are generated in 30-minute slots.</p></div><span class="card-icon card-icon-calendar">◷</span></div>
+          <form id="availabilityForm" class="admin-form availability-form" method="post" action="/api/admin/availability">
+            <div class="schedule-month-row"><label><span>Month to publish</span><input id="availabilityMonth" name="month" type="month" required></label><div class="schedule-deadline" id="scheduleDeadline">Schedule deadline</div></div>
+            <div class="schedule-section-heading"><strong>Weekly hours</strong><small>Leave a day unchecked when the practice is closed.</small></div>
+            <div class="weekly-hours-grid" id="weeklyRulesRows">
+              <div class="schedule-day-row" data-weekday="1"><label class="schedule-day-toggle"><input type="checkbox" data-enabled><span>Monday</span></label><label>From<input type="time" data-start step="1800" value="09:00"></label><label>Until<input type="time" data-end step="1800" value="17:00"></label></div>
+              <div class="schedule-day-row" data-weekday="2"><label class="schedule-day-toggle"><input type="checkbox" data-enabled><span>Tuesday</span></label><label>From<input type="time" data-start step="1800" value="09:00"></label><label>Until<input type="time" data-end step="1800" value="17:00"></label></div>
+              <div class="schedule-day-row" data-weekday="3"><label class="schedule-day-toggle"><input type="checkbox" data-enabled><span>Wednesday</span></label><label>From<input type="time" data-start step="1800" value="09:00"></label><label>Until<input type="time" data-end step="1800" value="17:00"></label></div>
+              <div class="schedule-day-row" data-weekday="4"><label class="schedule-day-toggle"><input type="checkbox" data-enabled><span>Thursday</span></label><label>From<input type="time" data-start step="1800" value="09:00"></label><label>Until<input type="time" data-end step="1800" value="17:00"></label></div>
+              <div class="schedule-day-row" data-weekday="5"><label class="schedule-day-toggle"><input type="checkbox" data-enabled><span>Friday</span></label><label>From<input type="time" data-start step="1800" value="09:00"></label><label>Until<input type="time" data-end step="1800" value="17:00"></label></div>
+              <div class="schedule-day-row" data-weekday="6"><label class="schedule-day-toggle"><input type="checkbox" data-enabled><span>Saturday</span></label><label>From<input type="time" data-start step="1800" value="09:00"></label><label>Until<input type="time" data-end step="1800" value="13:00"></label></div>
+              <div class="schedule-day-row" data-weekday="0"><label class="schedule-day-toggle"><input type="checkbox" data-enabled><span>Sunday</span></label><label>From<input type="time" data-start step="1800" value="09:00"></label><label>Until<input type="time" data-end step="1800" value="13:00"></label></div>
+            </div>
+            <div class="schedule-section-heading schedule-exception-heading"><span><strong>Date exceptions</strong><small>Open hours replace that day’s weekly rule; closures remove it.</small></span><button type="button" id="addScheduleException">Add date</button></div>
+            <div id="availabilityExceptions" class="availability-exceptions"><p class="schedule-empty">No date-specific changes.</p></div>
+            <div class="schedule-deadline-note">For the next month, publish by two days before this month ends. A missed month stays unavailable. Reserved appointments cannot be removed from the calendar.</div>
+            <div class="admin-form-actions"><small id="availabilityScheduleMessage">No schedule has been loaded.</small><button type="submit" class="admin-primary" id="publishAvailabilityButton">Publish availability</button></div>
+          </form>
+        </section>
+        <section class="panel-admin admin-card appointment-admin-card" id="appointmentManager">
+          <div class="admin-card-heading"><div><span class="admin-section-index">06 / SCHEDULING</span><h2>Consultations & follow-up</h2><p>Reservations are immediate. Owner cancellations need 24 hours’ notice; clients can cancel from their account at any time. Optional clinical or non-clinical notes appear only in the linked client’s account. This starter is not a compliant EHR; review privacy and security before entering sensitive clinical details.</p></div><span class="card-icon card-icon-calendar">◷</span></div>
+          <div class="appointment-toolbar"><span id="appointmentCount">Recent & upcoming consultations</span><button type="button" id="refreshAppointments">Refresh list ↻</button></div>
+          <div id="appointmentsList" class="appointments-list"><p class="empty-posts">Connect your owner key to review appointment requests.</p></div>
+        </section>
+      </div>
+      <aside class="admin-aside">
+        <article class="admin-aside-card"><div class="aside-icon">✧</div><span class="admin-section-index">OWNER CONTROL</span><h3>Small edits.<br>Big welcome.</h3><p>Update your brand colors, contact details and helpful posts. The appointment flow stays consistent across both deployments.</p><a href="/appointments.html" id="bookingAsideLink">See your appointments page ↗</a></article>
+        <article class="admin-aside-card setup-aside"><span class="admin-section-index">DEPLOYMENT STATUS</span><div class="aside-status"><i></i><strong>Connected site</strong></div><p id="siteIdLabel">Site ID: __SITE_ID__</p><div class="aside-divider"></div><div class="aside-destinations"><span>Vercel</span><span>Cloudflare Workers</span></div><small>Both deployments use the same Neon database.</small></article>
+        <div class="admin-note"><span>i</span><p>For security, sign out of shared devices. Your key is cleared when this browser tab session ends.</p></div>
+      </aside>
+    </section>
+    <footer class="admin-footer"><span>Owner studio</span><span>·</span><a href="/">Back to website</a><span class="admin-footer-spacer"></span><span>Carefully simple by design.</span></footer>
+  </main>
+  <div class="site-toast" id="adminToast" aria-live="polite"></div>
+</body>
+</html>

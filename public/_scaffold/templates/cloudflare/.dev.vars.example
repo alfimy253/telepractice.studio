@@ -1,0 +1,4 @@
+# Copy to .dev.vars for local Wrangler development.
+DATABASE_URL="postgresql://USER:PASSWORD@HOST.neon.tech/DB?sslmode=require"
+ADMIN_API_KEY="replace-with-a-long-random-owner-key"
+CSRF_SECRET="replace-with-a-different-32-byte-random-secret"

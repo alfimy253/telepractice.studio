@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="__PAPER_COLOR__"><meta name="description" content="View consultation availability at __BUSINESS_NAME__. ">
+  <title>Appointments · __BUSINESS_NAME__</title>
+  <link rel="stylesheet" href="/site.css">
+  <script src="/site-config.js" defer></script><script src="/site.js" defer></script><script src="/appointments.js" defer></script>
+</head>
+<body class="appointments-page">
+  <div class="announcement"><span class="announcement-dot"></span><span>Consultations, at your pace</span><span class="announcement-separator">·</span><span id="appointmentAnnouncement">View this practice’s monthly availability</span></div>
+  <header class="site-header">
+    <a class="site-brand" href="/" aria-label="Home"><span class="brand-symbol" id="brandSymbol">✳</span><span><strong id="brandName">__BRAND_NAME__</strong><small id="brandSubline">CARE THAT FEELS PERSONAL</small></span></a>
+    <button class="nav-menu" id="navMenu" type="button" aria-label="Open menu"><span></span><span></span></button>
+    <nav class="site-nav" id="siteNav" aria-label="Main navigation"><a href="/#care">Our care</a><a href="/#about">Our approach</a><a href="/#gallery" id="galleryNav">Gallery</a><a href="/#journal" id="journalNav">Journal</a><a href="/appointments.html" id="appointmentsNav" aria-current="page">Appointments</a><a href="/#contact">Contact</a></nav>
+    <a class="header-cta" href="/admin.html">Owner area <span>↗</span></a>
+  </header>
+  <main id="appointmentsMain">
+    <section class="appointments-hero section-wrap">
+      <div><span class="eyebrow"><span></span> A TIME THAT WORKS FOR YOU</span><h1>Let’s find a time<br><em>that feels right.</em></h1><p>Explore the practice’s published consultation calendar. Available times are open to reserve after you sign in.</p></div>
+      <div class="appointments-hero-note"><span class="note-mark">✳</span><span><strong>Good care starts with a good conversation.</strong><small>All times are shown in the practice’s local time.</small></span></div>
+    </section>
+    <section class="appointments-dashboard section-wrap" aria-label="Monthly consultation availability">
+      <div class="appointments-calendar-card">
+        <div class="calendar-toolbar"><button type="button" id="previousMonth" aria-label="Previous month">←</button><div><span class="calendar-kicker">OWNER-PUBLISHED SCHEDULE</span><h2 id="calendarMonthLabel">Loading month…</h2></div><button type="button" id="nextMonth" aria-label="Next month">→</button></div>
+        <p class="calendar-status" id="calendarStatus" aria-live="polite">Checking the practice calendar…</p>
+        <div class="calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+        <div class="calendar-days" id="calendarDays" role="grid" aria-label="Available consultation dates"></div>
+        <div class="calendar-legend"><span><i class="legend-open"></i> Times available</span><span><i class="legend-full"></i> Fully booked</span></div>
+        <div class="calendar-slots" id="calendarSlots"><div class="slot-empty">Choose a highlighted date to see open consultation times.</div></div>
+      </div>
+      <aside class="calendar-capacity-card">
+        <span class="eyebrow"><span></span> THIS MONTH, AT A GLANCE</span>
+        <div class="capacity-emoji" aria-hidden="true">✿</div>
+        <div class="capacity-percent" id="capacityPercent">0%</div>
+        <p class="capacity-caption">of this month’s published consultation times are reserved</p>
+        <div class="capacity-meter" id="capacityMeter" role="progressbar" aria-label="Monthly consultation schedule fill" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="capacityFill"></span></div>
+        <div class="capacity-counts"><span><strong id="bookedCount">0</strong> reserved</span><span><strong id="availableCount">0</strong> open</span></div>
+        <p class="capacity-detail" id="capacityDetail">No monthly schedule has been published yet.</p>
+        <div class="capacity-footnote"><span>✦</span><small>Availability is updated as consultations are reserved or cancelled.</small></div>
+      </aside>
+    </section>
+    <section class="reservation-area section-wrap" id="reservationArea">
+      <div class="reservation-card" id="reservationCard" hidden>
+        <div><span class="calendar-kicker">YOUR SELECTED TIME</span><h2 id="selectedSlotLabel">Choose a time above</h2><p>Appointments are reserved immediately when you confirm.</p></div>
+        <form id="reservationForm" class="reservation-form">
+          <label><span>Type of consultation</span><select id="reservationService" name="service" required><option value="">Choose a service</option></select></label>
+          <label><span id="reservationContextLabel">Optional note for the practice</span><input id="reservationContext" name="context" maxlength="100" placeholder="A short detail to help us prepare"></label>
+          <label class="reservation-consent"><input id="reservationConsent" type="checkbox" required><span>I understand this time will be reserved for my account.</span></label>
+          <button type="submit" class="button button-primary" id="reserveButton">Reserve consultation <span>↗</span></button>
+          <p id="reservationMessage" class="reservation-message" aria-live="polite"></p>
+        </form>
+      </div>
+    </section>
+    <section class="client-account-section section-wrap" id="clientAccountSection">
+      <div class="account-heading"><div><span class="eyebrow"><span></span> YOUR PRIVATE ACCOUNT</span><h2>Stay in the loop<br><em>with your care team.</em></h2><p>Sign in to reserve a time and see your upcoming consultations and private notes from the practice.</p></div><span class="account-sparkle" aria-hidden="true">✦</span></div>
+      <div class="account-card">
+        <div id="guestAccountPanel" class="guest-account-panel">
+          <div class="auth-form-column">
+            <form id="clientLoginForm" class="client-auth-form">
+              <span class="form-step">WELCOME BACK</span><h3>Sign in</h3>
+              <label><span>Email address</span><input name="email" type="email" maxlength="120" autocomplete="email" required placeholder="you@example.com"></label>
+              <label><span>Password</span><input name="password" type="password" maxlength="128" autocomplete="current-password" required placeholder="Your password"></label>
+              <button type="submit" class="button button-primary">Sign in <span>↗</span></button><p class="auth-message" id="loginMessage" aria-live="polite"></p>
+            </form>
+          </div>
+          <div class="auth-form-column auth-form-register">
+            <form id="clientRegisterForm" class="client-auth-form">
+              <span class="form-step">NEW TO THIS PRACTICE?</span><h3>Create an account</h3>
+              <label><span>Your name</span><input name="name" maxlength="100" autocomplete="name" required placeholder="First and last name"></label>
+              <label><span>Email address</span><input name="email" type="email" maxlength="120" autocomplete="email" required placeholder="you@example.com"></label>
+              <label><span>Phone number</span><input name="phone" type="tel" maxlength="30" autocomplete="tel" required placeholder="Best number to reach you"></label>
+              <label><span>Create password <small>(12 characters minimum)</small></span><input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required placeholder="At least 12 characters"></label>
+              <button type="submit" class="button button-primary">Create account <span>↗</span></button><p class="auth-message" id="registerMessage" aria-live="polite"></p>
+            </form>
+          </div>
+        </div>
+        <div id="signedInAccountPanel" class="signed-in-account-panel" hidden>
+          <div class="signed-in-heading"><div><span class="form-step">SIGNED IN AS</span><h3 id="clientWelcome">Your account</h3><p id="clientEmail"></p></div><button type="button" id="clientLogout" class="logout-button">Sign out</button></div>
+          <div class="client-appointments-block"><div class="client-appointments-heading"><div><span class="form-step">YOUR CONSULTATIONS</span><h3>Appointments & notes</h3></div><button type="button" id="refreshClientAppointments" class="refresh-button">Refresh ↻</button></div><div id="clientAppointmentsList" class="client-appointments-list"><p class="slot-empty">Loading your consultations…</p></div></div>
+        </div>
+      </div>
+      <p class="account-privacy-note">Your account is private to this practice. Consultation notes are visible only to the practice owner and the client booked for that consultation. This starter is not a certified electronic health-record system.</p>
+    </section>
+  </main>
+  <footer class="site-footer" id="contact">
+    <div class="footer-top"><a class="site-brand footer-brand" href="/"><span class="brand-symbol" id="footerSymbol">✳</span><span><strong id="footerBrandName">__BRAND_NAME__</strong><small id="footerBrandSubline">CARE THAT FEELS PERSONAL</small></span></a><p>Thoughtful care. Clear answers.<br>A familiar place to turn.</p><div class="footer-contact"><span id="footerLocation">__LOCATION__</span><a id="footerEmail" href="mailto:__EMAIL__">__EMAIL__</a><a id="footerPhone" href="tel:+63281234567">__PHONE__</a></div><a class="back-top" href="/">Home ↑</a></div>
+    <div class="footer-bottom"><span>© <span id="yearNow"></span> <span id="footerLegalName">__BUSINESS_NAME__</span>. All rights reserved.</span><span>Privacy · Accessibility</span></div>
+  </footer>
+  <div class="site-toast" id="siteToast" aria-live="polite"></div>
+</body>
+</html>

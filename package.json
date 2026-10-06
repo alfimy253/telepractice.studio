@@ -1,0 +1,15 @@
+{
+  "name": "canopy-studio-cloudflare-admin",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Workers runtime for the Canopy Studio white-label site builder",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "wrangler deploy --dry-run"
+  },
+  "devDependencies": { "wrangler": "4.147.0" }
+}

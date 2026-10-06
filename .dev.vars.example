@@ -1,0 +1,2 @@
+# Configure a different random secret for each deployment.
+CSRF_SECRET=replace-with-a-long-random-secret
