@@ -497,7 +497,10 @@ async function downloadPackage() {
   document.querySelectorAll('[data-deployment-target]').forEach((button) => { button.disabled = true; });
   try {
     const csrfResponse = await fetch('/api/csrf', { credentials: 'same-origin' });
-    if (!csrfResponse.ok) throw new Error('Could not initialize the secure build session.');
+    if (!csrfResponse.ok) {
+      const error = await csrfResponse.json().catch(() => ({}));
+      throw new Error(error.error || 'Could not initialize the secure build session.');
+    }
     const csrf = await csrfResponse.json();
     csrfToken = csrf.token;
     const response = await fetch('/api/generate', {

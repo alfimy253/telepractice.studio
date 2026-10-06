@@ -18,6 +18,13 @@ function json(value, status = 200, extra = {}) {
   return new Response(JSON.stringify(value), { status, headers });
 }
 function failure(message, status = 400) { return json({ error: message }, status); }
+const LOCAL_CSRF_SECRET = 'canopy-builder-local-development-only';
+function csrfSecret(request, env) {
+  const configured = String(env.CSRF_SECRET || '').trim();
+  if (configured) return configured;
+  const hostname = new URL(request.url).hostname;
+  return ['localhost', '127.0.0.1', '[::1]'].includes(hostname) ? LOCAL_CSRF_SECRET : '';
+}
 function base64url(bytes) {
   let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
@@ -41,9 +48,10 @@ function equal(left, right) {
   return difference === 0;
 }
 async function issueCsrf(request, env) {
-  if (!env.CSRF_SECRET) return failure('Set CSRF_SECRET as a Worker secret before using the builder.', 503);
+  const secret = csrfSecret(request, env);
+  if (!secret) return failure('Set CSRF_SECRET as a Worker secret before using the builder.', 503);
   const nonce = base64url(crypto.getRandomValues(new Uint8Array(24)));
-  const token = `${nonce}.${base64url(await sign(nonce, env.CSRF_SECRET))}`;
+  const token = `${nonce}.${base64url(await sign(nonce, secret))}`;
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
   return json({ token }, 200, { 'Set-Cookie': `${COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600${secure}` });
 }
@@ -52,10 +60,11 @@ async function csrfValid(request, env) {
   if (origin && origin !== url.origin) return false;
   const cookie = cookieValue(request.headers.get('Cookie'), COOKIE);
   const header = request.headers.get('X-CSRF-Token');
-  if (!cookie || !header || !equal(cookie, header) || !env.CSRF_SECRET) return false;
+  const secret = csrfSecret(request, env);
+  if (!cookie || !header || !equal(cookie, header) || !secret) return false;
   const [nonce, signature, ...rest] = header.split('.');
   if (!nonce || !signature || rest.length) return false;
-  return equal(signature, base64url(await sign(nonce, env.CSRF_SECRET)));
+  return equal(signature, base64url(await sign(nonce, secret)));
 }
 export default {
   async fetch(request, env) {

@@ -1,6 +1,6 @@
 # Canopy Studio — Cloudflare admin builder
 
-This is a deployable Cloudflare Workers version of the Canopy Studio website builder. It serves the HTML/CSS/JavaScript admin interface and packages a selected Vercel or Cloudflare practice-site project into a ZIP. The builder itself is stateless; it does not need Neon or retain practice data.
+This is a deployable Cloudflare Workers version of the Canopy Studio website builder. It serves the HTML/CSS/JavaScript admin interface and packages a selected Vercel or Cloudflare practice-site project into a ZIP. The builder itself is stateless; it does not need Neon or retain practice data. The generated practice-site packages include a Neon serverless connection helper and keep their database URL in deployment secrets.
 
 ## Deploy the builder to Cloudflare
 
@@ -13,7 +13,7 @@ npx wrangler secret put CSRF_SECRET
 npm run deploy
 ```
 
-Use a long, unique random value for `CSRF_SECRET`. For local development, copy `.dev.vars.example` to `.dev.vars` and replace the sample secret, then run:
+Use a long, unique random value for `CSRF_SECRET`. For local development, copy `.dev.vars.example` to `.dev.vars`, replace the sample secret, and run. If no local vars file exists, `localhost` uses a development-only CSRF fallback so the Generate button still works; deployed Workers still require the secret:
 
 ```bash
 npm run dev

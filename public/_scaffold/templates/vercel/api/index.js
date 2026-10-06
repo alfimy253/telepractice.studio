@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
-import { neon } from '@neondatabase/serverless';
+import { createNeonClient } from '../db/connection.js';
 import { createHmac, randomBytes, timingSafeEqual, webcrypto } from 'node:crypto';
 
 const app = express();
@@ -26,10 +26,7 @@ app.use(helmet({
 app.use(express.json({ limit: MAX_BODY, strict: true }));
 app.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
 
-const getDb = () => {
-  if (!process.env.DATABASE_URL) throw new Error('Database is not configured.');
-  return neon(process.env.DATABASE_URL);
-};
+const getDb = () => createNeonClient(process.env.DATABASE_URL);
 const csrfSecret = () => process.env.CSRF_SECRET || process.env.ADMIN_API_KEY || (process.env.NODE_ENV === 'production' ? '' : 'local-development-only-change-before-deploy');
 const csrfCookie = 'practice_csrf';
 const clientSessionCookie = 'canopy_client';
