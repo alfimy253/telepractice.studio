@@ -30,6 +30,43 @@ function cleanTimeZone(value, fallback = 'Asia/Manila') {
   const candidate = cleanText(value, 64) || fallback;
   try { new Intl.DateTimeFormat('en-US', { timeZone: candidate }); return candidate; } catch (_) { return fallback; }
 }
+function cleanBannerImage(value) {
+  const raw = cleanText(value, 2048);
+  if (!raw) return '';
+  if (raw.startsWith('/') && !raw.startsWith('//')) return raw;
+  try { const url = new URL(raw); return url.protocol === 'https:' ? url.href : null; } catch (_) { return null; }
+}
+function cleanCustomPageUrl(value) {
+  let raw = cleanText(value, 120).replace(/^\/+|\/+$/g, '');
+  if (!raw || /[?#:]/.test(raw) || raw.includes('/')) return '';
+  raw = raw.replace(/\.html?$/i, '');
+  if (!raw) return '';
+  const slug = slugify(raw);
+  if (['admin','appointments','api','assets','images','index'].includes(slug)) return '';
+  return `/${slug}.html`;
+}
+function cleanCustomPages(value, fallback = []) {
+  const pages = Array.isArray(value) ? value : Array.isArray(fallback) ? fallback : [];
+  const seen = new Set();
+  return pages.slice(0, 8).flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const menuName = cleanText(item.menuName, 80);
+    const pageTitle = cleanText(item.pageTitle, 120);
+    const pageContent = cleanText(item.pageContent, 6000);
+    const url = cleanCustomPageUrl(item.url);
+    const imageUrl = cleanBannerImage(item.imageUrl);
+    if (!menuName || !pageTitle || !pageContent || !url || imageUrl === null || seen.has(url)) return [];
+    seen.add(url);
+    return [{ id: cleanText(item.id, 48, url.slice(1, -5)), menuName, url, pageTitle, pageContent, imageUrl }];
+  });
+}
+function cleanPaymentDetails(value) {
+  const payments = { ...(DEFAULT_CONFIG.payments || {}), ...(value || {}) };
+  return {
+    gcashName: cleanText(payments.gcashName, 80), gcashNumber: cleanText(payments.gcashNumber, 40),
+    mayaName: cleanText(payments.mayaName, 80), mayaNumber: cleanText(payments.mayaNumber, 40)
+  };
+}
 function cleanSiteConfig(input = {}) {
   const merged = { ...DEFAULT_CONFIG, ...input };
   return {
@@ -46,7 +83,9 @@ function cleanSiteConfig(input = {}) {
     fontStyle: merged.fontStyle === 'sans' ? 'sans' : 'serif',
     theme: ['canopy','clay','coastal','editorial','neat','launcher','air'].includes(merged.theme) ? merged.theme : DEFAULT_CONFIG.theme,
     editorialAccent: ['black','teal','forest'].includes(merged.editorialAccent) ? merged.editorialAccent : 'black',
-    features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false }
+    features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false },
+    payments: cleanPaymentDetails(merged.payments),
+    customPages: cleanCustomPages(merged.customPages, DEFAULT_CONFIG.customPages)
   };
 }
 function localToday() { return new Intl.DateTimeFormat('en-CA', { timeZone: SITE_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
@@ -281,10 +320,10 @@ function adminOk(request, env) {
 function adminFailure(env) { return env.ADMIN_API_KEY ? error('Owner key is not valid.', 401) : error('Owner access has not been configured. Set the ADMIN_API_KEY Worker secret.', 503); }
 async function readJson(request) {
   const contentLength = Number(request.headers.get('Content-Length') || 0);
-  if (contentLength > 64 * 1024) return null;
+  if (contentLength > 256 * 1024) return null;
   try {
     const text = await request.text();
-    if (encoder.encode(text).length > 64 * 1024) return null;
+    if (encoder.encode(text).length > 256 * 1024) return null;
     return JSON.parse(text);
   } catch (_) { return null; }
 }

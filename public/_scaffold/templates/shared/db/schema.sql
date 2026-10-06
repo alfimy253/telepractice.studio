@@ -1,5 +1,5 @@
--- One deployment per practice. SITE_ID scopes every row so Vercel and Cloudflare
--- can safely share this Neon database and the same practice data.
+-- SITE_ID scopes every row to one practice site in the Neon database.
+-- The generated package targets one selected hosting runtime.
 CREATE TABLE IF NOT EXISTS sites (
   site_id text PRIMARY KEY,
   config jsonb NOT NULL,

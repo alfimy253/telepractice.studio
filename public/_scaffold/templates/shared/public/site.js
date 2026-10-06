@@ -23,6 +23,48 @@
     document.body.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air');
     if (['canopy','clay','coastal','editorial','neat','launcher','air'].includes(site.theme)) document.body.classList.add(`theme-${site.theme}`);
   }
+  function renderCustomNavigation() {
+    const pageList = Array.isArray(site.customPages) ? site.customPages : [];
+    const safePages = pageList.filter((page) => page && page.menuName && /^\/[a-z0-9-]+\.html$/i.test(String(page.url || '')));
+    ['siteNav', 'editorialSiteNav'].forEach((id) => {
+      const nav = $(id);
+      if (!nav) return;
+      nav.querySelectorAll('[data-custom-page-link]').forEach((link) => link.remove());
+      safePages.forEach((page) => {
+        const link = document.createElement('a');
+        link.href = page.url;
+        link.textContent = page.menuName;
+        link.dataset.customPageLink = 'true';
+        nav.appendChild(link);
+      });
+    });
+  }
+  function renderPaymentDetails() {
+    const section = $('footerPayments');
+    const list = $('paymentDetails');
+    if (!section || !list) return;
+    const details = site.payments || {};
+    const methods = [
+      { name: 'GCash', account: details.gcashName, number: details.gcashNumber },
+      { name: 'Maya', account: details.mayaName, number: details.mayaNumber }
+    ].filter((item) => String(item.account || '').trim() || String(item.number || '').trim());
+    list.replaceChildren();
+    methods.forEach((item) => {
+      const method = document.createElement('div'); method.className = 'footer-payment-method';
+      const name = document.createElement('strong'); name.textContent = item.name;
+      method.appendChild(name);
+      if (String(item.account || '').trim()) {
+        const account = document.createElement('span'); account.textContent = String(item.account).trim();
+        method.appendChild(account);
+      }
+      if (String(item.number || '').trim()) {
+        const number = document.createElement('span'); number.textContent = String(item.number).trim();
+        method.appendChild(number);
+      }
+      list.appendChild(method);
+    });
+    section.classList.toggle('hidden', !methods.length);
+  }
   function applyContent() {
     const title = site.businessName || 'Practice';
     const brand = site.brandName || title;
@@ -37,6 +79,8 @@
     setLink('footerEmail', `mailto:${site.email}`);
     setLink('footerPhone', `tel:${String(site.phone || '').replace(/[^+\d]/g, '')}`);
     setLink('phoneLink', `tel:${String(site.phone || '').replace(/[^+\d]/g, '')}`, site.phone);
+    renderCustomNavigation();
+    renderPaymentDetails();
     text('brandSymbol', vertical.icon); text('footerSymbol', vertical.icon); text('labelIcon', vertical.icon);
     text('editorialBrandSymbol', vertical.icon); text('editorialBrandName', brand); text('editorialBrandLocation', place);
     text('editorialSidebarCta', vertical.book);
@@ -217,7 +261,7 @@
   $('articleModal')?.addEventListener('click', (event) => { if (event.target === $('articleModal')) closeArticle(); });
   document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && $('articleModal')?.classList.contains('open')) closeArticle(); });
   $('navMenu')?.addEventListener('click', () => $('siteNav')?.classList.toggle('open'));
-  document.querySelectorAll('#siteNav a').forEach((link) => link.addEventListener('click', () => $('siteNav')?.classList.remove('open')));
+  $('siteNav')?.addEventListener('click', (event) => { if (event.target.closest('a')) $('siteNav')?.classList.remove('open'); });
   setTheme(); applyContent();
   refreshSiteConfig();
 })();

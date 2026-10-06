@@ -55,6 +55,48 @@ const DEMO_GALLERY = [
 function clean(value, max, fallback = '') { return String(value ?? fallback).trim().slice(0, max); }
 function slugify(value) { return String(value || '').normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 45) || 'my-practice'; }
 function validColor(value, fallback) { return /^#[0-9a-f]{6}$/i.test(String(value || '')) ? String(value).toLowerCase() : fallback; }
+const MAX_CUSTOM_PAGES = 8;
+const RESERVED_PAGE_SLUGS = new Set(['admin', 'appointments', 'api', 'assets', 'images', 'index']);
+function safePageImage(value) {
+  const raw = clean(value, 2048);
+  if (!raw) return '';
+  if (raw.startsWith('/') && !raw.startsWith('//')) return raw;
+  try { const url = new URL(raw); return url.protocol === 'https:' ? url.href : null; } catch (_) { return null; }
+}
+function safePageUrl(value) {
+  let raw = clean(value, 120).replace(/^\/+|\/+$/g, '');
+  if (!raw || /[?#:]/.test(raw) || raw.includes('/')) return null;
+  raw = raw.replace(/\.html?$/i, '');
+  if (!raw) return null;
+  const slug = slugify(raw);
+  if (RESERVED_PAGE_SLUGS.has(slug)) return null;
+  return { slug, url: `/${slug}.html` };
+}
+function normalizeCustomPages(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > MAX_CUSTOM_PAGES) throw new Error(`Add no more than ${MAX_CUSTOM_PAGES} custom pages.`);
+  const seen = new Set();
+  return value.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Each custom page must be a page configuration object.');
+    const menuName = clean(item.menuName, 80);
+    const pageTitle = clean(item.pageTitle, 120);
+    const pageContent = clean(item.pageContent, 6000);
+    const route = safePageUrl(item.url);
+    if (!menuName || !pageTitle || !pageContent || !route) throw new Error('Each custom page needs a menu name, unique page URL, page title and page content.');
+    if (seen.has(route.url)) throw new Error(`Each custom page URL must be unique (${route.url} is repeated).`);
+    const imageUrl = safePageImage(item.imageUrl);
+    if (imageUrl === null) throw new Error('Use an HTTPS URL or a same-site path for a banner image.');
+    seen.add(route.url);
+    return {
+      id: clean(item.id, 48, route.slug) || route.slug,
+      menuName, url: route.url, slug: route.slug, pageTitle, pageContent, imageUrl
+    };
+  });
+}
+function normalizeTarget(value) {
+  if (value === 'vercel' || value === 'cloudflare') return value;
+  throw new Error('Choose either the Vercel or Cloudflare code package.');
+}
 function validTimeZone(value, fallback = 'Asia/Manila') {
   const candidate = clean(value, 64, fallback) || fallback;
   try { new Intl.DateTimeFormat('en-US', { timeZone: candidate }); return candidate; } catch (_) { return fallback; }
@@ -64,6 +106,7 @@ function jsSafeJson(value) { return JSON.stringify(value).replace(/</g, '\\u003c
 function sqlLiteral(value) { return `'${String(value).replace(/'/g, "''")}'`; }
 function normalizeConfig(input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Send a site configuration object.');
+  const target = normalizeTarget(input.target);
   const specialty = input.specialty === 'dental' ? 'dental' : 'veterinary';
   const vertical = VERTICALS[specialty];
   const businessName = clean(input.businessName, 80, `${vertical.brandName}${specialty === 'dental' ? ' Dental Studio' : ' Veterinary Care'}`) || vertical.brandName;
@@ -79,13 +122,20 @@ function normalizeConfig(input = {}) {
     return { ...post, id: `sample-${index + 1}`, featureImageUrl: gallery[0].imageUrl, featureImageAlt: gallery[0].altText, gallery, publishedAt: new Date(Date.now() - (index + 1) * 86400000 * 9).toISOString() };
   });
   return {
-    siteId, specialty, specialtyLabel: vertical.label, businessName,
+    siteId, target, specialty, specialtyLabel: vertical.label, businessName,
     brandName: clean(input.brandName, 80, businessName.replace(/\s+(care|clinic|studio|practice|dental)$/i, '').trim() || vertical.brandName),
     location: clean(input.location, 100, 'Your neighborhood') || 'Your neighborhood', email,
     phone: clean(input.phone, 30, '+1 555 010 0000') || '+1 555 010 0000', timeZone: validTimeZone(input.timeZone), theme, editorialAccent,
     primaryColor: validColor(input.primaryColor, defaultPrimary), accentColor: validColor(input.accentColor, preset.accentColor),
     paperColor: validColor(input.paperColor, preset.paperColor), fontStyle: input.fontStyle === 'sans' ? 'sans' : 'serif',
     features: { blog: input.features?.blog !== false, gallery: input.features?.gallery !== false, scheduling: input.features?.scheduling !== false },
+    payments: {
+      gcashName: clean(input.payments?.gcashName, 80, businessName) || businessName,
+      gcashNumber: clean(input.payments?.gcashNumber, 40, '+63 917 555 0134'),
+      mayaName: clean(input.payments?.mayaName, 80, businessName) || businessName,
+      mayaNumber: clean(input.payments?.mayaNumber, 40, '+63 918 555 0142')
+    },
+    customPages: normalizeCustomPages(input.customPages),
     heroEyebrow: vertical.eyebrow, heroHeadline: vertical.headline, heroText: vertical.heroText,
     services: vertical.services, demoPosts, demoGallery: DEMO_GALLERY.map((item) => ({ ...item })),
     createdAt: clean(input.createdAt, 40, new Date().toISOString())
@@ -96,13 +146,14 @@ function replaceTokens(text, config) {
     '__SITE_ID__': config.siteId, '__SITE_CONFIG_JSON__': jsSafeJson(config),
     '__BUSINESS_NAME__': htmlEscape(config.businessName), '__BRAND_NAME__': htmlEscape(config.brandName),
     '__LOCATION__': htmlEscape(config.location), '__EMAIL__': htmlEscape(config.email),
-    '__PHONE__': htmlEscape(config.phone), '__PAPER_COLOR__': config.paperColor
+    '__PHONE__': htmlEscape(config.phone), '__PAPER_COLOR__': config.paperColor,
+    '__DEPLOY_TARGET__': htmlEscape(config.target === 'cloudflare' ? 'Cloudflare Workers' : 'Vercel')
   };
-  return text.replace(/__SITE_ID__|__SITE_CONFIG_JSON__|__BUSINESS_NAME__|__BRAND_NAME__|__LOCATION__|__EMAIL__|__PHONE__|__PAPER_COLOR__/g, (token) => tokens[token]);
+  return text.replace(/__SITE_ID__|__SITE_CONFIG_JSON__|__BUSINESS_NAME__|__BRAND_NAME__|__LOCATION__|__EMAIL__|__PHONE__|__PAPER_COLOR__|__DEPLOY_TARGET__/g, (token) => tokens[token]);
 }
 function createSeedSql(config) {
   const lines = [
-    '-- Run this file once after schema.sql in the same Neon database used by both deployments.',
+    '-- Run this file once after schema.sql in the Neon database used by this site package.',
     `INSERT INTO sites (site_id, config) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(JSON.stringify(config))}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now();`, ''
   ];
   for (const post of config.demoPosts) {
@@ -114,24 +165,68 @@ function createSeedSql(config) {
 }
 function generatedReadme(config) {
   const code = (value) => String.fromCharCode(96) + value + String.fromCharCode(96);
+  const targetName = config.target === 'cloudflare' ? 'Cloudflare Workers' : 'Vercel';
   const lines = [
-    `# ${config.businessName} — dual deployment`, '',
-    'This white-label website bundle contains a Vercel Node/Express app and a Cloudflare Workers app generated from one practice configuration. Both use the same Neon Postgres schema and SITE_ID.', '',
-    '## Neon setup',
-    `Run ${code('db/schema.sql')} and then ${code('db/seed.sql')} once. The fixed content model includes practice settings, blog posts, gallery items, client accounts, monthly availability, appointments and consultation notes. Every blog post requires a feature image shown as an article hero; if its URL is left blank, the first post-gallery image by display order becomes the feature image. An optional post-specific gallery renders after the article body and remains separate from the practice-wide gallery.`, '',
-    '## Vercel',
-    `Deploy the ${code('vercel/')} folder. Set ${code('DATABASE_URL')}, ${code('ADMIN_API_KEY')} and ${code('CSRF_SECRET')} from ${code('.env.example')}.`, '',
-    '## Cloudflare Workers',
-    `Use Node.js 22+, install in ${code('cloudflare/')}, set ${code('DATABASE_URL')}, ${code('ADMIN_API_KEY')} and ${code('CSRF_SECRET')} as Worker secrets, then run ${code('npm run deploy')}.`, '',
-    `Open ${code('/admin.html')} and enter the owner key. It is stored only in this browser tab's sessionStorage. The editor supports practice details, seven site layouts, three Editorial accent choices, fixed-field blog and gallery CMS, monthly availability, appointment management and private consultation notes. Gallery images accept HTTPS URLs or same-site paths.`, '',
-    '## Appointments and client accounts', '',
-    'Every theme includes an Appointments menu item and dedicated `/appointments.html`. The calendar stays empty until the owner publishes monthly availability. Public visitors can browse open times and a monthly fill meter; its percentage is non-cancelled bookings divided by owner-published slots. Owners set recurring weekly hours in 30-minute intervals plus date-specific openings or closures. Publish next month by two days before the current month ends; a missed month stays unavailable. The default practice timezone is `Asia/Manila`.', '',
-    'Clients self-register with email, phone and a password of at least 12 characters. Passwords use salted PBKDF2 hashes and session tokens are stored hashed in the database and sent in HttpOnly, SameSite cookies. A signed-in client reserves a slot immediately, views their own consultations/notes, and can cancel at any time. Owner cancellation requires more than 24 hours’ notice. Email verification and password reset are deferred because no email-delivery provider is configured.', '',
-    'An owner may write an optional clinical or non-clinical note per consultation. Notes are visible only to the owner and linked client. This starter is **not a compliant EHR** and provides no compliance guarantee. Clinical information is sensitive; complete a separate privacy/security/legal review, restrict database access, and do not substitute this starter for an appropriately governed health-record system.', '',
-    'The Node target uses Express and Helmet with signed double-submit CSRF checks; the Cloudflare Worker applies equivalent security headers and CSRF validation. The generator is stateless.', '',
-    `Generated site: **${config.businessName}** (${config.specialtyLabel}) · Site ID: ${code(config.siteId)}`
+    `# ${config.businessName} — ${targetName} code package`, '',
+    `This ZIP contains the ${targetName} project only. It is a source-code package; it does not deploy or publish your website.`, '',
+    '## Database setup',
+    `Create a Neon Postgres database, then run ${code('db/schema.sql')} and ${code('db/seed.sql')} once. The seed file includes the generated site configuration, payment details, custom pages and sample practice content.`, '',
+    config.target === 'vercel' ? '## Deploy to Vercel' : '## Deploy to Cloudflare Workers',
+    config.target === 'vercel'
+      ? `Deploy this folder to Vercel. Configure ${code('DATABASE_URL')}, ${code('ADMIN_API_KEY')} and ${code('CSRF_SECRET')} using ${code('.env.example')}. For local development, run ${code('npm install')} and ${code('npm run dev')}.`
+      : `Use Node.js 22+, run ${code('npm install')}, set ${code('DATABASE_URL')}, ${code('ADMIN_API_KEY')} and ${code('CSRF_SECRET')} with Wrangler secrets, then run ${code('npm run deploy')}. For local development, copy ${code('.dev.vars.example')} to ${code('.dev.vars')} and run ${code('npm run dev')}.`, '',
+    `The public owner editor is ${code('/admin.html')}. Its owner key is stored only in this browser tab's sessionStorage. The site has ${config.customPages.length} custom menu page${config.customPages.length === 1 ? '' : 's'} and GCash/Maya payment details configured in the generated settings.`, '',
+    '## Site notes',
+    'The starter includes fixed-field blog and gallery content, client accounts and appointment scheduling. Appointment availability remains unpublished until the site owner configures it. Review the privacy and security guidance in the owner editor before adding sensitive information. This starter is not a compliant electronic health record system.', '',
+    `Generated practice: **${config.businessName}** (${config.specialtyLabel}) · Site ID: ${code(config.siteId)} · Selected target: **${targetName}**`
   ];
   return lines.join('\n') + '\n';
+}
+function generatedCustomPageHtml(config, page) {
+  const e = htmlEscape;
+  const image = page.imageUrl
+    ? `<img class="custom-page-banner" src="${e(page.imageUrl)}" alt="${e(page.pageTitle)}" loading="eager" decoding="async" referrerpolicy="no-referrer">`
+    : '';
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="${e(config.paperColor)}">
+  <meta name="description" content="${e(page.pageTitle)} — ${e(config.businessName)}">
+  <title>${e(page.pageTitle)} · ${e(config.businessName)}</title>
+  <link rel="stylesheet" href="/site.css">
+  <script src="/site-config.js" defer></script>
+  <script src="/site.js" defer></script>
+</head>
+<body class="custom-page">
+  <div class="announcement"><span class="announcement-dot"></span><span>Taking new clients</span><span class="announcement-separator">·</span><span>Thoughtful care, close to home</span></div>
+  <header class="site-header">
+    <a class="site-brand" href="/" aria-label="Home"><span class="brand-symbol" id="brandSymbol">✳</span><span><strong id="brandName">${e(config.brandName)}</strong><small id="brandSubline">CARE THAT FEELS PERSONAL</small></span></a>
+    <button class="nav-menu" id="navMenu" aria-label="Open menu"><span></span><span></span></button>
+    <nav class="site-nav" id="siteNav" aria-label="Main navigation">
+      <a href="/#care">Our care</a><a href="/#about">Our approach</a><a href="/#gallery" id="galleryNav">Gallery</a><a href="/#journal" id="journalNav">Journal</a><a href="/appointments.html" id="appointmentsNav">Appointments</a><a href="/#contact">Contact</a>
+    </nav>
+    <a class="header-cta" href="/appointments.html" id="headerCta">Request a visit <span>↗</span></a>
+  </header>
+  <main class="custom-page-main section-wrap">
+    <article class="custom-page-card">
+      ${image}
+      <div class="custom-page-copy">
+        <span class="eyebrow"><span></span>${e(page.menuName)}</span>
+        <h1>${e(page.pageTitle)}</h1>
+        <div class="custom-page-content">${e(page.pageContent)}</div>
+      </div>
+    </article>
+  </main>
+  <footer class="site-footer" id="contact">
+    <div class="footer-top"><a class="site-brand footer-brand" href="/"><span class="brand-symbol" id="footerSymbol">✳</span><span><strong id="footerBrandName">${e(config.brandName)}</strong><small id="footerBrandSubline">CARE THAT FEELS PERSONAL</small></span></a><p>Thoughtful care. Clear answers.<br>A familiar place to turn.</p><div class="footer-contact"><span id="footerLocation">${e(config.location)}</span><a id="footerEmail" href="mailto:${e(config.email)}">${e(config.email)}</a><a id="footerPhone" href="tel:${e(config.phone)}">${e(config.phone)}</a></div><div class="footer-payments hidden" id="footerPayments"><span class="footer-payments-label">PAYMENT OPTIONS</span><div class="footer-payment-list" id="paymentDetails"></div></div><a class="back-top" href="/">Home ↑</a></div>
+    <div class="footer-bottom"><span>© <span id="yearNow"></span> <span id="footerLegalName">${e(config.businessName)}</span>. All rights reserved.</span><span>Privacy · Accessibility</span></div>
+  </footer>
+  <div class="site-toast" id="siteToast" aria-live="polite"></div>
+</body>
+</html>
+`;
 }
 async function readScaffold(env, origin, filename) {
   const url = new URL(`/_scaffold/templates/${filename.split('/').map(encodeURIComponent).join('/')}`, origin);
@@ -141,33 +236,35 @@ async function readScaffold(env, origin, filename) {
 }
 async function buildFiles(input, env, origin) {
   const config = normalizeConfig(input);
-  const scaffoldPrefix = 'public/_scaffold/templates/';
+  const target = config.target;
   const manifest = JSON.parse(await readScaffold(env, origin, 'manifest.json'));
   const files = new Map();
+  const publicPath = (relative) => target === 'vercel' ? relative.replace(/^public\//, '') : relative;
+
   for (const relative of manifest.sharedPublic) {
     const content = replaceTokens(await readScaffold(env, origin, `shared/${relative}`), config);
-    files.set(`vercel/${relative.replace(/^public\//, '')}`, content);
-    files.set(`cloudflare/public/${relative.replace(/^public\//, '')}`, content);
+    files.set(publicPath(relative), content);
   }
   for (const relative of manifest.sharedDb) {
-    const content = await readScaffold(env, origin, `shared/${relative}`);
-    files.set(`vercel/${relative}`, content); files.set(`cloudflare/${relative}`, content);
+    files.set(relative, await readScaffold(env, origin, `shared/${relative}`));
   }
-  const schema = await readScaffold(env, origin, 'shared/db/schema.sql');
-  const seed = createSeedSql(config);
-  files.set('vercel/db/schema.sql', schema); files.set('vercel/db/seed.sql', seed);
-  files.set('cloudflare/db/schema.sql', schema); files.set('cloudflare/db/seed.sql', seed);
-  for (const target of ['vercel', 'cloudflare']) {
-    for (const relative of manifest[target]) {
-      const content = replaceTokens(await readScaffold(env, origin, `${target}/${relative}`), config);
-      files.set(`${target}/${relative}`, content);
-    }
+  files.set('db/seed.sql', createSeedSql(config));
+
+  for (const relative of manifest[target]) {
+    const content = replaceTokens(await readScaffold(env, origin, `${target}/${relative}`), config);
+    files.set(relative, content);
   }
+  for (const page of config.customPages) {
+    const pageFile = `${page.slug}.html`;
+    files.set(target === 'vercel' ? pageFile : `public/${pageFile}`, generatedCustomPageHtml(config, page));
+  }
+
   files.set('README.md', generatedReadme(config));
   files.set('manifest.json', JSON.stringify({
-    generator: 'Canopy Studio Cloudflare Builder', version: '1.1.0', siteId: config.siteId,
-    specialty: config.specialty, generatedAt: new Date().toISOString(), targets: ['vercel-node','cloudflare-workers'],
+    generator: 'Canopy Studio Cloudflare Builder', version: '1.2.0', siteId: config.siteId,
+    specialty: config.specialty, generatedAt: new Date().toISOString(), target,
     database: 'Neon Postgres', features: config.features,
+    customPages: config.customPages.map(({ menuName, url, pageTitle }) => ({ menuName, url, pageTitle })),
     config: { businessName: config.businessName, location: config.location, theme: config.theme, primaryColor: config.primaryColor, fontStyle: config.fontStyle }
   }, null, 2) + '\n');
   return { config, files };
@@ -175,6 +272,6 @@ async function buildFiles(input, env, origin) {
 async function generateBundle(input, env, origin) {
   const { config, files } = await buildFiles(input, env, origin);
   const buffer = createZip([...files.entries()]);
-  return { config, buffer, filename: `${config.siteId}-vercel-cloudflare.zip` };
+  return { config, buffer, filename: `${config.siteId}-${config.target}.zip` };
 }
 export { generateBundle, normalizeConfig };

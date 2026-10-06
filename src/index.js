@@ -2,6 +2,7 @@ import { generateBundle } from './generator.js';
 
 const encoder = new TextEncoder();
 const COOKIE = 'canopy_builder_csrf';
+const MAX_CONFIG_BYTES = 256 * 1024;
 function secureHeaders(source = {}) {
   const headers = new Headers(source);
   headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
@@ -65,13 +66,14 @@ export default {
     if (url.pathname === '/api/generate' && request.method === 'POST') {
       if (!await csrfValid(request, env)) return failure('Cross-site request rejected or security token expired.', 403);
       const length = Number(request.headers.get('Content-Length') || 0);
-      if (length > 32768) return failure('The configuration is too large.', 413);
+      if (length > MAX_CONFIG_BYTES) return failure('The configuration is too large.', 413);
       let input;
       try {
         const raw = await request.text();
-        if (encoder.encode(raw).length > 32768) return failure('The configuration is too large.', 413);
+        if (encoder.encode(raw).length > MAX_CONFIG_BYTES) return failure('The configuration is too large.', 413);
         input = JSON.parse(raw);
       } catch (_) { return failure('Send a valid site configuration object.'); }
+      if (!input || !['vercel', 'cloudflare'].includes(input.target)) return failure('Choose either the Vercel or Cloudflare code package.');
       try {
         const { buffer, filename } = await generateBundle(input, env, url.origin);
         return new Response(buffer, { status: 200, headers: secureHeaders({
@@ -79,9 +81,9 @@ export default {
           'Content-Length': String(buffer.length), 'Cache-Control': 'no-store'
         }) });
       } catch (cause) {
-        if (cause.message?.includes('valid practice email')) return failure(cause.message, 400);
+        if (/valid practice email|custom page|custom pages|HTTPS URL|Choose either the Vercel or Cloudflare/i.test(cause.message || '')) return failure(cause.message, 400);
         console.error('Cloudflare builder ZIP generation failed', cause);
-        return failure('The paired apps could not be packaged. Please try again.', 500);
+        return failure('The selected code package could not be prepared. Please try again.', 500);
       }
     }
     if (url.pathname.startsWith('/api/')) return failure('API route not found.', 404);

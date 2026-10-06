@@ -37,12 +37,7 @@
         <span class="brand-mark"><svg><use href="#i-leaf"/></svg></span>
         <span class="brand-copy"><strong>canopy</strong><small>STUDIO</small></span>
       </a>
-      <div class="workspace-switcher">
-        <span class="workspace-avatar">C</span>
-        <span><strong>Canopy workspace</strong><small>White-label studio</small></span>
-        <span class="switch-caret">⌄</span>
-      </div>
-      <p class="nav-label">WORKSPACE</p>
+      <p class="nav-label">BUILDER</p>
       <nav class="side-nav" aria-label="Main navigation">
         <a href="#overview" class="nav-link active" data-nav="overview"><svg><use href="#i-home"/></svg><span>Overview</span></a>
         <a href="#site-settings" class="nav-link" data-nav="website"><svg><use href="#i-globe"/></svg><span>Website builder</span><span class="nav-pill">1</span></a>
@@ -58,23 +53,17 @@
           <p>Take the guided tour to set up your first practice site.</p>
           <button class="text-button" id="sidebarTour">Start walkthrough <svg><use href="#i-arrow"/></svg></button>
         </div>
-        <a href="#settings" class="nav-link muted"><svg><use href="#i-settings"/></svg><span>Workspace settings</span></a>
-        <div class="account-chip">
-          <div class="account-avatar">JD</div>
-          <span><strong>Jordan Davis</strong><small>Studio owner</small></span>
-          <span class="more-dots">•••</span>
-        </div>
       </div>
     </aside>
 
     <main class="main-area" id="top">
       <header class="topbar">
         <button class="icon-button menu-toggle" id="menuToggle" aria-label="Toggle navigation"><svg><use href="#i-menu"/></svg></button>
-        <div class="breadcrumbs"><span>Canopy workspace</span><svg><use href="#i-chevron"/></svg><strong>New website</strong></div>
+        <div class="breadcrumbs"><strong>New website</strong></div>
         <div class="topbar-actions">
           <span class="autosave"><span class="status-dot"></span> All changes saved</span>
           <button class="button button-quiet tour-button" id="openWalkthrough"><svg><use href="#i-spark"/></svg> Guided setup</button>
-          <button class="button button-dark top-generate" id="topGenerate"><svg><use href="#i-download"/></svg> Generate apps</button>
+          <button class="button button-dark top-generate" id="topGenerate"><svg><use href="#i-download"/></svg> Download Vercel ZIP</button>
         </div>
       </header>
 
@@ -83,12 +72,12 @@
           <div>
             <div class="eyebrow"><span class="eyebrow-line"></span> PRACTICE WEBSITE BUILDER</div>
             <h1>Make a good first impression.</h1>
-            <p>Build a polished practice website, then ship it to both platforms in one go.</p>
+            <p>Build your practice website setup, then download a deploy-ready code package.</p>
           </div>
-          <div class="intro-badge"><span class="badge-orbit"><svg><use href="#i-spark"/></svg></span><span><strong>One setup. Two deploys.</strong><small>Vercel + Cloudflare, together</small></span></div>
+          <div class="intro-badge"><span class="badge-orbit"><svg><use href="#i-spark"/></svg></span><span><strong>Setup here.</strong><small>Deploy to different cost-effective hosting solutions</small></span></div>
         </section>
 
-        <div class="workspace-grid">
+        <div class="builder-grid">
           <section class="editor-column" aria-label="Website configuration">
             <div class="section-head" id="site-settings">
               <div class="section-count">01</div>
@@ -112,6 +101,13 @@
                 <label class="form-field"><span>Location</span><input id="practiceLocation" type="text" maxlength="100" value="Quezon City, Philippines" autocomplete="address-level2"></label>
                 <label class="form-field"><span>Contact email</span><input id="practiceEmail" type="email" maxlength="120" value="hello@harborlight.example" autocomplete="email"></label>
                 <label class="form-field"><span>Phone</span><input id="practicePhone" type="tel" maxlength="30" value="+63 2 8123 4567" autocomplete="tel"></label>
+              </div>
+              <div class="identity-subhead"><strong>Payment details</strong><small>Sample values — replace with your active GCash and Maya accounts.</small></div>
+              <div class="form-grid payment-form-grid">
+                <label class="form-field"><span>GCash account name</span><input id="gcashName" type="text" maxlength="80" value="Harborlight Veterinary Care" autocomplete="off"></label>
+                <label class="form-field"><span>GCash mobile number</span><input id="gcashNumber" type="tel" maxlength="40" value="+63 917 555 0134" autocomplete="off"></label>
+                <label class="form-field"><span>Maya account name</span><input id="mayaName" type="text" maxlength="80" value="Harborlight Veterinary Care" autocomplete="off"></label>
+                <label class="form-field"><span>Maya mobile number</span><input id="mayaNumber" type="tel" maxlength="40" value="+63 918 555 0142" autocomplete="off"></label>
               </div>
               <div class="slug-line"><span class="slug-icon"><svg><use href="#i-globe"/></svg></span><span>Site address</span><strong id="siteSlug">harborlight-veterinary-care</strong><span class="slug-suffix">.yourpractice.site</span><span class="secure-check">✓</span></div>
             </article>
@@ -178,19 +174,19 @@
 
             <div class="section-head section-head-space deploy-heading" id="deploy">
               <div class="section-count">04</div>
-              <div><h2>Two deploy-ready apps</h2><p>Your setup is packaged for each runtime at the same time.</p></div>
+              <div><h2>Deployment Ready App.</h2><p>Choose one hosting target to download its code package.</p></div>
             </div>
-            <div class="deploy-grid">
-              <article class="deploy-card vercel-card">
-                <div class="platform-mark vercel-mark"><span></span></div><div class="deploy-card-copy"><strong>Vercel</strong><small>Node.js · Express · Helmet</small></div><span class="deploy-ready"><span></span> READY</span>
-              </article>
-              <article class="deploy-card cloudflare-card">
-                <div class="platform-mark cf-mark"><span>◒</span></div><div class="deploy-card-copy"><strong>Cloudflare Workers</strong><small>Worker adapter · Static assets</small></div><span class="deploy-ready"><span></span> READY</span>
-              </article>
+            <div class="deploy-grid" role="group" aria-label="Choose a hosting code package">
+              <button class="deploy-card vercel-card selected" type="button" data-deployment-target="vercel" aria-pressed="true">
+                <span class="platform-mark vercel-mark"><span></span></span><span class="deploy-card-copy"><strong>Vercel</strong><small>Node.js · Express · Helmet</small></span><span class="deploy-choice"><i></i><span>Selected</span></span>
+              </button>
+              <button class="deploy-card cloudflare-card" type="button" data-deployment-target="cloudflare" aria-pressed="false">
+                <span class="platform-mark cf-mark"><span>◒</span></span><span class="deploy-card-copy"><strong>Cloudflare Workers</strong><small>Worker adapter · Static assets</small></span><span class="deploy-choice"><i></i><span>Select</span></span>
+              </button>
             </div>
-            <div class="deploy-note"><span class="deploy-note-icon">i</span><p>Both apps share the same practice settings and Neon schema. Runtime-specific files are included in the ZIP.</p></div>
-            <button class="button button-dark generate-wide" id="generateButton"><svg><use href="#i-download"/></svg><span>Generate both apps</span><span class="button-shortcut">ZIP <svg><use href="#i-arrow"/></svg></span></button>
-            <p class="generated-footnote">White-label output · no Canopy branding in the client website</p>
+            <div class="deploy-note"><span class="deploy-note-icon">i</span><p>Only the selected code package is downloaded. Nothing is deployed or published for you.</p></div>
+            <button class="button button-dark generate-wide" id="generateButton"><svg><use href="#i-download"/></svg><span>Download Vercel ZIP</span><span class="button-shortcut">ZIP <svg><use href="#i-arrow"/></svg></span></button>
+            <p class="generated-footnote">Code package only · deploy it yourself on the selected host</p>
           </section>
 
           <aside class="preview-column" aria-label="Website preview">
@@ -214,10 +210,9 @@
             <div class="preview-caption"><span class="caption-check"><svg><use href="#i-check"/></svg></span><span>Edits update this preview instantly.</span><button id="resetPreview">Reset sample copy</button></div>
 
             <article class="build-summary-card">
-              <div class="build-summary-top"><div class="build-summary-icon"><svg><use href="#i-spark"/></svg></div><span class="build-summary-label">BUILD SUMMARY</span><span class="build-status"><i></i> READY TO EXPORT</span></div>
+              <div class="build-summary-top"><div class="build-summary-icon"><svg><use href="#i-spark"/></svg></div><span class="build-summary-label">BUILD SUMMARY</span><span class="build-status"><i></i> SETUP READY</span></div>
               <h3>Your site's foundation</h3>
               <div class="summary-list"><div><span>Practice</span><strong id="summarySpecialty">Veterinary clinic</strong></div><div><span>Theme</span><strong id="summaryTheme">Canopy · editorial serif</strong></div><div><span>Content</span><strong id="summaryModules">Blog + scheduling</strong></div><div><span>Database</span><strong><span class="db-dot"></span> Neon Postgres</strong></div></div>
-              <button class="summary-action" id="copySetup"><span>Copy site setup</span><svg><use href="#i-arrow"/></svg></button>
             </article>
 
             <div class="security-note"><div class="security-shield">✓</div><div><strong>Security built into the scaffold</strong><p>Node target includes Helmet and signed double-submit CSRF protection. Worker target uses equivalent runtime-native headers and CSRF checks.</p></div></div>
@@ -237,13 +232,14 @@
           <div class="wizard-step active" data-step="0"><span>01</span><div><strong>Practice</strong><small>Choose your care type</small></div></div>
           <div class="wizard-step" data-step="1"><span>02</span><div><strong>Details</strong><small>Give it a name</small></div></div>
           <div class="wizard-step" data-step="2"><span>03</span><div><strong>Appearance</strong><small>Set the tone</small></div></div>
-          <div class="wizard-step" data-step="3"><span>04</span><div><strong>Features</strong><small>Pick the essentials</small></div></div>
+          <div class="wizard-step" data-step="3"><span>04</span><div><strong>Menu links</strong><small>Add custom pages</small></div></div>
+          <div class="wizard-step" data-step="4"><span>05</span><div><strong>Features</strong><small>Pick the essentials</small></div></div>
         </div>
         <div class="wizard-rail-foot"><span class="wizard-lock">✓</span><span>Only the settings you need.<br>No complicated page builder.</span></div>
       </div>
       <div class="wizard-main">
         <button class="modal-close" id="closeWalkthrough" aria-label="Close walkthrough"><svg><use href="#i-close"/></svg></button>
-        <div class="wizard-topline"><span id="wizardStepLabel">STEP 01 / 04</span><span class="wizard-progress"><i id="wizardProgress"></i></span></div>
+        <div class="wizard-topline"><span id="wizardStepLabel">STEP 01 / 05</span><span class="wizard-progress"><i id="wizardProgress"></i></span></div>
         <div class="wizard-content" id="wizardContent"></div>
         <div class="wizard-footer"><button class="button button-quiet" id="wizardBack">Back</button><span class="wizard-skip" id="wizardSkip">You can change these later</span><button class="button button-dark" id="wizardNext">Continue <svg><use href="#i-arrow"/></svg></button></div>
       </div>
