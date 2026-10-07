@@ -4,12 +4,17 @@
   "private": true,
   "type": "module",
   "description": "Cloudflare Workers runtime for the Canopy Studio white-label site builder",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "start": "wrangler dev",
     "deploy": "wrangler deploy",
-    "check": "wrangler deploy --dry-run"
+    "check": "wrangler deploy --dry-run",
+    "test": "node --test"
   },
-  "devDependencies": { "wrangler": "4.147.0" }
+  "devDependencies": {
+    "wrangler": "4.147.0"
+  }
 }
