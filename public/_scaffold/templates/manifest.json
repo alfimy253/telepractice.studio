@@ -18,14 +18,14 @@
     "db/schema.sql"
   ],
   "vercel": [
-    ".env.example",
+    ".env",
     "api/index.js",
     "dev.js",
     "package.json",
     "vercel.json"
   ],
   "cloudflare": [
-    ".dev.vars.example",
+    ".dev.vars",
     "package.json",
     "src/index.js",
     "wrangler.jsonc"

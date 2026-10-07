@@ -34,4 +34,13 @@ The Worker serves the static interface and handles `/api/csrf` plus `/api/genera
 
 Guided setup supports custom menu pages with their own menu label, URL, title, text content and optional banner image. Site identity includes GCash and Maya payment details; the displayed numbers are sample values and should be replaced before publishing.
 
+### Generated package environment variables
+
+Each downloaded ZIP includes a ready-to-use environment file — `.dev.vars` for the Cloudflare target, `.env` for the Vercel target — instead of a `.example` template that has to be copied and renamed first. For every generated ZIP:
+
+- `ADMIN_API_KEY` and `CSRF_SECRET` are freshly generated random values, unique to that download.
+- `DATABASE_URL` is filled in from the optional "Database connection" field in the builder's Deployment step. Pasted Neon URLs have `sslmode`/`channel_binding` query parameters stripped automatically (the generated app's Neon serverless driver uses HTTPS and does not need them). If the field is left blank, a clearly marked placeholder is written instead.
+
+The pasted database URL and the generated secrets are only used to build the ZIP in memory for that single request; the stateless builder does not log, store, or otherwise retain them, and they never flow into the generated site's public config (`site-config.js`, `/api/site`, or `db/seed.sql`).
+
 Cloudflare dashboard reference: [Create a Worker from a template or repository](https://dash.cloudflare.com/9d8cf0bed724c974cfd216a9e2eafcb6/workers-and-pages/create/deploy-to-workers?repository=https%3A%2F%2Fgithub.com%2Fcloudflare%2Ftemplates%2Ftree%2Fmain%2Fllm-chat-app-template). This project uses the Workers static-assets binding rather than the chat template's Workers AI binding.

@@ -1,5 +1,0 @@
-# Copy to .dev.vars for local Wrangler development.
-# Use the pooled Neon URL for the deployed Worker. Keep this value secret.
-DATABASE_URL="postgresql://USER:PASSWORD@HOST.neon.tech/DB"
-ADMIN_API_KEY="replace-with-a-long-random-owner-key"
-CSRF_SECRET="replace-with-a-different-32-byte-random-secret"
