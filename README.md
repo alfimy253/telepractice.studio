@@ -9,17 +9,28 @@ Requires Node.js 22+ for Wrangler 4.147.0.
 ```bash
 npm install
 npx wrangler login
-npx wrangler secret put CSRF_SECRET
 npm run deploy
 ```
 
-Use a long, unique random value for `CSRF_SECRET`. For local development, copy `.dev.vars.example` to `.dev.vars`, replace the sample secret, and run. If no local vars file exists, `localhost` uses a development-only CSRF fallback so the Generate button still works; deployed Workers still require the secret:
+The stateless builder works without deployment secrets. To optionally sign its CSRF tokens as an additional check, run `npx wrangler secret put CSRF_SECRET` and enter a long, unique random value (for example, generate one with `openssl rand -hex 32`). Do not commit secrets.
+
+For local development:
 
 ```bash
 npm run dev
 ```
 
-The Worker serves the static interface and handles `/api/csrf` plus `/api/generate`. Choose Vercel or Cloudflare in the builder to download only that runtime's source-code package; generation does not deploy or publish a site. ZIP builds use the versioned scaffold in `public/_scaffold/templates/`, signed HttpOnly SameSite CSRF cookies, origin validation, a bounded JSON body, security headers, and an in-Worker ZIP writer. No customer state or owner key is stored by the builder.
+If you want optional signing locally, create an ignored `.dev.vars` file containing `CSRF_SECRET=your-random-secret`. Local variables are not automatically uploaded to the deployed Worker.
+
+### ZIP download / CSRF troubleshooting
+
+Older deployments return “Set CSRF_SECRET as a Worker secret before using the builder” when the builder's runtime secret is missing. Deploy this updated builder with `npm run deploy`, or configure that secret on the existing builder Worker (not just in its build environment). Refresh the page and retry the download.
+
+The builder now uses random double-submit tokens, an HttpOnly SameSite=Strict cookie (host-prefixed and Secure on HTTPS), and origin/fetch-metadata validation. It continues to verify HMAC signatures when `CSRF_SECRET` is configured. This secret-free mode is only for the public, stateless ZIP builder; the generated practice apps' secret requirements are unchanged. No permissive CORS headers are enabled.
+
+Run regression tests with `npm test`.
+
+The Worker serves the static interface and handles `/api/csrf` plus `/api/generate`. Choose Vercel or Cloudflare in the builder to download only that runtime's source-code package; generation does not deploy or publish a site. ZIP builds use the versioned scaffold in `public/_scaffold/templates/`, HttpOnly SameSite CSRF cookies with optional signing, origin validation, a bounded JSON body, security headers, and an in-Worker ZIP writer. No customer state or owner key is stored by the builder.
 
 Guided setup supports custom menu pages with their own menu label, URL, title, text content and optional banner image. Site identity includes GCash and Maya payment details; the displayed numbers are sample values and should be replaced before publishing.
 
