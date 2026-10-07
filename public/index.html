@@ -188,10 +188,19 @@
 
             <div class="section-head section-head-space" id="env-config">
               <div class="section-count">05</div>
-              <div><h2>Environment variables.</h2><p>Filled in for you — no renaming <span id="envFileExampleName">.env.example</span> to <span id="envFileReadyName">.env</span> after you unzip.</p></div>
+              <div><h2>Environment variables.</h2><p>The downloaded package includes a ready-to-use <span id="envFileReadyName">.env</span> file.</p></div>
             </div>
             <article class="panel env-panel">
-              <div class="panel-topline"><span class="panel-kicker">DATABASE CONNECTION</span></div>
+              <div class="panel-topline"><span class="panel-kicker">ADMINISTRATOR ACCOUNT</span></div>
+              <div class="form-grid admin-credentials-grid">
+                <label class="form-field"><span>Admin username</span><input id="adminUsername" type="text" minlength="3" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,63}" autocomplete="username" placeholder="e.g. practiceowner" required></label>
+                <label class="form-field"><span>Admin email</span><input id="adminEmail" type="email" maxlength="254" autocomplete="email" placeholder="owner@example.com" required></label>
+                <label class="form-field env-field"><span>Admin password <small>(12–128 characters)</small></span><div class="secret-input-row"><input id="adminPassword" type="password" minlength="12" maxlength="128" autocomplete="new-password" aria-describedby="adminPasswordRules" required><button type="button" class="icon-button secret-toggle" id="toggleAdminPassword" aria-label="Show admin password">Show</button></div><small id="adminPasswordRules">Include at least one lowercase letter, uppercase letter, number and symbol.</small></label>
+                <label class="form-field env-field"><span>Confirm admin password</span><div class="secret-input-row"><input id="adminPasswordConfirm" type="password" minlength="12" maxlength="128" autocomplete="new-password" required><button type="button" class="icon-button secret-toggle" id="toggleAdminPasswordConfirm" aria-label="Show password confirmation">Show</button></div><small>Passwords are used only to create this ZIP and are never saved in builder storage.</small></label>
+              </div>
+              <p class="env-helper">The generated site uses these credentials at its date-based owner dashboard. The password is salted and hashed before it is put in the environment file. It is never embedded in the public website.</p>
+
+              <div class="panel-topline env-db-kicker"><span class="panel-kicker">DATABASE CONNECTION</span></div>
               <label class="form-field env-field">
                 <span>Neon database connection string <small>(optional — add it now, or paste it into the file later)</small></span>
                 <div class="secret-input-row">
@@ -200,7 +209,7 @@
                 </div>
               </label>
               <p class="env-helper">Paste it exactly as Neon gives it to you, including <code>?sslmode=require&amp;channel_binding=require</code> if present — the builder strips those query parameters automatically, because the generated app's Neon HTTP driver doesn't use them. Leave this blank to fill in <code>DATABASE_URL</code> yourself after downloading.</p>
-              <div class="fixed-schema-note env-autogen-note"><span class="note-check"><svg><use href="#i-check"/></svg></span><span>Auto-generated for you</span><p><code>ADMIN_API_KEY</code> and <code>CSRF_SECRET</code> are created fresh and at random for every download, then written straight into your ready-to-use <strong id="envFileNote">.env</strong> file — nothing to type, nothing shared between sites. This value is only used to build your ZIP; the builder keeps no database of its own and does not store what you paste here.</p></div>
+              <div class="fixed-schema-note env-autogen-note"><span class="note-check"><svg><use href="#i-check"/></svg></span><span>Account security</span><p>Your username, owner email, salted password hash and a fresh <code>CSRF_SECRET</code> are written to the ready-to-use <strong id="envFileNote">.env</strong> file. There is no <code>ADMIN_API_KEY</code>. The builder generates the ZIP in memory and does not retain the database URL or password.</p></div>
             </article>
 
             <button class="button button-dark generate-wide" id="generateButton"><svg><use href="#i-download"/></svg><span>Download Vercel ZIP</span><span class="button-shortcut">ZIP <svg><use href="#i-arrow"/></svg></span></button>

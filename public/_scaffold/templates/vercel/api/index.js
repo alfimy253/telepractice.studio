@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
 import { createNeonClient } from '../db/connection.js';
+import { createAdminSession, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
+import { adminDashboardPath } from '../lib/admin-url.js';
 import { createHmac, randomBytes, timingSafeEqual, webcrypto } from 'node:crypto';
 
 const app = express();
@@ -25,9 +27,13 @@ app.use(helmet({
 }));
 app.use(express.json({ limit: MAX_BODY, strict: true }));
 app.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
+app.use((req, res, next) => {
+  if (req.path === '/admin.html' || req.query.__admin_static === '1') return res.status(404).end();
+  next();
+});
 
 const getDb = () => createNeonClient(process.env.DATABASE_URL);
-const csrfSecret = () => process.env.CSRF_SECRET || process.env.ADMIN_API_KEY || (process.env.NODE_ENV === 'production' ? '' : 'local-development-only-change-before-deploy');
+const csrfSecret = () => process.env.CSRF_SECRET || (process.env.NODE_ENV === 'production' ? '' : 'local-development-only-change-before-deploy');
 const csrfCookie = 'practice_csrf';
 const clientSessionCookie = 'canopy_client';
 const clientSessionTtlSeconds = 30 * 24 * 60 * 60;
@@ -58,6 +64,17 @@ function cookieValue(header, name) {
     if (item.slice(0, separator).trim() === name) { try { return decodeURIComponent(item.slice(separator + 1).trim()); } catch (_) { return ''; } }
   }
   return '';
+}
+function adminConfigured() {
+  return Boolean(process.env.ADMIN_USERNAME && process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD_HASH && csrfSecret());
+}
+function adminSessionCookieName(req) {
+  return req.secure ? '__Host-canopy_owner' : 'canopy_owner';
+}
+async function adminOk(req) {
+  if (!adminConfigured()) return false;
+  const token = cookieValue(req.headers.cookie, adminSessionCookieName(req));
+  return verifyAdminSession(token, process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD_HASH, csrfSecret());
 }
 async function passwordDigest(password, salt, iterations = passwordIterations) {
   const key = await webcrypto.subtle.importKey('raw', Buffer.from(password, 'utf8'), 'PBKDF2', false, ['deriveBits']);
@@ -113,12 +130,9 @@ function csrfGuard(req, res, next) {
   if (!cookie || !header || cookie !== header || !tokenIsValid(header)) return res.status(403).json({ error: 'Your security token expired. Refresh and try again.' });
   next();
 }
-function adminGuard(req, res, next) {
-  const expected = process.env.ADMIN_API_KEY || '';
-  const given = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '');
-  if (!expected) return res.status(503).json({ error: 'Owner access has not been configured. Set ADMIN_API_KEY.' });
-  const left = Buffer.from(expected); const right = Buffer.from(given);
-  if (left.length !== right.length || !timingSafeEqual(left, right)) return res.status(401).json({ error: 'Owner key is not valid.' });
+async function adminGuard(req, res, next) {
+  if (!adminConfigured()) return res.status(503).json({ error: 'Owner sign-in is not configured. Check ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD_HASH and CSRF_SECRET.' });
+  if (!await adminOk(req)) return res.status(401).json({ error: 'Owner session is not valid. Sign in again.' });
   next();
 }
 function cleanText(value, max, fallback = '') {
@@ -336,6 +350,34 @@ app.get('/api/csrf', (req, res) => {
     res.setHeader('Set-Cookie', `${csrfCookie}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600${secure}`);
     res.json({ token });
   } catch (error) { res.status(503).json({ error: error.message }); }
+});
+app.get('/api/admin/entry', (req, res) => {
+  res.redirect(302, adminDashboardPath(new Date(), siteTimeZone));
+});
+app.get('/api/admin/session', asyncRoute(async (req, res) => {
+  const configured = adminConfigured();
+  const authenticated = configured && await adminOk(req);
+  res.json({ configured, authenticated, dashboardPath: adminDashboardPath(new Date(), siteTimeZone), email: authenticated ? process.env.ADMIN_EMAIL : '' });
+}));
+app.post('/api/admin/login', csrfGuard, asyncRoute(async (req, res) => {
+  if (!adminConfigured()) return res.status(503).json({ error: 'Owner sign-in is not configured. Check the environment variables.' });
+  const username = cleanText(req.body?.username, 64).toLowerCase();
+  const password = String(req.body?.password || '');
+  const expectedUsername = String(process.env.ADMIN_USERNAME).trim().toLowerCase();
+  const givenBytes = Buffer.from(username);
+  const expectedBytes = Buffer.from(expectedUsername);
+  const usernameMatches = givenBytes.length === expectedBytes.length && timingSafeEqual(givenBytes, expectedBytes);
+  const passwordMatches = await verifyPasswordHash(password, process.env.ADMIN_PASSWORD_HASH);
+  if (!usernameMatches || !passwordMatches) return res.status(401).json({ error: 'Username or password is incorrect.' });
+  const token = await createAdminSession(process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD_HASH, csrfSecret());
+  const secure = req.secure ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${adminSessionCookieName(req)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`);
+  res.json({ ok: true, email: process.env.ADMIN_EMAIL });
+}));
+app.post('/api/admin/logout', csrfGuard, (req, res) => {
+  const secure = req.secure ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${adminSessionCookieName(req)}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
+  res.json({ ok: true });
 });
 app.get('/api/site', asyncRoute(async (_req, res) => {
   if (!process.env.DATABASE_URL) return res.json({ config: DEFAULT_CONFIG, source: 'generated-fallback' });

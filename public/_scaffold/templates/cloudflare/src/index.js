@@ -1,4 +1,6 @@
 import { createNeonClient } from '../db/connection.js';
+import { createAdminSession, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
+import { adminDashboardPath, isAdminDashboardPath } from '../lib/admin-url.js';
 
 const SITE_ID = '__SITE_ID__';
 const DEFAULT_CONFIG = __SITE_CONFIG_JSON__;
@@ -233,7 +235,7 @@ async function hmac(value, secret) {
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value)));
 }
 async function issueCsrf(request, env) {
-  const secret = env.CSRF_SECRET || env.ADMIN_API_KEY;
+  const secret = env.CSRF_SECRET;
   if (!secret) return error('Set a CSRF_SECRET Worker secret before using forms.', 503);
   const nonceBytes = crypto.getRandomValues(new Uint8Array(24));
   const nonce = base64url(nonceBytes);
@@ -302,7 +304,7 @@ async function csrfOk(request, env) {
   const cookie = readCookie(request.headers.get('Cookie'), CSRF_COOKIE);
   const header = request.headers.get('X-CSRF-Token');
   if (!cookie || !header || !constantEqual(cookie, header)) return false;
-  const secret = env.CSRF_SECRET || env.ADMIN_API_KEY;
+  const secret = env.CSRF_SECRET;
   if (!secret) return false;
   const [nonce, signature, ...rest] = header.split('.');
   if (!nonce || !signature || rest.length) return false;
@@ -310,13 +312,22 @@ async function csrfOk(request, env) {
   const expected = await hmac(nonce, secret);
   return actual.length === expected.length && constantEqual(base64url(actual), base64url(expected));
 }
-function adminOk(request, env) {
-  const expected = env.ADMIN_API_KEY || '';
-  const authorization = request.headers.get('Authorization') || '';
-  const given = authorization.replace(/^Bearer\s+/i, '');
-  return Boolean(expected && given && constantEqual(expected, given));
+function adminConfigured(env) {
+  return Boolean(env.ADMIN_USERNAME && env.ADMIN_EMAIL && env.ADMIN_PASSWORD_HASH && env.CSRF_SECRET);
 }
-function adminFailure(env) { return env.ADMIN_API_KEY ? error('Owner key is not valid.', 401) : error('Owner access has not been configured. Set the ADMIN_API_KEY Worker secret.', 503); }
+function adminSessionCookieName(request) {
+  return new URL(request.url).protocol === 'https:' ? '__Host-canopy_owner' : 'canopy_owner';
+}
+async function adminOk(request, env) {
+  if (!adminConfigured(env)) return false;
+  const token = readCookie(request.headers.get('Cookie'), adminSessionCookieName(request));
+  return verifyAdminSession(token, env.ADMIN_USERNAME, env.ADMIN_PASSWORD_HASH, env.CSRF_SECRET);
+}
+function adminFailure(env) {
+  return adminConfigured(env)
+    ? error('Owner session is not valid. Sign in again.', 401)
+    : error('Owner sign-in is not configured. Set ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD_HASH and CSRF_SECRET.', 503);
+}
 async function readJson(request) {
   const contentLength = Number(request.headers.get('Content-Length') || 0);
   if (contentLength > 256 * 1024) return null;
@@ -354,10 +365,40 @@ async function routeApi(request, env) {
   const url = new URL(request.url); const path = url.pathname; const method = request.method.toUpperCase();
   if (path === '/api/health' && method === 'GET') return json({ ok: true, runtime: 'cloudflare-workers', siteId: SITE_ID });
   if (path === '/api/csrf' && method === 'GET') return issueCsrf(request, env);
+  if (path === '/api/admin/entry' && method === 'GET') {
+    const headers = headersWithSecurity({ Location: adminDashboardPath(new Date(), SITE_TIME_ZONE), 'Cache-Control': 'no-store' });
+    return new Response(null, { status: 302, headers });
+  }
+  if (path === '/api/admin/session' && method === 'GET') {
+    const configured = adminConfigured(env);
+    const authenticated = configured && await adminOk(request, env);
+    return json({ configured, authenticated, dashboardPath: adminDashboardPath(new Date(), SITE_TIME_ZONE), email: authenticated ? env.ADMIN_EMAIL : '' });
+  }
+  if (path === '/api/admin/login' && method === 'POST') {
+    if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
+    if (!adminConfigured(env)) return adminFailure(env);
+    const value = await readJson(request);
+    if (!value || typeof value !== 'object') return error('Send a valid owner sign-in form.');
+    const username = cleanText(value.username, 64);
+    const password = String(value.password || '');
+    const usernameMatches = constantEqual(username.toLowerCase(), String(env.ADMIN_USERNAME).trim().toLowerCase());
+    const passwordMatches = await verifyPasswordHash(password, String(env.ADMIN_PASSWORD_HASH));
+    if (!usernameMatches || !passwordMatches) return error('Username or password is incorrect.', 401);
+    const token = await createAdminSession(env.ADMIN_USERNAME, env.ADMIN_PASSWORD_HASH, env.CSRF_SECRET);
+    const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+    const cookie = `${adminSessionCookieName(request)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`;
+    return json({ ok: true, email: env.ADMIN_EMAIL }, 200, { 'Set-Cookie': cookie });
+  }
+  if (path === '/api/admin/logout' && method === 'POST') {
+    if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
+    const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+    const cookie = `${adminSessionCookieName(request)}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
+    return json({ ok: true }, 200, { 'Set-Cookie': cookie });
+  }
   if (path === '/api/site' && method === 'GET') return json(await siteConfig(env));
   if (path === '/api/site' && method === 'PUT') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     const body = await readJson(request); if (!body) return error('Send a valid JSON object.');
     const config = cleanSiteConfig(body);
     if (!config.businessName || (config.email && !/^\S+@\S+\.\S+$/.test(config.email))) return error('Check the practice name and contact email.');
@@ -450,7 +491,7 @@ async function routeApi(request, env) {
     catch (cause) { console.error('availability read failed', cause); return error('Could not load the monthly schedule.', 503); }
   }
   if (path === '/api/admin/availability' && method === 'GET') {
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
     const month = String(url.searchParams.get('month') || ''); const start = monthStart(month);
     if (!start) return error('Choose a valid month.');
@@ -464,7 +505,7 @@ async function routeApi(request, env) {
   }
   if (path.startsWith('/api/admin/availability/') && method === 'PUT') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
     const month = path.slice('/api/admin/availability/'.length); const start = monthStart(month);
     if (!start || month < localToday().slice(0, 7)) return error('Choose the current or a future month.');
@@ -540,7 +581,7 @@ async function routeApi(request, env) {
     } catch (cause) { console.error('client appointment cancel failed', cause); return error('Could not cancel this consultation.', 503); }
   }
   if (path === '/api/admin/appointments' && method === 'GET') {
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     try {
       const appointments = await sql(env)`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, client.id AS "clientId", note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= (${localToday()}::date - interval '90 days')::date AND appointment.appointment_date <= (${localToday()}::date + interval '90 days')::date ORDER BY appointment.appointment_date ASC, appointment.appointment_time ASC LIMIT 300`;
       return json({ appointments: appointments.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
@@ -548,7 +589,7 @@ async function routeApi(request, env) {
   }
   if (path.startsWith('/api/admin/appointments/') && method === 'PATCH') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     const id = path.slice('/api/admin/appointments/'.length); const value = await readJson(request); const status = String(value?.status || '');
     if (!/^[0-9a-f-]{36}$/i.test(id) || !['requested', 'confirmed', 'cancelled'].includes(status)) return error('Invalid appointment update.');
     try {
@@ -569,7 +610,7 @@ async function routeApi(request, env) {
   }
   if (path.startsWith('/api/admin/appointments/') && path.endsWith('/note') && method === 'PUT') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     const id = path.slice('/api/admin/appointments/'.length, -'/note'.length);
     const value = await readJson(request); if (!/^[0-9a-f-]{36}$/i.test(id) || !value || typeof value !== 'object') return error('Invalid consultation note.');
     const noteBody = cleanText(value.noteBody, 12000);
@@ -583,7 +624,7 @@ async function routeApi(request, env) {
     } catch (cause) { console.error('consultation note save failed', cause); return error('Could not save this private consultation note.', 503); }
   }
   if (path === '/api/admin/posts' && method === 'GET') {
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     try {
       const posts = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.status, post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM blog_posts AS post WHERE post.site_id = ${SITE_ID} ORDER BY post.created_at DESC LIMIT 100`;
       return json({ posts });
@@ -591,7 +632,7 @@ async function routeApi(request, env) {
   }
   if (path === '/api/admin/posts' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     const value = await readJson(request); if (!value) return error('Send a valid JSON object.');
     const post = articlePostPayload(value);
     if (!post) return error('Add a title and article body, plus a valid feature image. If you leave the feature image blank, add a gallery image with a URL and alt text.');
@@ -602,7 +643,7 @@ async function routeApi(request, env) {
   }
   if (path.startsWith('/api/admin/posts/') && method === 'PUT') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     const id = path.slice('/api/admin/posts/'.length);
     const value = await readJson(request); if (!value) return error('Send a valid JSON object.');
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid post id.');
@@ -618,7 +659,7 @@ async function routeApi(request, env) {
   }
   if (path.startsWith('/api/admin/posts/') && method === 'DELETE') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     const id = path.slice('/api/admin/posts/'.length);
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid post id.');
     try {
@@ -627,7 +668,7 @@ async function routeApi(request, env) {
     } catch (cause) { console.error('blog post delete failed', cause); return error('Could not delete the post.', 503); }
   }
   if (path === '/api/admin/gallery' && method === 'GET') {
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     try {
       const items = await sql(env)`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM gallery_items WHERE site_id = ${SITE_ID} ORDER BY sort_order ASC, created_at DESC LIMIT 100`;
       return json({ items });
@@ -635,7 +676,7 @@ async function routeApi(request, env) {
   }
   if (path === '/api/admin/gallery' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     const value = await readJson(request); if (!value) return error('Send a valid JSON object.');
     const item = galleryPayload(value);
     if (!validGalleryPayload(item)) return error('Add a title, valid HTTPS or same-site image URL and alternative text. Display order must be from 0 to 9999.');
@@ -646,7 +687,7 @@ async function routeApi(request, env) {
   }
   if (path.startsWith('/api/admin/gallery/') && (method === 'PUT' || method === 'DELETE')) {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    if (!adminOk(request, env)) return adminFailure(env);
+    if (!await adminOk(request, env)) return adminFailure(env);
     const id = path.slice('/api/admin/gallery/'.length);
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid gallery item id.');
     if (method === 'DELETE') {
@@ -674,6 +715,20 @@ export default {
       catch (cause) { console.error('unhandled Worker API error', cause); return error('Something went wrong. Please try again.', 500); }
     }
     if (request.method !== 'GET' && request.method !== 'HEAD') return error('Method not allowed.', 405);
+    if (url.pathname === '/admin.html') return error('Not found.', 404);
+    if (isAdminDashboardPath(url.pathname)) {
+      const expectedPath = adminDashboardPath(new Date(), SITE_TIME_ZONE);
+      if (url.pathname !== expectedPath) {
+        const headers = headersWithSecurity({ Location: expectedPath, 'Cache-Control': 'no-store' });
+        return new Response(null, { status: 302, headers });
+      }
+      const assetUrl = new URL('/admin.html', url);
+      const assetRequest = new Request(assetUrl, { method: request.method, headers: request.headers });
+      const response = await env.ASSETS.fetch(assetRequest);
+      const headers = headersWithSecurity(response.headers);
+      headers.set('Cache-Control', 'no-store');
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+    }
     const response = await env.ASSETS.fetch(request);
     const headers = headersWithSecurity(response.headers);
     if (url.pathname === '/' || url.pathname.endsWith('.html')) headers.set('Cache-Control', 'no-store');

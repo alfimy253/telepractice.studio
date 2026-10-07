@@ -2,10 +2,10 @@
   const fallback = window.SITE_CONFIG || {};
   let site = { ...fallback, features: { ...(fallback.features || {}) } };
   let csrfToken = '';
+  let connected = false;
   const $ = (id) => document.getElementById(id);
-  const keyStore = 'practice-admin-key';
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-  const key = () => sessionStorage.getItem(keyStore) || '';
+  const key = () => connected;
   function toast(message, detailOrError = false, isError = false) {
     const node = $('adminToast'); if (!node) return;
     const detail = typeof detailOrError === 'string' ? detailOrError : '';
@@ -23,7 +23,6 @@
   }
   async function api(path, options = {}) {
     const headers = { Accept: 'application/json', ...(options.headers || {}) };
-    if (key()) headers.Authorization = `Bearer ${key()}`;
     if (options.method && !['GET','HEAD'].includes(options.method.toUpperCase())) {
       if (!csrfToken) await getCsrf();
       headers['X-CSRF-Token'] = csrfToken;
@@ -87,10 +86,35 @@
     } catch (_) {}
     applyToForm(); previewTheme();
   }
-  function setConnected(connected) {
-    $('connectPanel').classList.toggle('connected', connected);
-    $('keyMessage').textContent = connected ? 'Connected. Your key stays in this tab session.' : 'The key is never added to the website ZIP.';
-    $('adminKey').value = '';
+  function setConnected(value, email = '') {
+    connected = Boolean(value);
+    $('connectPanel').hidden = connected;
+    $('adminWorkspace').hidden = !connected;
+    $('adminFooter').hidden = !connected;
+    $('ownerIdentity').hidden = !connected;
+    $('logoutButton').hidden = !connected;
+    $('ownerEmail').textContent = connected ? `SIGNED IN · ${email}` : '';
+  }
+  async function loadAdminWorkspace() {
+    await loadSite();
+    await loadPosts();
+    await loadGallery();
+    await loadAppointments();
+    await loadAvailabilitySchedule();
+  }
+  async function initializeAdmin() {
+    try {
+      const session = await api('/api/admin/session');
+      if (window.location.pathname !== session.dashboardPath) {
+        window.location.replace(session.dashboardPath);
+        return;
+      }
+      setConnected(session.authenticated, session.email || '');
+      if (session.authenticated) await loadAdminWorkspace();
+    } catch (error) {
+      setConnected(false);
+      $('loginMessage').textContent = error.message || 'Could not check the owner session. Refresh and try again.';
+    }
   }
   function addPostGalleryRow(image = {}) {
     const rows = $('postGalleryRows');
@@ -147,7 +171,7 @@
   }
   async function loadPosts() {
     const list = $('postsList');
-    if (!key()) { list.innerHTML = '<p class="empty-posts">Connect your owner key to manage blog posts.</p>'; return; }
+    if (!key()) { list.innerHTML = '<p class="empty-posts">Sign in to manage blog posts.</p>'; return; }
     try {
       const data = await api('/api/admin/posts');
       const posts = data.posts || [];
@@ -172,11 +196,11 @@
         });
         row.append(icon, copy, state, edit, remove); list.appendChild(row);
       });
-    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your owner key.</p>`; }
+    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your sign-in session.</p>`; }
   }
   async function loadGallery() {
     const list = $('galleryList');
-    if (!key()) { list.innerHTML = '<p class="empty-posts">Connect your owner key to manage gallery items.</p>'; return; }
+    if (!key()) { list.innerHTML = '<p class="empty-posts">Sign in to manage gallery items.</p>'; return; }
     try {
       const data = await api('/api/admin/gallery');
       const items = data.items || [];
@@ -201,7 +225,7 @@
         });
         row.append(icon, copy, state, edit, remove); list.appendChild(row);
       });
-    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your owner key.</p>`; }
+    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your sign-in session.</p>`; }
   }
   function monthInTimeZone(date = new Date()) {
     const zone = site.timeZone || 'Asia/Manila';
@@ -269,7 +293,7 @@
   }
   async function submitAvailability(event) {
     event.preventDefault();
-    if (!key()) { toast('Connect your owner key first', true); return; }
+    if (!key()) { toast('Sign in first', true); return; }
     const month = $('availabilityMonth').value;
     const button = $('publishAvailabilityButton'); button.disabled = true;
     try {
@@ -282,7 +306,7 @@
   }
   async function loadAppointments() {
     const list = $('appointmentsList');
-    if (!key()) { list.innerHTML = '<p class="empty-posts">Connect your owner key to review consultations.</p>'; return; }
+    if (!key()) { list.innerHTML = '<p class="empty-posts">Sign in to review consultations.</p>'; return; }
     try {
       const data = await api('/api/admin/appointments');
       const appointments = data.appointments || [];
@@ -334,7 +358,7 @@
         }
         list.appendChild(item);
       });
-    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your owner key.</p>`; }
+    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your sign-in session.</p>`; }
   }
   async function updateAppointment(id, status) {
     const action = status === 'confirmed' ? 'Confirm this appointment?' : 'Cancel this reserved consultation? Owner cancellation requires at least 24 hours’ notice.';
@@ -343,19 +367,38 @@
     catch (error) { toast(error.message, true); }
   }
   function bind() {
-    $('keyForm').addEventListener('submit', async (event) => {
+    $('loginForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      const candidate = $('adminKey').value.trim();
-      if (!candidate) { $('keyMessage').textContent = 'Enter the owner key to continue.'; return; }
-      sessionStorage.setItem(keyStore, candidate);
+      const username = $('adminUsername').value.trim();
+      const password = $('adminPassword').value;
+      const button = $('loginButton');
+      $('loginMessage').textContent = '';
+      button.disabled = true;
       try {
-        await api('/api/admin/posts');
-        setConnected(true); toast('Owner editor connected'); await loadSite(); await loadPosts(); await loadGallery(); await loadAppointments(); await loadAvailabilitySchedule();
-      } catch (error) { sessionStorage.removeItem(keyStore); setConnected(false); $('keyMessage').textContent = error.message; toast('Could not connect', error.message, true); }
+        const session = await api('/api/admin/login', { method: 'POST', body: { username, password } });
+        $('adminPassword').value = '';
+        setConnected(true, session.email || '');
+        toast('Owner signed in', 'Your session is protected and will expire automatically.');
+        await loadAdminWorkspace();
+      } catch (error) {
+        $('adminPassword').value = '';
+        $('loginMessage').textContent = error.message || 'Username or password is incorrect.';
+        setConnected(false);
+        toast('Sign-in failed', error.message || 'Check your username and password.', true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+    $('logoutButton').addEventListener('click', async () => {
+      try { await api('/api/admin/logout', { method: 'POST' }); }
+      catch (error) { toast('Could not sign out cleanly', error.message, true); }
+      setConnected(false);
+      $('adminPassword').value = '';
+      toast('Signed out', 'The owner session cookie was cleared.');
     });
     $('siteForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Connect your owner key first', 'Only a site owner can make changes.', true); return; }
+      if (!key()) { toast('Sign in first', 'Only a site owner can make changes.', true); return; }
       const form = new FormData(event.currentTarget);
       const update = { ...site, businessName: String(form.get('businessName') || '').trim(), brandName: String(form.get('businessName') || '').trim().replace(/\s+(care|clinic|studio|practice|dental)$/i, '').trim(), location: String(form.get('location') || '').trim(), email: String(form.get('email') || '').trim(), phone: String(form.get('phone') || '').trim() };
       try { const data = await api('/api/site', { method: 'PUT', body: update }); site = data.config || update; applyToForm(); status('Details saved'); toast('Practice details updated', 'Your public site now has the latest contact information.'); }
@@ -369,7 +412,7 @@
     });
     $('themeForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Connect your owner key first', 'Only a site owner can make changes.', true); return; }
+      if (!key()) { toast('Sign in first', 'Only a site owner can make changes.', true); return; }
       const form = event.currentTarget;
       const update = { ...site, theme: form.elements.theme.value, editorialAccent: form.elements.editorialAccent.value, primaryColor: form.elements.primaryColor.value, accentColor: form.elements.accentColor.value, paperColor: form.elements.paperColor.value, fontStyle: form.elements.fontStyle.value };
       try { const data = await api('/api/site', { method: 'PUT', body: update }); site = data.config || update; applyToForm(); previewTheme(); status('Appearance saved'); toast('Your theme is updated', 'The public website will pick up the new palette and type style.'); }
@@ -383,7 +426,7 @@
     $('addPostGalleryImage').addEventListener('click', () => addPostGalleryRow());
     $('postForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Connect your owner key first', 'Only a site owner can create posts.', true); return; }
+      if (!key()) { toast('Sign in first', 'Only a site owner can create posts.', true); return; }
       const formElement = event.currentTarget;
       const form = new FormData(formElement);
       const post = { title: String(form.get('title') || '').trim(), slug: String(form.get('slug') || '').trim(), excerpt: String(form.get('excerpt') || '').trim(), body: String(form.get('body') || '').trim(), featureImageUrl: String(form.get('featureImageUrl') || '').trim(), featureImageAlt: String(form.get('featureImageAlt') || '').trim(), gallery: readPostGallery(), category: String(form.get('category') || '').trim(), status: String(form.get('status') || 'draft') };
@@ -393,7 +436,7 @@
     });
     $('galleryForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Connect your owner key first', 'Only a site owner can manage gallery items.', true); return; }
+      if (!key()) { toast('Sign in first', 'Only a site owner can manage gallery items.', true); return; }
       const formElement = event.currentTarget;
       const form = new FormData(formElement);
       const item = {
@@ -416,7 +459,5 @@
   }
   $('availabilityMonth').value = shiftMonth(monthInTimeZone(), 1);
   bind();
-  loadSite();
-  setConnected(Boolean(key()));
-  if (key()) { loadPosts(); loadGallery(); loadAppointments(); loadAvailabilitySchedule(); }
+  initializeAdmin();
 })();

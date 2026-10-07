@@ -98,7 +98,7 @@ export default {
           'Content-Length': String(buffer.length), 'Cache-Control': 'no-store'
         }) });
       } catch (cause) {
-        if (/valid practice email|custom page|custom pages|HTTPS URL|Choose either the Vercel or Cloudflare|valid Neon database connection string/i.test(cause.message || '')) return failure(cause.message, 400);
+        if (/valid practice email|administrator username|administrator email|administrator password|custom page|custom pages|HTTPS URL|Choose either the Vercel or Cloudflare|valid Neon database connection string/i.test(cause.message || '')) return failure(cause.message, 400);
         console.error('Cloudflare builder ZIP generation failed', cause);
         return failure('The selected code package could not be prepared. Please try again.', 500);
       }

@@ -201,6 +201,10 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .deploy-note-icon { width: 13px; height: 13px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; color: #81938a; border: 1px solid #c7d0c9; font-family: var(--serif); font-size: 9px; font-style: italic; }
 .deploy-note p { margin: 0; font-size: 8px; line-height: 1.55; }
 .env-panel { margin-top: 2px; margin-bottom: 11px; padding: 16px; }
+.admin-credentials-grid { row-gap: 12px; }
+.admin-credentials-grid .secret-input-row input { min-width: 0; font-family: var(--sans); }
+.admin-credentials-grid .form-field > small { color: #8a968e; font-size: 8px; line-height: 1.5; font-weight: 500; }
+.env-db-kicker { margin-top: 17px; padding-top: 14px; border-top: 1px solid #edf0eb; }
 .env-field span:first-child { display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
 .env-field span:first-child small { color: #9aa39d; font-weight: 500; font-size: 8px; }
 .secret-input-row { display: flex; gap: 6px; align-items: stretch; }

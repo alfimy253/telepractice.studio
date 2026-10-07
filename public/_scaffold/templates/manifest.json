@@ -17,6 +17,10 @@
     "db/connection.js",
     "db/schema.sql"
   ],
+  "sharedRuntime": [
+    "lib/admin-security.js",
+    "lib/admin-url.js"
+  ],
   "vercel": [
     ".env",
     "api/index.js",
