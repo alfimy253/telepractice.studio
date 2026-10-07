@@ -209,7 +209,7 @@
                 </div>
               </label>
               <p class="env-helper">Paste it exactly as Neon gives it to you, including <code>?sslmode=require&amp;channel_binding=require</code> if present — the builder strips those query parameters automatically, because the generated app's Neon HTTP driver doesn't use them. Leave this blank to fill in <code>DATABASE_URL</code> yourself after downloading.</p>
-              <div class="fixed-schema-note env-autogen-note"><span class="note-check"><svg><use href="#i-check"/></svg></span><span>Account security</span><p>Your username, owner email, salted password hash and a fresh <code>CSRF_SECRET</code> are written to the ready-to-use <strong id="envFileNote">.env</strong> file. There is no <code>ADMIN_API_KEY</code>. The builder generates the ZIP in memory and does not retain the database URL or password.</p></div>
+              <div class="fixed-schema-note env-autogen-note"><span class="note-check"><svg><use href="#i-check"/></svg></span><span>Account security</span><p>Your username, owner email, salted password hash and a fresh <code>CSRF_SECRET</code> are written to the ready-to-use <strong id="envFileNote">.env</strong> file. The builder generates the ZIP in memory and does not retain the database URL or password.</p></div>
             </article>
 
             <button class="button button-dark generate-wide" id="generateButton"><svg><use href="#i-download"/></svg><span>Download Vercel ZIP</span><span class="button-shortcut">ZIP <svg><use href="#i-arrow"/></svg></span></button>

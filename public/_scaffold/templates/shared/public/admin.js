@@ -2,10 +2,31 @@
   const fallback = window.SITE_CONFIG || {};
   let site = { ...fallback, features: { ...(fallback.features || {}) } };
   let csrfToken = '';
-  let connected = false;
+  let signedIn = false;
+  const ADMIN_PAGE_IDS = new Set(['identity', 'appearance', 'blog', 'gallery', 'availability', 'appointments']);
   const $ = (id) => document.getElementById(id);
+  const isSignedIn = () => signedIn;
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-  const key = () => connected;
+  function showAdminPage(pageId) {
+    const activePage = ADMIN_PAGE_IDS.has(pageId) ? pageId : 'identity';
+    document.querySelectorAll('[data-admin-page]').forEach((page) => { page.hidden = page.dataset.adminPage !== activePage; });
+    document.querySelectorAll('[data-admin-page-link]').forEach((button) => {
+      const active = button.dataset.adminPageLink === activePage;
+      button.classList.toggle('active', active);
+      if (active) button.setAttribute('aria-current', 'page');
+      else button.removeAttribute('aria-current');
+    });
+    return activePage;
+  }
+  function syncAdminPageFromHash() {
+    const requestedPage = window.location.hash.slice(1);
+    const activePage = showAdminPage(requestedPage);
+    if (requestedPage && requestedPage !== activePage) {
+      const url = new URL(window.location.href);
+      url.hash = activePage;
+      window.history.replaceState(null, '', url);
+    }
+  }
   function toast(message, detailOrError = false, isError = false) {
     const node = $('adminToast'); if (!node) return;
     const detail = typeof detailOrError === 'string' ? detailOrError : '';
@@ -86,14 +107,14 @@
     } catch (_) {}
     applyToForm(); previewTheme();
   }
-  function setConnected(value, email = '') {
-    connected = Boolean(value);
-    $('connectPanel').hidden = connected;
-    $('adminWorkspace').hidden = !connected;
-    $('adminFooter').hidden = !connected;
-    $('ownerIdentity').hidden = !connected;
-    $('logoutButton').hidden = !connected;
-    $('ownerEmail').textContent = connected ? `SIGNED IN · ${email}` : '';
+  function setSignedIn(value, email = '') {
+    signedIn = Boolean(value);
+    $('loginPanel').hidden = signedIn;
+    $('adminWorkspace').hidden = !signedIn;
+    $('adminFooter').hidden = !signedIn;
+    $('ownerIdentity').hidden = !signedIn;
+    $('logoutButton').hidden = !signedIn;
+    $('ownerEmail').textContent = signedIn ? `SIGNED IN · ${email}` : '';
   }
   async function loadAdminWorkspace() {
     await loadSite();
@@ -106,13 +127,16 @@
     try {
       const session = await api('/api/admin/session');
       if (window.location.pathname !== session.dashboardPath) {
-        window.location.replace(session.dashboardPath);
+        const dashboardUrl = new URL(session.dashboardPath, window.location.href);
+        dashboardUrl.hash = window.location.hash;
+        window.location.replace(dashboardUrl);
         return;
       }
-      setConnected(session.authenticated, session.email || '');
+      syncAdminPageFromHash();
+      setSignedIn(session.authenticated, session.email || '');
       if (session.authenticated) await loadAdminWorkspace();
     } catch (error) {
-      setConnected(false);
+      setSignedIn(false);
       $('loginMessage').textContent = error.message || 'Could not check the owner session. Refresh and try again.';
     }
   }
@@ -171,7 +195,7 @@
   }
   async function loadPosts() {
     const list = $('postsList');
-    if (!key()) { list.innerHTML = '<p class="empty-posts">Sign in to manage blog posts.</p>'; return; }
+    if (!isSignedIn()) { list.innerHTML = '<p class="empty-posts">Sign in to manage blog posts.</p>'; return; }
     try {
       const data = await api('/api/admin/posts');
       const posts = data.posts || [];
@@ -200,7 +224,7 @@
   }
   async function loadGallery() {
     const list = $('galleryList');
-    if (!key()) { list.innerHTML = '<p class="empty-posts">Sign in to manage gallery items.</p>'; return; }
+    if (!isSignedIn()) { list.innerHTML = '<p class="empty-posts">Sign in to manage gallery items.</p>'; return; }
     try {
       const data = await api('/api/admin/gallery');
       const items = data.items || [];
@@ -272,7 +296,7 @@
     return { weeklyRules, exceptions };
   }
   async function loadAvailabilitySchedule() {
-    const month = $('availabilityMonth')?.value; if (!month || !key()) return;
+    const month = $('availabilityMonth')?.value; if (!month || !isSignedIn()) return;
     const button = $('publishAvailabilityButton'); if (button) button.disabled = true;
     try {
       const data = await api(`/api/admin/availability?month=${encodeURIComponent(month)}`);
@@ -293,7 +317,7 @@
   }
   async function submitAvailability(event) {
     event.preventDefault();
-    if (!key()) { toast('Sign in first', true); return; }
+    if (!isSignedIn()) { toast('Sign in first', true); return; }
     const month = $('availabilityMonth').value;
     const button = $('publishAvailabilityButton'); button.disabled = true;
     try {
@@ -306,7 +330,7 @@
   }
   async function loadAppointments() {
     const list = $('appointmentsList');
-    if (!key()) { list.innerHTML = '<p class="empty-posts">Sign in to review consultations.</p>'; return; }
+    if (!isSignedIn()) { list.innerHTML = '<p class="empty-posts">Sign in to review consultations.</p>'; return; }
     try {
       const data = await api('/api/admin/appointments');
       const appointments = data.appointments || [];
@@ -367,6 +391,18 @@
     catch (error) { toast(error.message, true); }
   }
   function bind() {
+    document.querySelectorAll('[data-admin-page-link]').forEach((button) => button.addEventListener('click', () => {
+      const pageId = button.dataset.adminPageLink;
+      if (!ADMIN_PAGE_IDS.has(pageId)) return;
+      showAdminPage(pageId);
+      if (window.location.hash !== `#${pageId}`) {
+        const url = new URL(window.location.href);
+        url.hash = pageId;
+        window.history.pushState(null, '', url);
+      }
+    }));
+    window.addEventListener('popstate', syncAdminPageFromHash);
+    window.addEventListener('hashchange', syncAdminPageFromHash);
     $('loginForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const username = $('adminUsername').value.trim();
@@ -377,13 +413,13 @@
       try {
         const session = await api('/api/admin/login', { method: 'POST', body: { username, password } });
         $('adminPassword').value = '';
-        setConnected(true, session.email || '');
+        setSignedIn(true, session.email || '');
         toast('Owner signed in', 'Your session is protected and will expire automatically.');
         await loadAdminWorkspace();
       } catch (error) {
         $('adminPassword').value = '';
         $('loginMessage').textContent = error.message || 'Username or password is incorrect.';
-        setConnected(false);
+        setSignedIn(false);
         toast('Sign-in failed', error.message || 'Check your username and password.', true);
       } finally {
         button.disabled = false;
@@ -392,13 +428,13 @@
     $('logoutButton').addEventListener('click', async () => {
       try { await api('/api/admin/logout', { method: 'POST' }); }
       catch (error) { toast('Could not sign out cleanly', error.message, true); }
-      setConnected(false);
+      setSignedIn(false);
       $('adminPassword').value = '';
       toast('Signed out', 'The owner session cookie was cleared.');
     });
     $('siteForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Sign in first', 'Only a site owner can make changes.', true); return; }
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can make changes.', true); return; }
       const form = new FormData(event.currentTarget);
       const update = { ...site, businessName: String(form.get('businessName') || '').trim(), brandName: String(form.get('businessName') || '').trim().replace(/\s+(care|clinic|studio|practice|dental)$/i, '').trim(), location: String(form.get('location') || '').trim(), email: String(form.get('email') || '').trim(), phone: String(form.get('phone') || '').trim() };
       try { const data = await api('/api/site', { method: 'PUT', body: update }); site = data.config || update; applyToForm(); status('Details saved'); toast('Practice details updated', 'Your public site now has the latest contact information.'); }
@@ -412,7 +448,7 @@
     });
     $('themeForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Sign in first', 'Only a site owner can make changes.', true); return; }
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can make changes.', true); return; }
       const form = event.currentTarget;
       const update = { ...site, theme: form.elements.theme.value, editorialAccent: form.elements.editorialAccent.value, primaryColor: form.elements.primaryColor.value, accentColor: form.elements.accentColor.value, paperColor: form.elements.paperColor.value, fontStyle: form.elements.fontStyle.value };
       try { const data = await api('/api/site', { method: 'PUT', body: update }); site = data.config || update; applyToForm(); previewTheme(); status('Appearance saved'); toast('Your theme is updated', 'The public website will pick up the new palette and type style.'); }
@@ -426,7 +462,7 @@
     $('addPostGalleryImage').addEventListener('click', () => addPostGalleryRow());
     $('postForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Sign in first', 'Only a site owner can create posts.', true); return; }
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can create posts.', true); return; }
       const formElement = event.currentTarget;
       const form = new FormData(formElement);
       const post = { title: String(form.get('title') || '').trim(), slug: String(form.get('slug') || '').trim(), excerpt: String(form.get('excerpt') || '').trim(), body: String(form.get('body') || '').trim(), featureImageUrl: String(form.get('featureImageUrl') || '').trim(), featureImageAlt: String(form.get('featureImageAlt') || '').trim(), gallery: readPostGallery(), category: String(form.get('category') || '').trim(), status: String(form.get('status') || 'draft') };
@@ -436,7 +472,7 @@
     });
     $('galleryForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Sign in first', 'Only a site owner can manage gallery items.', true); return; }
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can manage gallery items.', true); return; }
       const formElement = event.currentTarget;
       const form = new FormData(formElement);
       const item = {

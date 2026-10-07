@@ -56,6 +56,21 @@ function zipEntries(bytes) {
   }
   return files;
 }
+test('builder and owner UI contain edit-page navigation but no admin-key connection flow', async () => {
+  const [builderHtml, ownerHtml, ownerJs] = await Promise.all([
+    readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/_scaffold/templates/shared/public/admin.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/_scaffold/templates/shared/public/admin.js', import.meta.url), 'utf8')
+  ]);
+  assert.match(builderHtml, /id="adminUsername"/);
+  assert.match(builderHtml, /id="adminEmail"/);
+  assert.match(builderHtml, /id="adminPassword"/);
+  for (const pageId of ['identity', 'appearance', 'blog', 'gallery', 'availability', 'appointments']) {
+    assert.match(ownerHtml, new RegExp(`data-admin-page-link="${pageId}"`));
+    assert.match(ownerHtml, new RegExp(`data-admin-page="${pageId}"`));
+  }
+  assert.doesNotMatch(`${builderHtml}\n${ownerHtml}\n${ownerJs}`, /ADMIN_API_KEY|adminKey|keyForm|sessionStorage|Bearer/i);
+});
 for (const secret of ['', 'test-only-secret']) {
   for (const target of ['vercel', 'cloudflare']) {
     test(`downloads ${target} ZIP ${secret ? 'with' : 'without'} a configured builder CSRF secret`, async () => {
@@ -110,6 +125,15 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     assert.match(adminHtml, /action="\/api\/admin\/login"/);
     assert.doesNotMatch(adminHtml, new RegExp(`value="${adminInput.adminUsername}"`));
     assert.doesNotMatch(adminHtml, new RegExp(`value="${adminInput.adminPassword}"`));
+    for (const pageId of ['identity', 'appearance', 'blog', 'gallery', 'availability', 'appointments']) {
+      assert.match(adminHtml, new RegExp(`data-admin-page-link="${pageId}"`));
+      assert.match(adminHtml, new RegExp(`data-admin-page="${pageId}"`));
+    }
+    const adminJsPath = target === 'cloudflare' ? 'public/admin.js' : 'admin.js';
+    const adminJs = files.get(adminJsPath);
+    assert.match(adminJs, /showAdminPage/);
+    assert.match(adminJs, /pushState/);
+    assert.doesNotMatch(`${adminHtml}\n${adminJs}\n${files.get(target === 'cloudflare' ? 'public/admin.css' : 'admin.css')}`, /ADMIN_API_KEY|adminKey|keyForm|sessionStorage|Bearer/i);
 
     const publicConfigPath = target === 'cloudflare' ? 'public/site-config.js' : 'site-config.js';
     assert.doesNotMatch(files.get(publicConfigPath), /owner@example\.test|practiceowner/);

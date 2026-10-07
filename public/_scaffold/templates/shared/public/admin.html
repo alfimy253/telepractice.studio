@@ -9,21 +9,31 @@
 <body class="admin-body">
   <header class="admin-topbar"><a class="site-brand" href="/" aria-label="View website"><span class="brand-symbol" id="adminSymbol">✳</span><span><strong id="adminBrandName">Practice studio</strong><small>WEBSITE OWNER</small></span></a><div class="admin-top-actions"><span class="owner-pill" id="ownerIdentity" hidden><i></i><span id="ownerEmail"></span></span><button type="button" class="preview-link admin-logout" id="logoutButton" hidden>Sign out</button><a href="/" class="preview-link">View website ↗</a></div></header>
   <main class="admin-wrap">
-    <div class="admin-heading"><div><span class="admin-overline">PRACTICE WEBSITE</span><h1>Your site, your voice.</h1><p>Edit the essentials. Changes to your brand and theme update the public website right away.</p></div><span class="save-indicator" id="saveIndicator"><i></i> Ready to edit</span></div>
-    <section class="admin-connect panel-admin" id="connectPanel">
-      <div class="connect-icon">⌁</div><div class="connect-copy"><strong>Owner sign in</strong><p>Use the username and password you set in the builder. Your admin email is kept with the account for reference.</p></div>
+    <div class="admin-heading"><div><span class="admin-overline">PRACTICE WEBSITE</span><h1>Your site, your voice.</h1><p>Choose a page to update practice details, appearance, content, availability or appointments.</p></div><span class="save-indicator" id="saveIndicator"><i></i> Ready to edit</span></div>
+    <section class="admin-login-panel panel-admin" id="loginPanel">
+      <div class="login-icon">⌁</div><div class="login-copy"><strong>Owner sign in</strong><p>Use the username and password you set in the builder. Your admin email is kept with the account for reference.</p></div>
       <form id="loginForm" class="admin-login-form" method="post" action="/api/admin/login" autocomplete="on"><label for="adminUsername">Username<input id="adminUsername" name="username" type="text" maxlength="64" autocomplete="username" required></label><label for="adminPassword">Password<input id="adminPassword" name="password" type="password" maxlength="128" autocomplete="current-password" required></label><button type="submit" class="admin-primary" id="loginButton">Sign in</button><small id="loginMessage" aria-live="polite">Sign-in fields are never prefilled into the public page.</small></form>
     </section>
     <section class="admin-grid" id="adminWorkspace" hidden>
+      <nav class="admin-page-nav" aria-label="Website editing pages">
+        <span class="admin-page-nav-heading">EDIT PAGES</span>
+        <button type="button" class="active" data-admin-page-link="identity" aria-controls="adminPage-identity" aria-current="page"><span class="admin-nav-number">01</span><span>Practice details</span></button>
+        <button type="button" data-admin-page-link="appearance" aria-controls="adminPage-appearance"><span class="admin-nav-number">02</span><span>Appearance</span></button>
+        <button type="button" data-admin-page-link="blog" aria-controls="blogEditor"><span class="admin-nav-number">03</span><span>Blog posts</span></button>
+        <button type="button" data-admin-page-link="gallery" aria-controls="galleryEditor"><span class="admin-nav-number">04</span><span>Gallery</span></button>
+        <button type="button" data-admin-page-link="availability" aria-controls="availabilityManager"><span class="admin-nav-number">05</span><span>Availability</span></button>
+        <button type="button" data-admin-page-link="appointments" aria-controls="appointmentManager"><span class="admin-nav-number">06</span><span>Appointments</span></button>
+        <small class="admin-page-nav-note">Your changes are saved to this practice site.</small>
+      </nav>
       <div class="admin-main-column">
-        <section class="panel-admin admin-card">
+        <section class="panel-admin admin-card" id="adminPage-identity" data-admin-page="identity">
           <div class="admin-card-heading"><div><span class="admin-section-index">01 / IDENTITY</span><h2>Practice details</h2><p>Keep your contact information current.</p></div><span class="card-icon">✳</span></div>
           <form id="siteForm" class="admin-form" method="post" action="/api/site">
             <div class="admin-form-grid"><label><span>Practice name</span><input name="businessName" maxlength="80" required></label><label><span>City or neighborhood</span><input name="location" maxlength="100"></label><label><span>Contact email</span><input name="email" type="email" maxlength="120"></label><label><span>Phone</span><input name="phone" type="tel" maxlength="30"></label></div>
             <div class="admin-form-actions"><small>This site uses fixed page and post fields—simple to maintain.</small><button type="submit" class="admin-primary">Save details</button></div>
           </form>
         </section>
-        <section class="panel-admin admin-card">
+        <section class="panel-admin admin-card" id="adminPage-appearance" data-admin-page="appearance" hidden>
           <div class="admin-card-heading"><div><span class="admin-section-index">02 / APPEARANCE</span><h2>Make it feel like you</h2><p>Adjust the theme without editing code.</p></div><span class="card-icon card-icon-theme">◌</span></div>
           <form id="themeForm" class="admin-form" method="post" action="/api/site">
             <div class="admin-theme-layout"><label><span>Site layout</span><select name="theme"><option value="canopy">Canopy · calm and grounded</option><option value="clay">Soft clay · warm and welcoming</option><option value="coastal">Coastal · bright and clear</option><option value="editorial">Editorial · classic sidebar layout</option><option value="neat">Neat · portfolio and agency</option><option value="launcher">Launcher · bold full-site landing</option><option value="air">Air · clean with vibrant accents</option></select></label><label id="editorialAccentField"><span>Editorial accent</span><select name="editorialAccent"><option value="black">Black</option><option value="teal">Teal</option><option value="forest">Dark green</option></select></label></div>
@@ -31,7 +41,7 @@
             <div class="theme-preview-box" id="themePreviewBox"><span class="theme-mini-mark" id="themeMiniMark">✳</span><span><strong id="themePreviewName">Practice name</strong><small id="themePreviewLayout">Thoughtful care. Clear answers.</small></span><button type="submit" class="admin-primary">Save appearance</button></div>
           </form>
         </section>
-        <section class="panel-admin admin-card blog-admin-card" id="blogEditor">
+        <section class="panel-admin admin-card blog-admin-card" id="blogEditor" data-admin-page="blog" hidden>
           <div class="admin-card-heading"><div><span class="admin-section-index">03 / BLOG CMS</span><h2>Helpful notes, simply managed.</h2><p>Fixed post fields plus a required feature image and an optional image gallery.</p></div><span class="card-icon card-icon-blog">▤</span></div>
           <form id="postForm" class="admin-form post-form" method="post" action="/api/admin/posts">
             <input type="hidden" name="id">
@@ -40,7 +50,7 @@
           </form>
           <div class="posts-admin-list"><div class="posts-admin-header"><strong>Your posts</strong><span id="postCount">0 posts</span></div><div id="postsList" class="posts-list"><p class="empty-posts">Sign in to manage blog posts.</p></div></div>
         </section>
-        <section class="panel-admin admin-card gallery-admin-card" id="galleryEditor">
+        <section class="panel-admin admin-card gallery-admin-card" id="galleryEditor" data-admin-page="gallery" hidden>
           <div class="admin-card-heading"><div><span class="admin-section-index">04 / GALLERY CMS</span><h2>Show a little more of practice life.</h2><p>Fixed gallery fields: title, image URL, alt text, caption, category, status and order.</p></div><span class="card-icon card-icon-gallery">▧</span></div>
           <form id="galleryForm" class="admin-form gallery-form" method="post" action="/api/admin/gallery">
             <input type="hidden" name="id">
@@ -49,7 +59,7 @@
           </form>
           <div class="posts-admin-list"><div class="posts-admin-header"><strong>Your gallery</strong><span id="galleryCount">0 items</span></div><div id="galleryList" class="gallery-admin-list"><p class="empty-posts">Sign in to manage gallery items.</p></div></div>
         </section>
-        <section class="panel-admin admin-card availability-admin-card" id="availabilityManager">
+        <section class="panel-admin admin-card availability-admin-card" id="availabilityManager" data-admin-page="availability" hidden>
           <div class="admin-card-heading"><div><span class="admin-section-index">05 / CONSULTATION AVAILABILITY</span><h2>Publish next month’s calendar.</h2><p>Set weekly hours, then add date-specific open hours or closures. Times are generated in 30-minute slots.</p></div><span class="card-icon card-icon-calendar">◷</span></div>
           <form id="availabilityForm" class="admin-form availability-form" method="post" action="/api/admin/availability">
             <div class="schedule-month-row"><label><span>Month to publish</span><input id="availabilityMonth" name="month" type="month" required></label><div class="schedule-deadline" id="scheduleDeadline">Schedule deadline</div></div>
@@ -69,7 +79,7 @@
             <div class="admin-form-actions"><small id="availabilityScheduleMessage">No schedule has been loaded.</small><button type="submit" class="admin-primary" id="publishAvailabilityButton">Publish availability</button></div>
           </form>
         </section>
-        <section class="panel-admin admin-card appointment-admin-card" id="appointmentManager">
+        <section class="panel-admin admin-card appointment-admin-card" id="appointmentManager" data-admin-page="appointments" hidden>
           <div class="admin-card-heading"><div><span class="admin-section-index">06 / SCHEDULING</span><h2>Consultations & follow-up</h2><p>Reservations are immediate. Owner cancellations need 24 hours’ notice; clients can cancel from their account at any time. Optional clinical or non-clinical notes appear only in the linked client’s account. This starter is not a compliant EHR; review privacy and security before entering sensitive clinical details.</p></div><span class="card-icon card-icon-calendar">◷</span></div>
           <div class="appointment-toolbar"><span id="appointmentCount">Recent & upcoming consultations</span><button type="button" id="refreshAppointments">Refresh list ↻</button></div>
           <div id="appointmentsList" class="appointments-list"><p class="empty-posts">Sign in to review appointment requests.</p></div>
