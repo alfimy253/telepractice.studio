@@ -1,6 +1,40 @@
 import { createZip } from './zip.js';
 
 const encoder = new TextEncoder();
+const DB_URL_PROTOCOLS = new Set(['postgres:', 'postgresql:']);
+const DB_URL_RUNTIME_ONLY_PARAMS = new Set(['sslmode', 'channel_binding']);
+function randomSecret(byteLength = 32) {
+  const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+function decodeHtmlEscapedUrl(value) {
+  let decoded = String(value ?? '').trim();
+  // URLs copied out of a dashboard or email can carry escaped ampersands.
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = decoded.replace(/&amp;/gi, '&');
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
+}
+// Mirrors the generated app's own db/connection.js normalization so the
+// value baked into the downloaded env file already matches what the Neon
+// serverless HTTP driver expects: no sslmode/channel_binding query params.
+function normalizeDatabaseUrl(value) {
+  const raw = decodeHtmlEscapedUrl(value).slice(0, 2048);
+  if (!raw) return '';
+  let url;
+  try { url = new URL(raw); } catch (_) {
+    throw new Error('Enter a valid Neon database connection string.');
+  }
+  if (!DB_URL_PROTOCOLS.has(url.protocol) || !url.hostname || !url.pathname || url.pathname === '/') {
+    throw new Error('Enter a valid Neon database connection string.');
+  }
+  for (const key of [...url.searchParams.keys()]) {
+    if (DB_URL_RUNTIME_ONLY_PARAMS.has(key.toLowerCase())) url.searchParams.delete(key);
+  }
+  return url.toString();
+}
 const THEME_DEFAULTS = {
   canopy: { primaryColor: '#376f62', accentColor: '#e9b36e', paperColor: '#fbf8f1' },
   clay: { primaryColor: '#ac6550', accentColor: '#e8b897', paperColor: '#fbf6ef' },
@@ -141,6 +175,23 @@ function normalizeConfig(input = {}) {
     createdAt: clean(input.createdAt, 40, new Date().toISOString())
   };
 }
+// Kept separate from normalizeConfig's return value on purpose: `config` is
+// serialized as-is into __SITE_CONFIG_JSON__ (public site-config.js, the
+// public /api/site response, and db/seed.sql). Secrets must never enter
+// that object — they are only substituted into the two gitignored-by-default
+// env files (.dev.vars / .env) below.
+function buildSecrets(input) {
+  return {
+    // A fresh, random ADMIN_API_KEY and CSRF_SECRET are generated for every
+    // download so each deployment starts with unique, ready-to-use values
+    // instead of a shared placeholder string.
+    adminApiKey: randomSecret(32),
+    csrfSecret: randomSecret(32),
+    // Only the Neon connection string is user-provided — the builder has no
+    // database of its own and cannot invent one.
+    databaseUrl: normalizeDatabaseUrl(input.databaseUrl)
+  };
+}
 function replaceTokens(text, config) {
   const tokens = {
     '__SITE_ID__': config.siteId, '__SITE_CONFIG_JSON__': jsSafeJson(config),
@@ -150,6 +201,18 @@ function replaceTokens(text, config) {
     '__DEPLOY_TARGET__': htmlEscape(config.target === 'cloudflare' ? 'Cloudflare Workers' : 'Vercel')
   };
   return text.replace(/__SITE_ID__|__SITE_CONFIG_JSON__|__BUSINESS_NAME__|__BRAND_NAME__|__LOCATION__|__EMAIL__|__PHONE__|__PAPER_COLOR__|__DEPLOY_TARGET__/g, (token) => tokens[token]);
+}
+// Applied only to the generated .dev.vars / .env files. Kept separate from
+// replaceTokens() so a real DATABASE_URL or generated secret can never leak
+// into a file that also carries __SITE_CONFIG_JSON__ or other public tokens.
+function replaceSecretTokens(text, secrets) {
+  const placeholder = 'postgresql://USER:PASSWORD@HOST.neon.tech/DB';
+  const tokens = {
+    '__DATABASE_URL__': secrets.databaseUrl || placeholder,
+    '__ADMIN_API_KEY__': secrets.adminApiKey,
+    '__CSRF_SECRET__': secrets.csrfSecret
+  };
+  return text.replace(/__DATABASE_URL__|__ADMIN_API_KEY__|__CSRF_SECRET__/g, (token) => tokens[token]);
 }
 function createSeedSql(config) {
   const lines = [
@@ -163,20 +226,27 @@ function createSeedSql(config) {
   for (const item of config.demoGallery) lines.push(`INSERT INTO gallery_items (site_id, title, image_url, alt_text, caption, category, status, sort_order) SELECT ${sqlLiteral(config.siteId)}, ${sqlLiteral(item.title)}, ${sqlLiteral(item.imageUrl)}, ${sqlLiteral(item.altText)}, ${sqlLiteral(item.caption)}, ${sqlLiteral(item.category)}, 'published', ${Number(item.sortOrder)} WHERE NOT EXISTS (SELECT 1 FROM gallery_items WHERE site_id = ${sqlLiteral(config.siteId)} AND title = ${sqlLiteral(item.title)});`);
   return lines.join('\n') + '\n';
 }
-function generatedReadme(config) {
+function generatedReadme(config, secrets) {
   const code = (value) => String.fromCharCode(96) + value + String.fromCharCode(96);
   const targetName = config.target === 'cloudflare' ? 'Cloudflare Workers' : 'Vercel';
+  const envFile = ENV_FILE_BY_TARGET[config.target];
+  const hasDatabaseUrl = Boolean(secrets?.databaseUrl);
   const lines = [
     `# ${config.businessName} — ${targetName} code package`, '',
     `This ZIP contains the ${targetName} project only. It is a source-code package; it does not deploy or publish your website.`, '',
+    '## Environment variables',
+    `${code(envFile)} is included ready to use — not a ${code('.example')} template. The builder already generated a unique, random ${code('ADMIN_API_KEY')} and ${code('CSRF_SECRET')} for this download, so you do not need to invent or paste those yourself.`,
+    hasDatabaseUrl
+      ? `${code('DATABASE_URL')} was filled in from the Neon connection string you entered in the builder. ${code('sslmode')}/${code('channel_binding')} query parameters were removed automatically — the generated runtime uses Neon's secure HTTP transport and does not use them.`
+      : `${code('DATABASE_URL')} still has a placeholder value because no database connection string was entered in the builder. Replace it with your pooled Neon URL, for example ${code('postgresql://USER:PASSWORD@HOST.neon.tech/DB')} (leave out ${code('sslmode')}/${code('channel_binding')} — the generated runtime uses Neon's secure HTTP transport and does not use them).`,
+    `Treat ${code(envFile)} as a secret: it is already ignored by the included ${code('.gitignore')}, so keep it out of source control.`, '',
     '## Database setup',
-    `Create a Neon Postgres database, then run ${code('db/schema.sql')} and ${code('db/seed.sql')} once. The seed file includes the generated site configuration, payment details, custom pages and sample practice content.`,
-    `Set ${code('DATABASE_URL')} to the pooled Neon URL without ${code('sslmode')} or ${code('channel_binding')} query parameters, for example ${code('postgresql://USER:PASSWORD@HOST.neon.tech/DB')}. The generated serverless runtime uses Neon's secure HTTP transport, normalizes HTML-escaped URLs copied from a dashboard, and never hardcodes your credentials.`, '',
+    `Create a Neon Postgres database (if you have not already), then run ${code('db/schema.sql')} and ${code('db/seed.sql')} once. The seed file includes the generated site configuration, payment details, custom pages and sample practice content.`, '',
     config.target === 'vercel' ? '## Deploy to Vercel' : '## Deploy to Cloudflare Workers',
     config.target === 'vercel'
-      ? `Deploy this folder to Vercel. Configure ${code('DATABASE_URL')}, ${code('ADMIN_API_KEY')} and ${code('CSRF_SECRET')} using ${code('.env.example')}. For local development, run ${code('npm install')} and ${code('npm run dev')}.`
-      : `Use Node.js 22+, run ${code('npm install')}, set ${code('DATABASE_URL')}, ${code('ADMIN_API_KEY')} and ${code('CSRF_SECRET')} with Wrangler secrets, then run ${code('npm run deploy')}. For local development, copy ${code('.dev.vars.example')} to ${code('.dev.vars')} and run ${code('npm run dev')}.`, '',
-    `The public owner editor is ${code('/admin.html')}. Its owner key is stored only in this browser tab's sessionStorage. The site has ${config.customPages.length} custom menu page${config.customPages.length === 1 ? '' : 's'} and GCash/Maya payment details configured in the generated settings.`, '',
+      ? `Deploy this folder to Vercel. In the Vercel dashboard, copy the values from ${code('.env')} into the project's Environment Variables (the ${code('.env')} file itself is only read locally). For local development, run ${code('npm install')} and ${code('npm run dev')}.`
+      : `Use Node.js 22+, run ${code('npm install')}, then copy the values from ${code('.dev.vars')} into Wrangler secrets (${code('npx wrangler secret put DATABASE_URL')}, etc.) before running ${code('npm run deploy')} — Wrangler does not upload ${code('.dev.vars')} to the deployed Worker. For local development, ${code('.dev.vars')} is already in place, so just run ${code('npm run dev')}.`, '',
+    `The public owner editor is ${code('/admin.html')}. Sign in with the ${code('ADMIN_API_KEY')} value from ${code(envFile)}; the key is stored only in this browser tab's sessionStorage after that. The site has ${config.customPages.length} custom menu page${config.customPages.length === 1 ? '' : 's'} and GCash/Maya payment details configured in the generated settings.`, '',
     '## Site notes',
     'The starter includes fixed-field blog and gallery content, client accounts and appointment scheduling. Appointment availability remains unpublished until the site owner configures it. Review the privacy and security guidance in the owner editor before adding sensitive information. This starter is not a compliant electronic health record system.', '',
     `Generated practice: **${config.businessName}** (${config.specialtyLabel}) · Site ID: ${code(config.siteId)} · Selected target: **${targetName}**`
@@ -235,8 +305,10 @@ async function readScaffold(env, origin, filename) {
   if (!response.ok) throw new Error(`Missing build scaffold file: ${filename}`);
   return response.text();
 }
+const ENV_FILE_BY_TARGET = { cloudflare: '.dev.vars', vercel: '.env' };
 async function buildFiles(input, env, origin) {
   const config = normalizeConfig(input);
+  const secrets = buildSecrets(input);
   const target = config.target;
   const manifest = JSON.parse(await readScaffold(env, origin, 'manifest.json'));
   const files = new Map();
@@ -252,7 +324,8 @@ async function buildFiles(input, env, origin) {
   files.set('db/seed.sql', createSeedSql(config));
 
   for (const relative of manifest[target]) {
-    const content = replaceTokens(await readScaffold(env, origin, `${target}/${relative}`), config);
+    let content = replaceTokens(await readScaffold(env, origin, `${target}/${relative}`), config);
+    if (relative === ENV_FILE_BY_TARGET[target]) content = replaceSecretTokens(content, secrets);
     files.set(relative, content);
   }
   for (const page of config.customPages) {
@@ -260,7 +333,7 @@ async function buildFiles(input, env, origin) {
     files.set(target === 'vercel' ? pageFile : `public/${pageFile}`, generatedCustomPageHtml(config, page));
   }
 
-  files.set('README.md', generatedReadme(config));
+  files.set('README.md', generatedReadme(config, secrets));
   files.set('manifest.json', JSON.stringify({
     generator: 'Canopy Studio Cloudflare Builder', version: '1.2.0', siteId: config.siteId,
     specialty: config.specialty, generatedAt: new Date().toISOString(), target,

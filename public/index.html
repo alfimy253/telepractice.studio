@@ -185,6 +185,24 @@
               </button>
             </div>
             <div class="deploy-note"><span class="deploy-note-icon">i</span><p>Only the selected code package is downloaded. Nothing is deployed or published for you.</p></div>
+
+            <div class="section-head section-head-space" id="env-config">
+              <div class="section-count">05</div>
+              <div><h2>Environment variables.</h2><p>Filled in for you — no renaming <span id="envFileExampleName">.env.example</span> to <span id="envFileReadyName">.env</span> after you unzip.</p></div>
+            </div>
+            <article class="panel env-panel">
+              <div class="panel-topline"><span class="panel-kicker">DATABASE CONNECTION</span></div>
+              <label class="form-field env-field">
+                <span>Neon database connection string <small>(optional — add it now, or paste it into the file later)</small></span>
+                <div class="secret-input-row">
+                  <input id="databaseUrl" type="password" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="postgresql://USER:PASSWORD@HOST.neon.tech/DB">
+                  <button type="button" class="icon-button secret-toggle" id="toggleDatabaseUrl" aria-label="Show connection string">Show</button>
+                </div>
+              </label>
+              <p class="env-helper">Paste it exactly as Neon gives it to you, including <code>?sslmode=require&amp;channel_binding=require</code> if present — the builder strips those query parameters automatically, because the generated app's Neon HTTP driver doesn't use them. Leave this blank to fill in <code>DATABASE_URL</code> yourself after downloading.</p>
+              <div class="fixed-schema-note env-autogen-note"><span class="note-check"><svg><use href="#i-check"/></svg></span><span>Auto-generated for you</span><p><code>ADMIN_API_KEY</code> and <code>CSRF_SECRET</code> are created fresh and at random for every download, then written straight into your ready-to-use <strong id="envFileNote">.env</strong> file — nothing to type, nothing shared between sites. This value is only used to build your ZIP; the builder keeps no database of its own and does not store what you paste here.</p></div>
+            </article>
+
             <button class="button button-dark generate-wide" id="generateButton"><svg><use href="#i-download"/></svg><span>Download Vercel ZIP</span><span class="button-shortcut">ZIP <svg><use href="#i-arrow"/></svg></span></button>
             <p class="generated-footnote">Code package only · deploy it yourself on the selected host</p>
           </section>

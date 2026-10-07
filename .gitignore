@@ -3,4 +3,9 @@ node_modules/
 .dev.vars
 .env
 .env.*
-!.env.example
+
+# Scaffold templates are checked into git on purpose: they only contain
+# placeholder tokens (e.g. __CSRF_SECRET__) that the builder fills in at
+# ZIP-generation time, never real secrets.
+!public/_scaffold/templates/cloudflare/.dev.vars
+!public/_scaffold/templates/vercel/.env

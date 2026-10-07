@@ -11,6 +11,7 @@ const DEFAULT_CONFIG = {
   fontStyle: 'serif',
   editorialAccent: 'black',
   deploymentTarget: 'vercel',
+  databaseUrl: '',
   payments: { gcashName: 'Harborlight Veterinary Care', gcashNumber: '+63 917 555 0134', mayaName: 'Harborlight Veterinary Care', mayaNumber: '+63 918 555 0142' },
   customPages: [],
   features: { blog: true, gallery: true, scheduling: true }
@@ -71,6 +72,10 @@ function loadConfig() {
     if (!saved) return structuredClone(DEFAULT_CONFIG);
     return {
       ...structuredClone(DEFAULT_CONFIG), ...saved,
+      // The database connection string is a credential, not a site setting:
+      // it is kept in memory for this tab only and is never written to
+      // localStorage (see saveConfig), so a reload always starts it blank.
+      databaseUrl: '',
       payments: { ...DEFAULT_CONFIG.payments, ...(saved.payments || {}) },
       customPages: normalizeSavedPages(saved.customPages),
       deploymentTarget: saved.deploymentTarget === 'cloudflare' ? 'cloudflare' : 'vercel',
@@ -79,7 +84,10 @@ function loadConfig() {
   } catch (_) { return structuredClone(DEFAULT_CONFIG); }
 }
 function saveConfig() {
-  localStorage.setItem('canopy-site-config', JSON.stringify(config));
+  // Persist everything except the database connection string, which can
+  // carry a real password and should not linger in localStorage.
+  const { databaseUrl: _omit, ...persisted } = config;
+  localStorage.setItem('canopy-site-config', JSON.stringify(persisted));
   const indicator = document.querySelector('.autosave');
   if (indicator) indicator.innerHTML = '<span class="status-dot"></span> All changes saved';
 }
@@ -212,6 +220,14 @@ function syncDownloadControls() {
   if (top) top.innerHTML = `<svg><use href="#i-download"/></svg> Download ${displayName} ZIP`;
   const main = $('generateButton')?.querySelector('span:first-of-type');
   if (main) main.textContent = `Download ${displayName} ZIP`;
+  const envFile = target === 'cloudflare' ? '.dev.vars' : '.env';
+  const envExample = target === 'cloudflare' ? '.dev.vars.example' : '.env.example';
+  const exampleLabel = $('envFileExampleName');
+  if (exampleLabel) exampleLabel.textContent = envExample;
+  const readyLabel = $('envFileReadyName');
+  if (readyLabel) readyLabel.textContent = envFile;
+  const noteLabel = $('envFileNote');
+  if (noteLabel) noteLabel.textContent = envFile;
 }
 function setDeploymentTarget(target) {
   if (!['vercel', 'cloudflare'].includes(target)) return;
@@ -253,6 +269,7 @@ function configForPackage() {
     },
     customPages: normalizeSavedPages(config.customPages),
     target: config.deploymentTarget === 'cloudflare' ? 'cloudflare' : 'vercel',
+    databaseUrl: String(config.databaseUrl || '').trim().slice(0, 2048),
     heroEyebrow: kind.eyebrow,
     heroHeadline: kind.headline.replace('|', '\n'),
     heroText: kind.subhead,
@@ -582,6 +599,14 @@ function bindEvents() {
   $('generateButton').addEventListener('click', downloadPackage);
   $('topGenerate').addEventListener('click', downloadPackage);
   document.querySelectorAll('[data-deployment-target]').forEach((button) => button.addEventListener('click', () => setDeploymentTarget(button.dataset.deploymentTarget)));
+  $('databaseUrl').addEventListener('input', (event) => { config.databaseUrl = event.target.value; });
+  $('toggleDatabaseUrl').addEventListener('click', () => {
+    const field = $('databaseUrl');
+    const reveal = field.type === 'password';
+    field.type = reveal ? 'text' : 'password';
+    $('toggleDatabaseUrl').textContent = reveal ? 'Hide' : 'Show';
+    $('toggleDatabaseUrl').setAttribute('aria-label', reveal ? 'Hide connection string' : 'Show connection string');
+  });
   $('openWalkthrough').addEventListener('click', openWizard);
   $('sidebarTour').addEventListener('click', (event) => { event.preventDefault(); openWizard(); });
   $('editPractice').addEventListener('click', () => $('practiceName').focus());
