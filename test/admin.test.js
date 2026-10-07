@@ -8,7 +8,8 @@ import {
   verifyAdminSession,
   verifyPasswordHash
 } from '../public/_scaffold/templates/shared/lib/admin-security.js';
-import { normalizeAdminAccount } from '../src/generator.js';
+import { cleanMenuLinks, DEFAULT_MENU_LINKS, MAX_MENU_LINKS, menuLinksForPages } from '../public/_scaffold/templates/shared/lib/menu-links.js';
+import { normalizeAdminAccount, normalizeConfig } from '../src/generator.js';
 
 const validAccount = {
   adminUsername: 'practiceowner',
@@ -37,6 +38,37 @@ test('admin dashboard path recognizer accepts only a valid day number and dashbo
   for (const path of ['/admin.html', '/tadmin0/dashboard', '/tadmin32/dashboard', '/tadmin8', '/tadmin8/posts']) {
     assert.equal(isAdminDashboardPath(path), false);
   }
+});
+
+test('menu-link normalization keeps safe destinations, caps list size and skips unsafe or duplicate links', () => {
+  const links = cleanMenuLinks([
+    { id: 'home', label: 'Home', href: '/#home', feature: 'gallery' },
+    { id: 'external', label: 'External', href: 'https://example.test/about' },
+    { id: 'javascript', label: 'Unsafe', href: 'javascript:alert(1)' },
+    { id: 'protocol-relative', label: 'Unsafe', href: '//outside.example/path' },
+    { id: 'credentials', label: 'Unsafe', href: 'https://owner:secret@example.test/path' },
+    { id: 'duplicate', label: 'First', href: '/first' },
+    { id: 'duplicate', label: 'Second', href: '/second' }
+  ], []);
+  assert.deepEqual(links, [
+    { id: 'home', label: 'Home', href: '/#home', feature: 'gallery' },
+    { id: 'external', label: 'External', href: 'https://example.test/about' },
+    { id: 'duplicate', label: 'First', href: '/first' }
+  ]);
+  assert.equal(cleanMenuLinks(Array.from({ length: MAX_MENU_LINKS + 4 }, (_unused, index) => ({ id: `item-${index}`, label: `Link ${index}`, href: `/link-${index}` })), []).length, MAX_MENU_LINKS);
+});
+
+test('new site configs include default and generated custom-page menu links', () => {
+  assert.equal(DEFAULT_MENU_LINKS.length, 7);
+  const config = normalizeConfig({
+    target: 'vercel', businessName: 'Canopy Care',
+    customPages: [{ id: 'privacy', menuName: 'Privacy', url: '/privacy', pageTitle: 'Privacy policy', pageContent: 'Our privacy policy.' }]
+  });
+  assert.equal(config.menuLinks.length, 8);
+  assert.deepEqual(config.menuLinks.at(-1), { id: 'custom-privacy', label: 'Privacy', href: '/privacy.html' });
+  assert.deepEqual(menuLinksForPages([{ id: 'terms', menuName: 'Terms', url: '/terms.html' }]).at(-1), {
+    id: 'custom-terms', label: 'Terms', href: '/terms.html'
+  });
 });
 
 test('builder validates administrator username, email, and all password requirements', () => {

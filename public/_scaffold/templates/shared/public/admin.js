@@ -3,7 +3,8 @@
   let site = { ...fallback, features: { ...(fallback.features || {}) } };
   let csrfToken = '';
   let signedIn = false;
-  const ADMIN_PAGE_IDS = new Set(['identity', 'appearance', 'blog', 'gallery', 'availability', 'appointments']);
+  const ADMIN_PAGE_IDS = new Set(['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments']);
+  const MAX_MENU_LINKS = 16;
   const $ = (id) => document.getElementById(id);
   const isSignedIn = () => signedIn;
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -72,6 +73,83 @@
     const isDental = site.specialty === 'dental';
     $('adminSymbol').textContent = isDental ? '✦' : '✳'; $('themeMiniMark').textContent = isDental ? '✦' : '✳';
   }
+  function newMenuLinkId() {
+    const random = window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    return `custom-${random}`;
+  }
+  function readMenuLinks() {
+    return [...$('menuLinksList').querySelectorAll('[data-menu-link-row]')].map((row) => {
+      const feature = row.dataset.menuLinkFeature || '';
+      return {
+        id: row.dataset.menuLinkId,
+        label: row.querySelector('[data-menu-link-field="label"]').value.trim(),
+        href: row.querySelector('[data-menu-link-field="href"]').value.trim(),
+        ...(feature ? { feature } : {})
+      };
+    });
+  }
+  function updateMenuLinkPositions() {
+    const rows = [...$('menuLinksList').querySelectorAll('[data-menu-link-row]')];
+    rows.forEach((row, index) => {
+      row.querySelector('.admin-menu-link-position').textContent = String(index + 1).padStart(2, '0');
+      row.querySelector('[data-menu-action="up"]').disabled = index === 0;
+      row.querySelector('[data-menu-action="down"]').disabled = index === rows.length - 1;
+    });
+  }
+  function renderMenuLinks(items = site.menuLinks) {
+    const list = $('menuLinksList');
+    if (!list) return;
+    list.replaceChildren();
+    (Array.isArray(items) ? items.slice(0, MAX_MENU_LINKS) : []).forEach((item, index) => {
+      const row = document.createElement('div');
+      row.className = 'admin-menu-link-row';
+      row.dataset.menuLinkRow = 'true';
+      row.dataset.menuLinkId = String(item?.id || newMenuLinkId()).slice(0, 48);
+      row.dataset.menuLinkFeature = ['gallery', 'blog', 'scheduling'].includes(item?.feature) ? item.feature : '';
+      const position = document.createElement('span');
+      position.className = 'admin-menu-link-position';
+      position.setAttribute('aria-label', `Menu position ${index + 1}`);
+      const label = document.createElement('label');
+      label.className = 'admin-menu-link-field';
+      const labelTitle = document.createElement('span'); labelTitle.textContent = 'Link label';
+      const labelInput = document.createElement('input');
+      labelInput.type = 'text'; labelInput.maxLength = 60; labelInput.required = true;
+      labelInput.autocomplete = 'off'; labelInput.placeholder = 'e.g. Our care'; labelInput.value = String(item?.label || '');
+      labelInput.dataset.menuLinkField = 'label';
+      label.append(labelTitle, labelInput);
+      const destination = document.createElement('label');
+      destination.className = 'admin-menu-link-field admin-menu-link-destination';
+      const destinationTitle = document.createElement('span'); destinationTitle.textContent = 'Destination';
+      const destinationInput = document.createElement('input');
+      destinationInput.type = 'text'; destinationInput.inputMode = 'url'; destinationInput.maxLength = 2048;
+      destinationInput.required = true; destinationInput.autocomplete = 'url'; destinationInput.spellcheck = false;
+      destinationInput.placeholder = '/appointments.html or https://example.com';
+      destinationInput.value = String(item?.href || ''); destinationInput.dataset.menuLinkField = 'href';
+      destination.append(destinationTitle, destinationInput);
+      const actions = document.createElement('div'); actions.className = 'admin-menu-link-actions';
+      for (const [action, glyph, accessibleName] of [['up', '↑', 'Move link up'], ['down', '↓', 'Move link down'], ['remove', '×', 'Remove link']]) {
+        const button = document.createElement('button');
+        button.type = 'button'; button.dataset.menuAction = action; button.textContent = glyph;
+        button.setAttribute('aria-label', accessibleName); button.title = accessibleName;
+        actions.appendChild(button);
+      }
+      row.append(position, label, destination, actions);
+      list.appendChild(row);
+    });
+    updateMenuLinkPositions();
+  }
+  function safeMenuDestination(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw || raw.length > 2048 || /[\u0000-\u001f\u007f]/.test(raw)) return false;
+    if (raw.startsWith('/')) {
+      if (raw.startsWith('//') || raw.startsWith('/\\')) return false;
+      try { return new URL(raw, window.location.origin).origin === window.location.origin; } catch (_) { return false; }
+    }
+    try {
+      const url = new URL(raw);
+      return url.protocol === 'https:' && Boolean(url.hostname) && !url.username && !url.password;
+    } catch (_) { return false; }
+  }
   function previewTheme() {
     const form = $('themeForm');
     const primary = form.elements.primaryColor.value;
@@ -105,7 +183,7 @@
       const response = await fetch('/api/site', { headers: { Accept: 'application/json' } });
       if (response.ok) { const data = await response.json(); if (data.config) site = { ...site, ...data.config, features: { ...site.features, ...(data.config.features || {}) } }; }
     } catch (_) {}
-    applyToForm(); previewTheme();
+    applyToForm(); previewTheme(); renderMenuLinks(site.menuLinks);
   }
   function setSignedIn(value, email = '') {
     signedIn = Boolean(value);
@@ -403,6 +481,62 @@
     }));
     window.addEventListener('popstate', syncAdminPageFromHash);
     window.addEventListener('hashchange', syncAdminPageFromHash);
+    $('menuLinksList').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-menu-action]');
+      if (!button) return;
+      const row = button.closest('[data-menu-link-row]');
+      if (!row) return;
+      const action = button.dataset.menuAction;
+      if (action === 'remove') row.remove();
+      else if (action === 'up' && row.previousElementSibling) row.parentNode.insertBefore(row, row.previousElementSibling);
+      else if (action === 'down' && row.nextElementSibling) row.parentNode.insertBefore(row.nextElementSibling, row);
+      updateMenuLinkPositions();
+      status('Unsaved menu changes');
+    });
+    $('menuLinksList').addEventListener('input', (event) => {
+      if (event.target.matches('[data-menu-link-field]')) status('Unsaved menu changes');
+    });
+    $('addMenuLink').addEventListener('click', () => {
+      const links = readMenuLinks();
+      if (links.length >= MAX_MENU_LINKS) { toast(`A menu can have up to ${MAX_MENU_LINKS} links.`, true); return; }
+      links.push({ id: newMenuLinkId(), label: 'New link', href: '' });
+      renderMenuLinks(links);
+      const labelInput = $('menuLinksList').lastElementChild?.querySelector('[data-menu-link-field="label"]');
+      labelInput?.focus(); labelInput?.select(); status('Unsaved menu changes');
+    });
+    $('menuLinksForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can change menu links.', true); return; }
+      const form = event.currentTarget;
+      const rows = [...$('menuLinksList').querySelectorAll('[data-menu-link-row]')];
+      rows.forEach((row) => row.querySelector('[data-menu-link-field="href"]').setCustomValidity(''));
+      if (!form.reportValidity()) return;
+      const links = readMenuLinks();
+      const invalidIndex = links.findIndex((link) => !safeMenuDestination(link.href));
+      if (invalidIndex >= 0) {
+        const input = rows[invalidIndex].querySelector('[data-menu-link-field="href"]');
+        input.setCustomValidity('Use a same-site path starting with / or a complete HTTPS URL.');
+        input.reportValidity();
+        $('menuLinksMessage').textContent = 'Check the highlighted destination. Use a same-site path or HTTPS URL.';
+        return;
+      }
+      const submitButton = form.querySelector('[type="submit"]');
+      submitButton.disabled = true;
+      $('menuLinksMessage').textContent = 'Saving menu links…';
+      try {
+        const update = { ...site, menuLinks: links };
+        const data = await api('/api/site', { method: 'PUT', body: update });
+        site = data.config || update;
+        renderMenuLinks(site.menuLinks);
+        $('menuLinksMessage').textContent = 'Menu saved. Your public navigation will use these links.';
+        status('Menu saved');
+        toast('Menu links updated', 'The order and destinations are saved to your website.');
+      } catch (error) {
+        $('menuLinksMessage').textContent = error.message || 'Could not save menu links.';
+        status('Could not save', true);
+        toast(error.message || 'Could not save menu links.', true);
+      } finally { submitButton.disabled = false; }
+    });
     $('loginForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const username = $('adminUsername').value.trim();

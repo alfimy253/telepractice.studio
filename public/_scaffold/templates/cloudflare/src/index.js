@@ -1,6 +1,7 @@
 import { createNeonClient } from '../db/connection.js';
 import { createAdminSession, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
 import { adminDashboardPath, isAdminDashboardPath } from '../lib/admin-url.js';
+import { cleanMenuLinks } from '../lib/menu-links.js';
 
 const SITE_ID = '__SITE_ID__';
 const DEFAULT_CONFIG = __SITE_CONFIG_JSON__;
@@ -87,7 +88,8 @@ function cleanSiteConfig(input = {}) {
     editorialAccent: ['black','teal','forest'].includes(merged.editorialAccent) ? merged.editorialAccent : 'black',
     features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false },
     payments: cleanPaymentDetails(merged.payments),
-    customPages: cleanCustomPages(merged.customPages, DEFAULT_CONFIG.customPages)
+    customPages: cleanCustomPages(merged.customPages, DEFAULT_CONFIG.customPages),
+    menuLinks: cleanMenuLinks(merged.menuLinks, DEFAULT_CONFIG.menuLinks)
   };
 }
 function localToday() { return new Intl.DateTimeFormat('en-CA', { timeZone: SITE_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }

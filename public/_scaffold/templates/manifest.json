@@ -19,7 +19,8 @@
   ],
   "sharedRuntime": [
     "lib/admin-security.js",
-    "lib/admin-url.js"
+    "lib/admin-url.js",
+    "lib/menu-links.js"
   ],
   "vercel": [
     ".env",

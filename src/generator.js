@@ -1,6 +1,7 @@
 import { createZip } from './zip.js';
 import { createPasswordHash } from '../public/_scaffold/templates/shared/lib/admin-security.js';
 import { adminDashboardPath } from '../public/_scaffold/templates/shared/lib/admin-url.js';
+import { menuLinksForPages } from '../public/_scaffold/templates/shared/lib/menu-links.js';
 
 const encoder = new TextEncoder();
 const DB_URL_PROTOCOLS = new Set(['postgres:', 'postgresql:']);
@@ -175,6 +176,7 @@ function normalizeConfig(input = {}) {
     const gallery = SAMPLE_POST_GALLERIES[index].map((image, sortOrder) => ({ ...image, sortOrder }));
     return { ...post, id: `sample-${index + 1}`, featureImageUrl: gallery[0].imageUrl, featureImageAlt: gallery[0].altText, gallery, publishedAt: new Date(Date.now() - (index + 1) * 86400000 * 9).toISOString() };
   });
+  const customPages = normalizeCustomPages(input.customPages);
   return {
     siteId, target, specialty, specialtyLabel: vertical.label, businessName,
     brandName: clean(input.brandName, 80, businessName.replace(/\s+(care|clinic|studio|practice|dental)$/i, '').trim() || vertical.brandName),
@@ -189,7 +191,7 @@ function normalizeConfig(input = {}) {
       mayaName: clean(input.payments?.mayaName, 80, businessName) || businessName,
       mayaNumber: clean(input.payments?.mayaNumber, 40, '+63 918 555 0142')
     },
-    customPages: normalizeCustomPages(input.customPages),
+    customPages, menuLinks: menuLinksForPages(customPages),
     heroEyebrow: vertical.eyebrow, heroHeadline: vertical.headline, heroText: vertical.heroText,
     services: vertical.services, demoPosts, demoGallery: DEMO_GALLERY.map((item) => ({ ...item })),
     createdAt: clean(input.createdAt, 40, new Date().toISOString())
@@ -276,7 +278,7 @@ function generatedReadme(config, secrets) {
     '## Owner dashboard and sign-in',
     `The owner dashboard path is generated from the current date in the site's time zone (default ${code(config.timeZone)}). Today, when this package was generated, its path is ${code(currentAdminPath)}; it changes at local midnight. Sign in there using the administrator account configured in the builder. The public sign-in form intentionally starts blank; the raw password is never embedded in public site assets.`,
     `Path scheme: Monday = dog, Tuesday = rat, Wednesday = ant, Thursday = fish, Friday = fly, Saturday = cat, Sunday = cockroach. Take the animal's last letter, append ${code('admin')} and the current calendar day number, then append ${code('/dashboard')}. For example, Tuesday on the 8th is ${code('/tadmin8/dashboard')}. The changing path is only an obscurity measure—the username/password sign-in is the actual access control.`,
-    `The site has ${config.customPages.length} custom menu page${config.customPages.length === 1 ? '' : 's'} and GCash/Maya payment details configured in the generated settings.`, '',
+    `The Menu links view in the owner dashboard can rename, reorder, add or remove public navigation links. Links accept same-site paths or HTTPS URLs; the site starts with ${config.customPages.length} generated custom menu page${config.customPages.length === 1 ? '' : 's'}. GCash/Maya payment details are also configured in the generated settings.`, '',
     '## Site notes',
     'The starter includes fixed-field blog and gallery content, client accounts and appointment scheduling. Appointment availability remains unpublished until the site owner configures it. Review the privacy and security guidance in the owner editor before adding sensitive information. This starter is not a compliant electronic health record system.', '',
     `Generated practice: **${config.businessName}** (${config.specialtyLabel}) · Site ID: ${code(config.siteId)} · Selected target: **${targetName}**`

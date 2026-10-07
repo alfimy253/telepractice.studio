@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { createNeonClient } from '../db/connection.js';
 import { createAdminSession, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
 import { adminDashboardPath } from '../lib/admin-url.js';
+import { cleanMenuLinks } from '../lib/menu-links.js';
 import { createHmac, randomBytes, timingSafeEqual, webcrypto } from 'node:crypto';
 
 const app = express();
@@ -198,7 +199,8 @@ function cleanSiteConfig(input = {}) {
     editorialAccent: ['black','teal','forest'].includes(merged.editorialAccent) ? merged.editorialAccent : 'black',
     features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false },
     payments: cleanPaymentDetails(merged.payments),
-    customPages: cleanCustomPages(merged.customPages, DEFAULT_CONFIG.customPages)
+    customPages: cleanCustomPages(merged.customPages, DEFAULT_CONFIG.customPages),
+    menuLinks: cleanMenuLinks(merged.menuLinks, DEFAULT_CONFIG.menuLinks)
   };
 }
 function validDate(value) {

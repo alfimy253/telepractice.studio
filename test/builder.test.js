@@ -65,7 +65,7 @@ test('builder and owner UI contain edit-page navigation but no admin-key connect
   assert.match(builderHtml, /id="adminUsername"/);
   assert.match(builderHtml, /id="adminEmail"/);
   assert.match(builderHtml, /id="adminPassword"/);
-  for (const pageId of ['identity', 'appearance', 'blog', 'gallery', 'availability', 'appointments']) {
+  for (const pageId of ['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments']) {
     assert.match(ownerHtml, new RegExp(`data-admin-page-link="${pageId}"`));
     assert.match(ownerHtml, new RegExp(`data-admin-page="${pageId}"`));
   }
@@ -104,7 +104,9 @@ test('generated Vercel and Cloudflare packages include private admin login setti
   for (const target of ['vercel', 'cloudflare']) {
     const env = { ASSETS: assets };
     const auth = await session(env);
-    const response = await generate(env, auth, {}, target);
+    const response = await generate(env, auth, {}, target, {
+      customPages: [{ id: 'privacy', menuName: 'Privacy', url: '/privacy', pageTitle: 'Privacy policy', pageContent: 'Our privacy policy.' }]
+    });
     assert.equal(response.status, 200, await response.clone().text());
     const files = zipEntries(new Uint8Array(await response.arrayBuffer()));
     const envName = target === 'cloudflare' ? '.dev.vars' : '.env';
@@ -122,10 +124,12 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     const adminHtmlPath = target === 'cloudflare' ? 'public/admin.html' : 'admin.html';
     const adminHtml = files.get(adminHtmlPath);
     assert.ok(adminHtml, 'expected the admin login page');
+    assert.match(adminHtml, /id="menuLinksForm"/);
+    assert.match(adminHtml, /id="menuLinksList"/);
     assert.match(adminHtml, /action="\/api\/admin\/login"/);
     assert.doesNotMatch(adminHtml, new RegExp(`value="${adminInput.adminUsername}"`));
     assert.doesNotMatch(adminHtml, new RegExp(`value="${adminInput.adminPassword}"`));
-    for (const pageId of ['identity', 'appearance', 'blog', 'gallery', 'availability', 'appointments']) {
+    for (const pageId of ['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments']) {
       assert.match(adminHtml, new RegExp(`data-admin-page-link="${pageId}"`));
       assert.match(adminHtml, new RegExp(`data-admin-page="${pageId}"`));
     }
@@ -133,15 +137,28 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     const adminJs = files.get(adminJsPath);
     assert.match(adminJs, /showAdminPage/);
     assert.match(adminJs, /pushState/);
+    assert.match(adminJs, /safeMenuDestination/);
+    assert.match(adminJs, /menuLinks: links/);
     assert.doesNotMatch(`${adminHtml}\n${adminJs}\n${files.get(target === 'cloudflare' ? 'public/admin.css' : 'admin.css')}`, /ADMIN_API_KEY|adminKey|keyForm|sessionStorage|Bearer/i);
 
     const publicConfigPath = target === 'cloudflare' ? 'public/site-config.js' : 'site-config.js';
-    assert.doesNotMatch(files.get(publicConfigPath), /owner@example\.test|practiceowner/);
+    const publicConfig = files.get(publicConfigPath);
+    assert.doesNotMatch(publicConfig, /owner@example\.test|practiceowner/);
+    const generatedConfig = JSON.parse(publicConfig.slice(publicConfig.indexOf('=') + 1).trim().replace(/;$/, ''));
+    assert.deepEqual(generatedConfig.menuLinks.slice(0, 7).map(({ id }) => id), ['home', 'care', 'about', 'gallery', 'journal', 'appointments', 'contact']);
+    assert.deepEqual(generatedConfig.menuLinks.at(-1), { id: 'custom-privacy', label: 'Privacy', href: '/privacy.html' });
+    assert.ok(files.has(target === 'cloudflare' ? 'public/privacy.html' : 'privacy.html'));
+    assert.match(files.get(target === 'cloudflare' ? 'public/site.js' : 'site.js'), /renderMenuNavigation/);
+    assert.ok(files.has('lib/menu-links.js'), 'expected shared safe menu-link normalization');
+    const siteRuntime = files.get(target === 'cloudflare' ? 'src/index.js' : 'api/index.js');
+    assert.match(siteRuntime, /cleanMenuLinks\(merged\.menuLinks, DEFAULT_CONFIG\.menuLinks\)/);
+    assert.match(siteRuntime, /\.\.\/lib\/menu-links\.js/);
     assert.doesNotMatch(files.get('db/seed.sql'), /owner@example\.test|practiceowner|ADMIN_PASSWORD_HASH/);
     const siteFiles = [...files.values()].join('\n');
     assert.doesNotMatch(siteFiles, new RegExp(adminInput.adminPassword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.match(files.get('README.md'), /Tuesday.*rat.*Wednesday.*ant/s);
     assert.match(files.get('README.md'), /\/tadmin8\/dashboard/);
+    assert.match(files.get('README.md'), /Menu links view.*rename, reorder, add or remove/s);
     assert.doesNotMatch(files.get('README.md'), /practiceowner|owner@example\.test|CanopyOwner!8/);
     const deployableFiles = [...files.entries()]
       .filter(([path]) => path !== envName && path !== 'README.md' && !path.startsWith('db/'))
