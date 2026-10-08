@@ -245,6 +245,22 @@ test('builder rejects oversized streamed JSON bodies without buffering them in f
   assert.match((await response.json()).error, /too large/i);
 });
 
+test('builder exposes Brivon in the layout section and guided modal and updates the preview', async () => {
+  const [html, app, styles] = await Promise.all([
+    readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../public/styles.css', import.meta.url), 'utf8')
+  ]);
+  assert.match(html, /<select id="designSystemSelect">[\s\S]*Brivon · Dark[\s\S]*Brivon · Light/);
+  assert.match(app, /id="wizardDesignSystem"[\s\S]*Brivon · Dark[\s\S]*Brivon · Light/);
+  assert.match(app, /designSystemSelect'\)\.addEventListener\('change',[\s\S]*setDesignSystem/);
+  assert.match(app, /wizardDesignSystem'\)\.addEventListener\('change',[\s\S]*setDesignSystem/);
+  assert.match(app, /screen\.classList\.add\(`theme-\$\{config\.theme\}`\)/);
+  assert.match(styles, /\.preview-screen\.theme-brivon-dark/);
+  assert.match(styles, /\.preview-screen\.theme-brivon-light/);
+  assert.match(styles, /theme-brivon-dark \.site-hero-preview/);
+});
+
 test('Brivon light and dark generate a separate design-system homepage', async () => {
   for (const theme of ['brivon-dark', 'brivon-light']) {
     const env = { ASSETS: assets };

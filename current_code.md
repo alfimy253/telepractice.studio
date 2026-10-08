@@ -71,7 +71,40 @@ The capability list above was checked against the rendered controls and their co
 
 Feature toggles can hide blog, gallery, or scheduling UI in a generated site, and account/scheduling/CMS persistence requires a configured Neon database with the schema installed.
 
-**Status:** Code-derived documentation for the current repository state, reviewed 2026-10-08. This describes what the implementation does; it is not a deployment record or a claim that a live site/database has been tested. The repository has no separate implementation-plan Markdown file; the root `README.md` and the generated README text in `src/generator.js` were checked against the code.
+## Design-system selection and Brivon behavior
+
+### Builder controls
+
+The builder exposes the same three-way design-system choice in both setup paths:
+
+| Location | Control | Options |
+|---|---|---|
+| Main builder, **Choose a Site Layout** | `#designSystemSelect` | Illustration theme (current), Brivon Dark, Brivon Light |
+| Guided setup modal, Appearance step | dynamically rendered `#wizardDesignSystem` | Illustration theme (current), Brivon Dark, Brivon Light |
+
+Selecting Illustration shows the seven existing Illustration layout cards: Canopy, Soft clay, Coastal, Editorial, Neat, Launcher, and Air. Selecting either Brivon option hides those Illustration cards because Brivon is a separate design system rather than another card-level color preset. Both controls call `setDesignSystem()`, which delegates to `setTheme()`, synchronizes inputs, updates the preview, rerenders the active wizard step when needed, and saves the non-secret configuration to local storage.
+
+### Builder preview
+
+`updatePreview()` removes every previous theme class and applies either `theme-brivon-dark` or `theme-brivon-light` to `#previewScreen`. Dedicated rules in `public/styles.css` then change the preview's background, navigation, typography, hero proportions, hero artwork treatment, buttons, service strip, contrast, and accent treatment. Dark uses a near-black background with an electric-lime accent; Light uses an off-white background with a dark olive accent. Switching back to Illustration removes the Brivon class and restores the selected Illustration preview rules.
+
+The builder preview is intentionally a compact representation inside the existing preview frame. The downloaded Brivon package is not produced by merely applying those preview overrides.
+
+### Generated Brivon package
+
+When `theme` is `brivon-dark` or `brivon-light`, `src/generator.js` replaces the normal shared homepage with `public/_scaffold/templates/shared/designs/brivon-index.html`. The package includes:
+
+- a separate editorial/brutalist homepage structure;
+- `brivon.css`, with independent Brivon tokens, responsive layout, components, light/dark palettes, and functional-page compatibility rules;
+- `brivon.js`, for Brivon mobile navigation and reduced-motion-aware reveal behavior;
+- the existing `site.js`, so practice identity, safe menu links, feature toggles, public posts, public gallery data, contact details, and payment details still use the generated site's configuration; and
+- Brivon continuity styles on appointments and generated custom pages without replacing their account, booking, or security behavior.
+
+Brivon headings `h1` through `h5` use `line-height: calc(1em + 5px)` to preserve at least five pixels of additional line-box space for wrapped titles. The generated owner appearance editor permits switching between Brivon Dark and Brivon Light on a Brivon package. It hides incompatible Illustration choices because changing from one HTML design-system family to another after generation would require replacing the static homepage structure. Illustration packages likewise keep Brivon choices unavailable in the owner editor.
+
+The implementation was adapted from the user-provided `axelmercer253/brivon` repository. That repository labels the template free in source comments and documents its bundled images as Pexels-licensed, but it does not contain a general code-license file. This implementation does not copy the repository's photo assets; it uses original CSS artwork and the generated site's existing content assets.
+
+**Status:** Code-derived documentation for the current repository state, reviewed 2026-10-09. This describes what the implementation does; it is not a deployment record or a claim that a live site/database has been tested. The repository has no separate implementation-plan Markdown file; the root `README.md` and the generated README text in `src/generator.js` were checked against the code.
 
 ## 1. What this repository builds
 
