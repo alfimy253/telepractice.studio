@@ -86,9 +86,9 @@ Selecting Illustration shows the seven existing Illustration layout cards: Canop
 
 ### Builder preview
 
-`updatePreview()` removes every previous theme class and applies either `theme-brivon-dark` or `theme-brivon-light` to `#previewScreen`. Dedicated rules in `public/styles.css` then change the preview's background, navigation, typography, hero proportions, hero artwork treatment, buttons, service strip, contrast, and accent treatment. Dark uses a near-black background with an electric-lime accent; Light uses an off-white background with a dark olive accent. Switching back to Illustration removes the Brivon class and restores the selected Illustration preview rules.
+`updatePreview()` removes every previous theme class and applies either `theme-brivon-dark` or `theme-brivon-light` to `#previewScreen`. When a Brivon class is active, `public/styles.css` hides every Illustration preview child (nav, illustrated hero, service strip, bottom bar) and shows the dedicated `#brivonPreview` block instead. That block is a compact mock of the generated Brivon **service page layout**: sticky header with brand, links and lime CTA; `hero-grid`-style hero (eyebrow, uppercase headline with accent line, sub copy, primary/ghost CTAs, numbered meta, editorial artwork with "No. 01" card); three tier cards with the middle one `featured`; the four-step approach row; and the closing booking CTA. `updatePreview()` fills it with the current business name, eyebrow, headline, sub copy, and the three vertical services, and toggles its `aria-hidden`. The mobile device switch (`.mobile-preview`) collapses the hero to one column and the tiers/process to two. Dark uses a near-black background with an electric-lime accent; Light uses an off-white background with a dark olive accent. Switching back to Illustration removes the Brivon class, hides `#brivonPreview`, and restores the Illustration preview.
 
-The builder preview is intentionally a compact representation inside the existing preview frame. The downloaded Brivon package is not produced by merely applying those preview overrides.
+Before 2026-10-09 the preview only recolored the Illustration mock (paw logo, pet artwork) with Brivon tokens, so the new service-page layout shipped in the ZIP but never appeared in the builder preview. The preview remains a representation; the downloaded package is generated from `brivon-index.html`, not from the preview markup.
 
 ### Generated Brivon package
 
@@ -133,7 +133,7 @@ Before building a ZIP, the builder enforces these rules:
 - Email: valid email format, up to 254 characters.
 - Password: 12–128 characters with at least one lowercase letter, uppercase letter, number, and symbol.
 
-The raw password is used in memory to create a salted PBKDF2-SHA-256 hash (210,000 iterations). Generated packages put the hash—not the raw password—in `.env` (Vercel) or `.dev.vars` (Cloudflare). They also receive a fresh `CSRF_SECRET`; Vercel packages receive a separate `CRON_SECRET`. These values go into ignored environment files and are not written into public site configuration or `db/seed.sql`.
+The raw password is used in memory to create a salted PBKDF2-SHA-256 hash (100,000 iterations). Generated packages put the hash—not the raw password—in `.env` (Vercel) or `.dev.vars` (Cloudflare). The builder and the generated Cloudflare runtime use 100,000 iterations because Cloudflare Workers reject PBKDF2 `deriveBits` above 100,000 iterations in production; the earlier 210,000 value made `/api/generate` fail with "The selected code package could not be prepared" for **both** Vercel and Cloudflare downloads (the builder itself runs on Workers), and would also have broken owner login on generated Cloudflare sites. The local `wrangler dev` runtime does not enforce the limit, so it was not caught locally. The generated Vercel runtime (Node) still hashes new passwords with 210,000 iterations. All verifiers accept stored hashes from 100,000 to 1,000,000 rounds. They also receive a fresh `CSRF_SECRET`; Vercel packages receive a separate `CRON_SECRET`. These values go into ignored environment files and are not written into public site configuration or `db/seed.sql`.
 
 ### Builder CSRF and request size
 
@@ -211,6 +211,6 @@ A standalone `payment-reminder-worker.js` is included in both target packages. R
 
 ## 8. Verification status
 
-The repository test suite covers builder CSRF, package generation, admin credentials/session utilities, menu normalization, and payment-proof/reminder rules. The audited state passed 23 tests, `npm audit`, the root Wrangler dry run, generated-package syntax checks, and generated Cloudflare Wrangler dry run. Runtime login/session smoke checks passed for both generated targets, and a Postgres-compatible PGlite smoke test exercised the schema and reminder/proof SQL.
+The repository test suite covers builder CSRF, package generation, admin credentials/session utilities, menu normalization, and payment-proof/reminder rules. The current state passes 25 tests (the 2026-10-09 audit passed 23), `npm audit`, the root Wrangler dry run, generated-package syntax checks, and generated Cloudflare Wrangler dry run. Runtime login/session smoke checks passed for both generated targets, and a Postgres-compatible PGlite smoke test exercised the schema and reminder/proof SQL.
 
 No live Neon database, Vercel deployment, production Cloudflare deployment, or real hosted cron invocation has been tested. Those remain deployment checks, not verified behavior from this repository audit.
