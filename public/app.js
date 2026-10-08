@@ -49,6 +49,7 @@ let activePageId = '';
 let csrfToken = '';
 const WIZARD_STEP_COUNT = 5;
 const MAX_CUSTOM_PAGES = 8;
+const ADMIN_PASSWORD_POLICY = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).{12,128}$/;
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
@@ -221,9 +222,6 @@ function syncDownloadControls() {
   const main = $('generateButton')?.querySelector('span:first-of-type');
   if (main) main.textContent = `Download ${displayName} ZIP`;
   const envFile = target === 'cloudflare' ? '.dev.vars' : '.env';
-  const envExample = target === 'cloudflare' ? '.dev.vars.example' : '.env.example';
-  const exampleLabel = $('envFileExampleName');
-  if (exampleLabel) exampleLabel.textContent = envExample;
   const readyLabel = $('envFileReadyName');
   if (readyLabel) readyLabel.textContent = envFile;
   const noteLabel = $('envFileNote');
@@ -242,6 +240,35 @@ function toast(title, message, isError = false) {
   node.innerHTML = `<span class="toast-icon">${isError ? '!' : '✓'}</span><span><strong>${esc(title)}</strong><small>${esc(message)}</small></span>`;
   region.appendChild(node);
   window.setTimeout(() => node.remove(), 4800);
+}
+function validateAdminAccount() {
+  const username = $('adminUsername');
+  const email = $('adminEmail');
+  const password = $('adminPassword');
+  const confirmation = $('adminPasswordConfirm');
+  [username, email, password, confirmation].forEach((field) => field.setCustomValidity(''));
+  if (!username.checkValidity()) { username.reportValidity(); return false; }
+  if (!email.checkValidity()) { email.reportValidity(); return false; }
+  if (!ADMIN_PASSWORD_POLICY.test(password.value)) {
+    password.setCustomValidity('Use 12–128 characters with at least one lowercase letter, uppercase letter, number and symbol.');
+    password.reportValidity();
+    return false;
+  }
+  if (password.value !== confirmation.value) {
+    confirmation.setCustomValidity('The passwords do not match.');
+    confirmation.reportValidity();
+    return false;
+  }
+  return true;
+}
+function bindSecretToggle(buttonId, inputId) {
+  $(buttonId).addEventListener('click', () => {
+    const field = $(inputId);
+    const reveal = field.type === 'password';
+    field.type = reveal ? 'text' : 'password';
+    $(buttonId).textContent = reveal ? 'Hide' : 'Show';
+    $(buttonId).setAttribute('aria-label', reveal ? 'Hide password' : 'Show password');
+  });
 }
 function configForPackage() {
   const kind = vertical();
@@ -270,6 +297,9 @@ function configForPackage() {
     customPages: normalizeSavedPages(config.customPages),
     target: config.deploymentTarget === 'cloudflare' ? 'cloudflare' : 'vercel',
     databaseUrl: String(config.databaseUrl || '').trim().slice(0, 2048),
+    adminUsername: $('adminUsername').value.trim(),
+    adminEmail: $('adminEmail').value.trim(),
+    adminPassword: $('adminPassword').value,
     heroEyebrow: kind.eyebrow,
     heroHeadline: kind.headline.replace('|', '\n'),
     heroText: kind.subhead,
@@ -502,6 +532,10 @@ function retreatWizard() {
   }
 }
 async function downloadPackage() {
+  if (!validateAdminAccount()) {
+    toast('Complete the admin account', 'Add a valid username, email and strong matching password before generating a site.', true);
+    return;
+  }
   const target = config.deploymentTarget === 'cloudflare' ? 'cloudflare' : 'vercel';
   const displayName = target === 'cloudflare' ? 'Cloudflare' : 'Vercel';
   const buttons = [$('generateButton'), $('topGenerate')];
@@ -539,7 +573,9 @@ async function downloadPackage() {
     anchor.click();
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    toast(`${displayName} package downloaded`, 'This is a code package only; deploy it yourself on the selected host.');
+    $('adminPassword').value = '';
+    $('adminPasswordConfirm').value = '';
+    toast(`${displayName} package downloaded`, 'Your password was hashed into the environment file. Keep your login details safe; deploy the package yourself.');
   } catch (error) {
     toast('Could not download the ZIP', error.message || 'Check the server and try again.', true);
   } finally {
@@ -607,6 +643,8 @@ function bindEvents() {
     $('toggleDatabaseUrl').textContent = reveal ? 'Hide' : 'Show';
     $('toggleDatabaseUrl').setAttribute('aria-label', reveal ? 'Hide connection string' : 'Show connection string');
   });
+  bindSecretToggle('toggleAdminPassword', 'adminPassword');
+  bindSecretToggle('toggleAdminPasswordConfirm', 'adminPasswordConfirm');
   $('openWalkthrough').addEventListener('click', openWizard);
   $('sidebarTour').addEventListener('click', (event) => { event.preventDefault(); openWizard(); });
   $('editPractice').addEventListener('click', () => $('practiceName').focus());

@@ -12,6 +12,15 @@
   const isVet = site.specialty !== 'dental';
   const vertical = verticalDefaults[site.specialty] || verticalDefaults.veterinary;
   const isEnabled = (feature) => site.features?.[feature] !== false;
+  const defaultMenuLinks = [
+    { id: 'home', label: 'Welcome', href: '/#home' },
+    { id: 'care', label: 'Our care', href: '/#care' },
+    { id: 'about', label: 'Our approach', href: '/#about' },
+    { id: 'gallery', label: 'Gallery', href: '/#gallery', feature: 'gallery' },
+    { id: 'journal', label: 'Journal', href: '/#journal', feature: 'blog' },
+    { id: 'appointments', label: 'Appointments', href: '/appointments.html', feature: 'scheduling' },
+    { id: 'contact', label: 'Contact', href: '/#contact' }
+  ];
 
   function setTheme() {
     const root = document.documentElement;
@@ -23,18 +32,45 @@
     document.body.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air');
     if (['canopy','clay','coastal','editorial','neat','launcher','air'].includes(site.theme)) document.body.classList.add(`theme-${site.theme}`);
   }
-  function renderCustomNavigation() {
-    const pageList = Array.isArray(site.customPages) ? site.customPages : [];
-    const safePages = pageList.filter((page) => page && page.menuName && /^\/[a-z0-9-]+\.html$/i.test(String(page.url || '')));
+  function safeMenuNavigationHref(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw || raw.length > 2048 || /[\u0000-\u001f\u007f]/.test(raw)) return '';
+    if (raw.startsWith('/')) {
+      if (raw.startsWith('//') || raw.startsWith('/\\')) return '';
+      try {
+        const url = new URL(raw, window.location.origin);
+        if (url.origin !== window.location.origin) return '';
+        return `${url.pathname}${url.search}${url.hash}`;
+      } catch (_) { return ''; }
+    }
+    try {
+      const url = new URL(raw);
+      if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return '';
+      return url.href;
+    } catch (_) { return ''; }
+  }
+  function renderMenuNavigation() {
+    const customPages = Array.isArray(site.customPages) ? site.customPages : [];
+    const fallbackLinks = [
+      ...defaultMenuLinks,
+      ...customPages.map((page) => ({ id: `custom-${page?.slug || page?.url || page?.id || ''}`, label: page?.menuName, href: page?.url }))
+    ];
+    const source = Array.isArray(site.menuLinks) ? site.menuLinks : fallbackLinks;
+    const links = source.slice(0, 16).filter((item) => item && item.label && isEnabled(item.feature));
     ['siteNav', 'editorialSiteNav'].forEach((id) => {
       const nav = $(id);
       if (!nav) return;
-      nav.querySelectorAll('[data-custom-page-link]').forEach((link) => link.remove());
-      safePages.forEach((page) => {
+      nav.replaceChildren();
+      links.forEach((item) => {
+        const href = safeMenuNavigationHref(item.href);
+        if (!href) return;
         const link = document.createElement('a');
-        link.href = page.url;
-        link.textContent = page.menuName;
-        link.dataset.customPageLink = 'true';
+        link.href = href;
+        link.textContent = String(item.label).trim().slice(0, 60);
+        link.dataset.menuLinkId = String(item.id || '').slice(0, 48);
+        if (item.feature) link.dataset.menuFeature = String(item.feature);
+        const destination = new URL(href, window.location.origin);
+        if (destination.origin === window.location.origin && destination.pathname === window.location.pathname) link.setAttribute('aria-current', 'page');
         nav.appendChild(link);
       });
     });
@@ -79,7 +115,7 @@
     setLink('footerEmail', `mailto:${site.email}`);
     setLink('footerPhone', `tel:${String(site.phone || '').replace(/[^+\d]/g, '')}`);
     setLink('phoneLink', `tel:${String(site.phone || '').replace(/[^+\d]/g, '')}`, site.phone);
-    renderCustomNavigation();
+    renderMenuNavigation();
     renderPaymentDetails();
     text('brandSymbol', vertical.icon); text('footerSymbol', vertical.icon); text('labelIcon', vertical.icon);
     text('editorialBrandSymbol', vertical.icon); text('editorialBrandName', brand); text('editorialBrandLocation', place);
@@ -99,10 +135,9 @@
     text('contextLabel', vertical.context);
     text('headerCta', vertical.book); text('heroBook', vertical.book); text('bookingSubmit', isVet ? 'Send visit request ↗' : 'Send appointment request ↗');
     if (site.specialty === 'dental') { const formHeading = document.querySelector('.form-heading strong'); if (formHeading) formHeading.textContent = 'Request an appointment'; }
-    $('journal')?.classList.toggle('hidden', !isEnabled('blog')); $('journalNav')?.classList.toggle('hidden', !isEnabled('blog')); $('editorialJournalNav')?.classList.toggle('hidden', !isEnabled('blog'));
-    $('gallery')?.classList.toggle('hidden', !isEnabled('gallery')); $('galleryNav')?.classList.toggle('hidden', !isEnabled('gallery')); $('editorialGalleryNav')?.classList.toggle('hidden', !isEnabled('gallery'));
+    $('journal')?.classList.toggle('hidden', !isEnabled('blog'));
+    $('gallery')?.classList.toggle('hidden', !isEnabled('gallery'));
     $('book')?.classList.toggle('hidden', !isEnabled('scheduling'));
-    $('appointmentsNav')?.classList.toggle('hidden', !isEnabled('scheduling')); $('editorialAppointmentsNav')?.classList.toggle('hidden', !isEnabled('scheduling'));
     if (!isEnabled('scheduling')) {
       setLink('headerCta', '#contact', 'Get in touch');
       setLink('heroBook', '#contact', 'Contact our team');

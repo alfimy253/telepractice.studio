@@ -4,9 +4,11 @@
   "main": "src/index.js",
   "compatibility_date": "2025-10-08",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "triggers": { "crons": ["* * * * *"] },
   "assets": {
     "binding": "ASSETS",
-    "directory": "./public"
+    "directory": "./public",
+    "run_worker_first": true
   },
   "observability": {
     "enabled": true

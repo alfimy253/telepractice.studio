@@ -1,4 +1,7 @@
 import { createZip } from './zip.js';
+import { createPasswordHash } from '../public/_scaffold/templates/shared/lib/admin-security.js';
+import { adminDashboardPath } from '../public/_scaffold/templates/shared/lib/admin-url.js';
+import { menuLinksForPages } from '../public/_scaffold/templates/shared/lib/menu-links.js';
 
 const encoder = new TextEncoder();
 const DB_URL_PROTOCOLS = new Set(['postgres:', 'postgresql:']);
@@ -131,6 +134,24 @@ function normalizeTarget(value) {
   if (value === 'vercel' || value === 'cloudflare') return value;
   throw new Error('Choose either the Vercel or Cloudflare code package.');
 }
+function normalizeAdminAccount(input = {}) {
+  const username = String(input.adminUsername ?? '').trim();
+  const email = String(input.adminEmail ?? '').trim();
+  const password = String(input.adminPassword ?? '');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/.test(username)) {
+    throw new Error('Enter an administrator username between 3 and 64 characters using letters, numbers, dots, underscores or hyphens.');
+  }
+  if (email.length > 254 || !/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(email)) {
+    throw new Error('Enter a valid administrator email address.');
+  }
+  const passwordLength = password.length;
+  if (passwordLength < 12 || passwordLength > 128
+    || !/[a-z]/.test(password) || !/[A-Z]/.test(password)
+    || !/[0-9]/.test(password) || !/[^A-Za-z0-9\s]/.test(password)) {
+    throw new Error('The administrator password must be 12–128 characters and include a lowercase letter, uppercase letter, number and symbol.');
+  }
+  return { username, email, password };
+}
 function validTimeZone(value, fallback = 'Asia/Manila') {
   const candidate = clean(value, 64, fallback) || fallback;
   try { new Intl.DateTimeFormat('en-US', { timeZone: candidate }); return candidate; } catch (_) { return fallback; }
@@ -155,6 +176,7 @@ function normalizeConfig(input = {}) {
     const gallery = SAMPLE_POST_GALLERIES[index].map((image, sortOrder) => ({ ...image, sortOrder }));
     return { ...post, id: `sample-${index + 1}`, featureImageUrl: gallery[0].imageUrl, featureImageAlt: gallery[0].altText, gallery, publishedAt: new Date(Date.now() - (index + 1) * 86400000 * 9).toISOString() };
   });
+  const customPages = normalizeCustomPages(input.customPages);
   return {
     siteId, target, specialty, specialtyLabel: vertical.label, businessName,
     brandName: clean(input.brandName, 80, businessName.replace(/\s+(care|clinic|studio|practice|dental)$/i, '').trim() || vertical.brandName),
@@ -169,7 +191,7 @@ function normalizeConfig(input = {}) {
       mayaName: clean(input.payments?.mayaName, 80, businessName) || businessName,
       mayaNumber: clean(input.payments?.mayaNumber, 40, '+63 918 555 0142')
     },
-    customPages: normalizeCustomPages(input.customPages),
+    customPages, menuLinks: menuLinksForPages(customPages),
     heroEyebrow: vertical.eyebrow, heroHeadline: vertical.headline, heroText: vertical.heroText,
     services: vertical.services, demoPosts, demoGallery: DEMO_GALLERY.map((item) => ({ ...item })),
     createdAt: clean(input.createdAt, 40, new Date().toISOString())
@@ -180,13 +202,19 @@ function normalizeConfig(input = {}) {
 // public /api/site response, and db/seed.sql). Secrets must never enter
 // that object — they are only substituted into the two gitignored-by-default
 // env files (.dev.vars / .env) below.
-function buildSecrets(input) {
+async function buildSecrets(input) {
+  const admin = normalizeAdminAccount(input);
   return {
-    // A fresh, random ADMIN_API_KEY and CSRF_SECRET are generated for every
-    // download so each deployment starts with unique, ready-to-use values
-    // instead of a shared placeholder string.
-    adminApiKey: randomSecret(32),
+    // The supplied password is never written in plaintext. Only its salted
+    // PBKDF2 hash is placed in the generated, gitignored environment file.
+    adminUsername: admin.username,
+    adminEmail: admin.email,
+    adminPasswordHash: await createPasswordHash(admin.password),
+    // This random key signs CSRF tokens and short-lived admin sessions; it is
+    // separate from the username/password login and is not an admin API key.
     csrfSecret: randomSecret(32),
+    // A separate bearer secret protects the Vercel Cron payment reminder route.
+    cronSecret: randomSecret(32),
     // Only the Neon connection string is user-provided — the builder has no
     // database of its own and cannot invent one.
     databaseUrl: normalizeDatabaseUrl(input.databaseUrl)
@@ -209,10 +237,13 @@ function replaceSecretTokens(text, secrets) {
   const placeholder = 'postgresql://USER:PASSWORD@HOST.neon.tech/DB';
   const tokens = {
     '__DATABASE_URL__': secrets.databaseUrl || placeholder,
-    '__ADMIN_API_KEY__': secrets.adminApiKey,
-    '__CSRF_SECRET__': secrets.csrfSecret
+    '__ADMIN_USERNAME__': secrets.adminUsername,
+    '__ADMIN_EMAIL__': secrets.adminEmail,
+    '__ADMIN_PASSWORD_HASH__': secrets.adminPasswordHash,
+    '__CSRF_SECRET__': secrets.csrfSecret,
+    '__CRON_SECRET__': secrets.cronSecret
   };
-  return text.replace(/__DATABASE_URL__|__ADMIN_API_KEY__|__CSRF_SECRET__/g, (token) => tokens[token]);
+  return text.replace(/__DATABASE_URL__|__ADMIN_USERNAME__|__ADMIN_EMAIL__|__ADMIN_PASSWORD_HASH__|__CSRF_SECRET__|__CRON_SECRET__/g, (token) => tokens[token]);
 }
 function createSeedSql(config) {
   const lines = [
@@ -231,22 +262,29 @@ function generatedReadme(config, secrets) {
   const targetName = config.target === 'cloudflare' ? 'Cloudflare Workers' : 'Vercel';
   const envFile = ENV_FILE_BY_TARGET[config.target];
   const hasDatabaseUrl = Boolean(secrets?.databaseUrl);
+  const currentAdminPath = adminDashboardPath(new Date(), config.timeZone);
   const lines = [
     `# ${config.businessName} — ${targetName} code package`, '',
     `This ZIP contains the ${targetName} project only. It is a source-code package; it does not deploy or publish your website.`, '',
     '## Environment variables',
-    `${code(envFile)} is included ready to use — not a ${code('.example')} template. The builder already generated a unique, random ${code('ADMIN_API_KEY')} and ${code('CSRF_SECRET')} for this download, so you do not need to invent or paste those yourself.`,
+    `${code(envFile)} is included ready to use — not a ${code('.example')} template. The owner username and email were taken from the builder. The supplied password is stored only as a salted PBKDF2 hash in ${code('ADMIN_PASSWORD_HASH')}; it is never written in plaintext. A unique ${code('CSRF_SECRET')} signs CSRF tokens and short-lived owner sessions; it is not an admin API key. For Vercel, a separate ${code('CRON_SECRET')} protects the scheduled payment-reminder endpoint.`,
     hasDatabaseUrl
       ? `${code('DATABASE_URL')} was filled in from the Neon connection string you entered in the builder. ${code('sslmode')}/${code('channel_binding')} query parameters were removed automatically — the generated runtime uses Neon's secure HTTP transport and does not use them.`
       : `${code('DATABASE_URL')} still has a placeholder value because no database connection string was entered in the builder. Replace it with your pooled Neon URL, for example ${code('postgresql://USER:PASSWORD@HOST.neon.tech/DB')} (leave out ${code('sslmode')}/${code('channel_binding')} — the generated runtime uses Neon's secure HTTP transport and does not use them).`,
     `Treat ${code(envFile)} as a secret: it is already ignored by the included ${code('.gitignore')}, so keep it out of source control.`, '',
     '## Database setup',
-    `Create a Neon Postgres database (if you have not already), then run ${code('db/schema.sql')} and ${code('db/seed.sql')} once. The seed file includes the generated site configuration, payment details, custom pages and sample practice content.`, '',
+    `Create a Neon Postgres database (if you have not already), then run ${code('db/schema.sql')} (safe to rerun; it includes idempotent migrations) and ${code('db/seed.sql')}. The seed file includes the generated site configuration, payment details, custom pages and sample practice content.`, '',
     config.target === 'vercel' ? '## Deploy to Vercel' : '## Deploy to Cloudflare Workers',
     config.target === 'vercel'
-      ? `Deploy this folder to Vercel. In the Vercel dashboard, copy the values from ${code('.env')} into the project's Environment Variables (the ${code('.env')} file itself is only read locally). For local development, run ${code('npm install')} and ${code('npm run dev')}.`
-      : `Use Node.js 22+, run ${code('npm install')}, then copy the values from ${code('.dev.vars')} into Wrangler secrets (${code('npx wrangler secret put DATABASE_URL')}, etc.) before running ${code('npm run deploy')} — Wrangler does not upload ${code('.dev.vars')} to the deployed Worker. For local development, ${code('.dev.vars')} is already in place, so just run ${code('npm run dev')}.`, '',
-    `The public owner editor is ${code('/admin.html')}. Sign in with the ${code('ADMIN_API_KEY')} value from ${code(envFile)}; the key is stored only in this browser tab's sessionStorage after that. The site has ${config.customPages.length} custom menu page${config.customPages.length === 1 ? '' : 's'} and GCash/Maya payment details configured in the generated settings.`, '',
+      ? `Use Node.js 20.6+ for the standalone worker script, then deploy this folder to Vercel. In the Vercel dashboard, copy the values from ${code('.env')} into the project's Environment Variables (the ${code('.env')} file itself is only read locally). For local development, run ${code('npm install')} and ${code('npm run dev')}.`
+      : `Use Node.js 22+ and run ${code('npm install')}. In the Cloudflare dashboard, set the values from ${code('.dev.vars')} under Worker Settings → Variables and Secrets. Store ${code('DATABASE_URL')}, ${code('ADMIN_PASSWORD_HASH')} and ${code('CSRF_SECRET')} as secrets; set ${code('ADMIN_USERNAME')} and ${code('ADMIN_EMAIL')} as variables or secrets. Wrangler does not upload ${code('.dev.vars')} during ${code('npm run deploy')}. For local development, ${code('.dev.vars')} is already in place, so just run ${code('npm run dev')}.`, '',
+    '## Owner dashboard and sign-in',
+    `The owner dashboard path is generated from the current date in the site's time zone (default ${code(config.timeZone)}). Today, when this package was generated, its path is ${code(currentAdminPath)}; it changes at local midnight. Sign in there using the administrator account configured in the builder. The public sign-in form intentionally starts blank; the raw password is never embedded in public site assets.`,
+    `Path scheme: Monday = dog, Tuesday = rat, Wednesday = ant, Thursday = fish, Friday = fly, Saturday = cat, Sunday = cockroach. Take the animal's last letter, append ${code('admin')} and the current calendar day number, then append ${code('/dashboard')}. For example, Tuesday on the 8th is ${code('/tadmin8/dashboard')}. The changing path is only an obscurity measure—the username/password sign-in is the actual access control.`,
+    `The Menu links view in the owner dashboard can rename, reorder, add or remove public navigation links. Links accept same-site paths or HTTPS URLs; the site starts with ${config.customPages.length} generated custom menu page${config.customPages.length === 1 ? '' : 's'}. GCash/Maya payment details are also configured in the generated settings.`, '',
+    '## Payment reminders and booking release',
+    'Bookings remain scheduled after 15 minutes; that is a review threshold, not an automatic cancellation deadline. If no proof is uploaded after 12 minutes, the client dashboard displays a reminder—even if the owner has independently marked the payment received. The client can still upload proof after 15 minutes while the booking remains active; a manually confirmed payment stays confirmed when its screenshot is attached. The owner can mark a payment received or manually release the booking after checking the payment account.',
+    `The deployed ${targetName} scheduler is configured for minute-level checks, subject to the hosting plan’s cron limits. An exact Node.js background worker is also included: run ${code('npm run payments:worker')} under a process manager on an always-on Node.js host for 90-second client-reminder checks and 3-minute owner-follow-up checks. The standalone worker is not run inside Vercel serverless functions or Cloudflare Workers; those use their native scheduled triggers.`, '',
     '## Site notes',
     'The starter includes fixed-field blog and gallery content, client accounts and appointment scheduling. Appointment availability remains unpublished until the site owner configures it. Review the privacy and security guidance in the owner editor before adding sensitive information. This starter is not a compliant electronic health record system.', '',
     `Generated practice: **${config.businessName}** (${config.specialtyLabel}) · Site ID: ${code(config.siteId)} · Selected target: **${targetName}**`
@@ -308,17 +346,21 @@ async function readScaffold(env, origin, filename) {
 const ENV_FILE_BY_TARGET = { cloudflare: '.dev.vars', vercel: '.env' };
 async function buildFiles(input, env, origin) {
   const config = normalizeConfig(input);
-  const secrets = buildSecrets(input);
+  const secrets = await buildSecrets(input);
   const target = config.target;
   const manifest = JSON.parse(await readScaffold(env, origin, 'manifest.json'));
   const files = new Map();
   const publicPath = (relative) => target === 'vercel' ? relative.replace(/^public\//, '') : relative;
+  files.set('.gitignore', `node_modules/\n${ENV_FILE_BY_TARGET[target]}\n`);
 
   for (const relative of manifest.sharedPublic) {
     const content = replaceTokens(await readScaffold(env, origin, `shared/${relative}`), config);
     files.set(publicPath(relative), content);
   }
   for (const relative of manifest.sharedDb) {
+    files.set(relative, await readScaffold(env, origin, `shared/${relative}`));
+  }
+  for (const relative of manifest.sharedRuntime || []) {
     files.set(relative, await readScaffold(env, origin, `shared/${relative}`));
   }
   files.set('db/seed.sql', createSeedSql(config));
@@ -348,4 +390,4 @@ async function generateBundle(input, env, origin) {
   const buffer = createZip([...files.entries()]);
   return { config, buffer, filename: `${config.siteId}-${config.target}.zip` };
 }
-export { generateBundle, normalizeConfig };
+export { generateBundle, normalizeAdminAccount, normalizeConfig };

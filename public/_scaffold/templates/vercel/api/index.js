@@ -2,6 +2,11 @@ import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
 import { createNeonClient } from '../db/connection.js';
+import { createAdminSession, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
+import { adminDashboardPath } from '../lib/admin-url.js';
+import { cleanMenuLinks } from '../lib/menu-links.js';
+import { detectPaymentProofMime, MAX_PAYMENT_PROOF_BYTES, PAYMENT_PROOF_MIME_TYPES, paymentProofFromBase64, paymentProofToBase64 } from '../lib/payment-proof.js';
+import { runPaymentReminderChecks } from '../lib/payment-reminders.js';
 import { createHmac, randomBytes, timingSafeEqual, webcrypto } from 'node:crypto';
 
 const app = express();
@@ -25,9 +30,13 @@ app.use(helmet({
 }));
 app.use(express.json({ limit: MAX_BODY, strict: true }));
 app.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
+app.use((req, res, next) => {
+  if (req.path === '/admin.html' || req.query.__admin_static === '1') return res.status(404).end();
+  next();
+});
 
 const getDb = () => createNeonClient(process.env.DATABASE_URL);
-const csrfSecret = () => process.env.CSRF_SECRET || process.env.ADMIN_API_KEY || (process.env.NODE_ENV === 'production' ? '' : 'local-development-only-change-before-deploy');
+const csrfSecret = () => process.env.CSRF_SECRET || (process.env.NODE_ENV === 'production' ? '' : 'local-development-only-change-before-deploy');
 const csrfCookie = 'practice_csrf';
 const clientSessionCookie = 'canopy_client';
 const clientSessionTtlSeconds = 30 * 24 * 60 * 60;
@@ -58,6 +67,17 @@ function cookieValue(header, name) {
     if (item.slice(0, separator).trim() === name) { try { return decodeURIComponent(item.slice(separator + 1).trim()); } catch (_) { return ''; } }
   }
   return '';
+}
+function adminConfigured() {
+  return Boolean(process.env.ADMIN_USERNAME && process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD_HASH && csrfSecret());
+}
+function adminSessionCookieName(req) {
+  return req.secure ? '__Host-canopy_owner' : 'canopy_owner';
+}
+async function adminOk(req) {
+  if (!adminConfigured()) return false;
+  const token = cookieValue(req.headers.cookie, adminSessionCookieName(req));
+  return verifyAdminSession(token, process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD_HASH, csrfSecret());
 }
 async function passwordDigest(password, salt, iterations = passwordIterations) {
   const key = await webcrypto.subtle.importKey('raw', Buffer.from(password, 'utf8'), 'PBKDF2', false, ['deriveBits']);
@@ -113,12 +133,9 @@ function csrfGuard(req, res, next) {
   if (!cookie || !header || cookie !== header || !tokenIsValid(header)) return res.status(403).json({ error: 'Your security token expired. Refresh and try again.' });
   next();
 }
-function adminGuard(req, res, next) {
-  const expected = process.env.ADMIN_API_KEY || '';
-  const given = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '');
-  if (!expected) return res.status(503).json({ error: 'Owner access has not been configured. Set ADMIN_API_KEY.' });
-  const left = Buffer.from(expected); const right = Buffer.from(given);
-  if (left.length !== right.length || !timingSafeEqual(left, right)) return res.status(401).json({ error: 'Owner key is not valid.' });
+async function adminGuard(req, res, next) {
+  if (!adminConfigured()) return res.status(503).json({ error: 'Owner sign-in is not configured. Check ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD_HASH and CSRF_SECRET.' });
+  if (!await adminOk(req)) return res.status(401).json({ error: 'Owner session is not valid. Sign in again.' });
   next();
 }
 function cleanText(value, max, fallback = '') {
@@ -184,7 +201,8 @@ function cleanSiteConfig(input = {}) {
     editorialAccent: ['black','teal','forest'].includes(merged.editorialAccent) ? merged.editorialAccent : 'black',
     features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false },
     payments: cleanPaymentDetails(merged.payments),
-    customPages: cleanCustomPages(merged.customPages, DEFAULT_CONFIG.customPages)
+    customPages: cleanCustomPages(merged.customPages, DEFAULT_CONFIG.customPages),
+    menuLinks: cleanMenuLinks(merged.menuLinks, DEFAULT_CONFIG.menuLinks)
   };
 }
 function validDate(value) {
@@ -336,6 +354,34 @@ app.get('/api/csrf', (req, res) => {
     res.setHeader('Set-Cookie', `${csrfCookie}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600${secure}`);
     res.json({ token });
   } catch (error) { res.status(503).json({ error: error.message }); }
+});
+app.get('/api/admin/entry', (req, res) => {
+  res.redirect(302, adminDashboardPath(new Date(), siteTimeZone));
+});
+app.get('/api/admin/session', asyncRoute(async (req, res) => {
+  const configured = adminConfigured();
+  const authenticated = configured && await adminOk(req);
+  res.json({ configured, authenticated, dashboardPath: adminDashboardPath(new Date(), siteTimeZone), email: authenticated ? process.env.ADMIN_EMAIL : '' });
+}));
+app.post('/api/admin/login', csrfGuard, asyncRoute(async (req, res) => {
+  if (!adminConfigured()) return res.status(503).json({ error: 'Owner sign-in is not configured. Check the environment variables.' });
+  const username = cleanText(req.body?.username, 64).toLowerCase();
+  const password = String(req.body?.password || '');
+  const expectedUsername = String(process.env.ADMIN_USERNAME).trim().toLowerCase();
+  const givenBytes = Buffer.from(username);
+  const expectedBytes = Buffer.from(expectedUsername);
+  const usernameMatches = givenBytes.length === expectedBytes.length && timingSafeEqual(givenBytes, expectedBytes);
+  const passwordMatches = await verifyPasswordHash(password, process.env.ADMIN_PASSWORD_HASH);
+  if (!usernameMatches || !passwordMatches) return res.status(401).json({ error: 'Username or password is incorrect.' });
+  const token = await createAdminSession(process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD_HASH, csrfSecret());
+  const secure = req.secure ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${adminSessionCookieName(req)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`);
+  res.json({ ok: true, email: process.env.ADMIN_EMAIL });
+}));
+app.post('/api/admin/logout', csrfGuard, (req, res) => {
+  const secure = req.secure ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${adminSessionCookieName(req)}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
+  res.json({ ok: true });
 });
 app.get('/api/site', asyncRoute(async (_req, res) => {
   if (!process.env.DATABASE_URL) return res.json({ config: DEFAULT_CONFIG, source: 'generated-fallback' });
@@ -513,12 +559,13 @@ app.post('/api/appointments', csrfGuard, asyncRoute(async (req, res) => {
   if (!client) return res.status(401).json({ error: 'Sign in or create a client account to reserve a consultation.' });
   const value = req.body || {};
   const slotId = String(value.slotId || ''); const service = cleanText(value.service, 120); const context = cleanText(value.context, 100);
-  if (!/^[0-9a-f-]{36}$/i.test(slotId) || !DEFAULT_CONFIG.services.includes(service)) return res.status(400).json({ error: 'Choose a valid open time and visit type.' });
+  const paymentMethod = ['gcash', 'maya'].includes(value.paymentMethod) ? value.paymentMethod : '';
+  if (!/^[0-9a-f-]{36}$/i.test(slotId) || !DEFAULT_CONFIG.services.includes(service) || !paymentMethod) return res.status(400).json({ error: 'Choose a valid open time, visit type and GCash or Maya payment method.' });
   try {
     const sql = getDb();
-    const rows = await sql`INSERT INTO appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${client.phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed' FROM consultation_slots AS slot JOIN monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${siteTimeZone} > now() AND NOT EXISTS (SELECT 1 FROM appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time`;
+    const rows = await sql`INSERT INTO appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status, payment_method, payment_status, payment_due_at) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${client.phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed', ${paymentMethod}, 'awaiting_proof', now() + interval '15 minutes' FROM consultation_slots AS slot JOIN monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${siteTimeZone} > now() AND NOT EXISTS (SELECT 1 FROM appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time, payment_due_at AS "paymentDueAt"`;
     if (!rows.length) return res.status(409).json({ error: 'That time was just taken or is no longer available. Refresh the calendar and choose another.' });
-    res.status(201).json({ ok: true, appointment: { ...rows[0], timeLabel: displayTime(rows[0].time), status: 'confirmed' } });
+    res.status(201).json({ ok: true, appointment: { ...rows[0], timeLabel: displayTime(rows[0].time), status: 'confirmed', paymentStatus: 'awaiting_proof', paymentMethod } });
   } catch (error) {
     if (error.code === '23505') return res.status(409).json({ error: 'That time was just taken. Refresh the calendar and choose another.' });
     console.error('appointment reservation failed', error);
@@ -529,8 +576,62 @@ app.get('/api/client/appointments', asyncRoute(async (req, res) => {
   const client = await currentClient(req);
   if (!client) return res.status(401).json({ error: 'Sign in to view your consultations.' });
   const sql = getDb();
-  const rows = await sql`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id AND note.client_account_id = appointment.client_account_id WHERE appointment.site_id = ${SITE_ID} AND appointment.client_account_id = ${client.id} ORDER BY appointment.appointment_date DESC, appointment.appointment_time DESC LIMIT 200`;
+  const rows = await sql`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.payment_status AS "paymentStatus", appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.payment_manual_received_at AS "paymentManualReceivedAt", appointment.created_at AS "createdAt", proof.id AS "paymentProofId", proof.review_status AS "paymentProofStatus", proof.uploaded_at AS "paymentProofUploadedAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN appointment_payment_proofs AS proof ON proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id AND proof.client_account_id = appointment.client_account_id LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id AND note.client_account_id = appointment.client_account_id WHERE appointment.site_id = ${SITE_ID} AND appointment.client_account_id = ${client.id} ORDER BY appointment.appointment_date DESC, appointment.appointment_time DESC LIMIT 200`;
   res.json({ appointments: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
+}));
+app.post('/api/client/appointments/:id/payment-proof', csrfGuard, express.raw({ type: PAYMENT_PROOF_MIME_TYPES, limit: MAX_PAYMENT_PROOF_BYTES }), asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.status(404).json({ error: 'Online appointments are not enabled.' });
+  const client = await currentClient(req);
+  if (!client) return res.status(401).json({ error: 'Sign in to upload payment proof.' });
+  const id = String(req.params.id || '');
+  const contentType = String(req.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  const bytes = Buffer.isBuffer(req.body) ? req.body : null;
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid appointment id.' });
+  if (!PAYMENT_PROOF_MIME_TYPES.includes(contentType) || !bytes?.length) return res.status(415).json({ error: 'Upload a PNG, JPEG or WebP payment screenshot.' });
+  if (bytes.length > MAX_PAYMENT_PROOF_BYTES) return res.status(413).json({ error: 'Payment screenshots must be 3 MB or smaller.' });
+  const detectedType = detectPaymentProofMime(bytes);
+  if (detectedType !== contentType) return res.status(400).json({ error: 'The uploaded image format does not match its file type.' });
+  const sql = getDb();
+  try {
+    const imageBase64 = paymentProofToBase64(bytes);
+    const rows = await sql`
+      WITH target AS (
+        SELECT appointment.id, appointment.client_account_id, appointment.payment_method, appointment.payment_status
+        FROM appointments AS appointment
+        WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid
+          AND appointment.client_account_id = ${client.id} AND appointment.status <> 'cancelled'
+          AND (
+            appointment.payment_status = 'awaiting_proof'
+            OR (appointment.payment_status = 'approved' AND appointment.payment_manual_received_at IS NOT NULL)
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM appointment_payment_proofs AS existing_proof
+            WHERE existing_proof.site_id = appointment.site_id AND existing_proof.appointment_id = appointment.id
+          )
+        FOR UPDATE
+      ), saved AS (
+        INSERT INTO appointment_payment_proofs (site_id, appointment_id, client_account_id, payment_method, image_mime_type, image_base64, review_status)
+        SELECT ${SITE_ID}, target.id, target.client_account_id, target.payment_method, ${contentType}, ${imageBase64}, CASE WHEN target.payment_status = 'approved' THEN 'approved' ELSE 'pending_review' END
+        FROM target
+        RETURNING id, appointment_id, uploaded_at, review_status AS status
+      ), updated AS (
+        UPDATE appointments AS appointment SET payment_status = CASE WHEN appointment.payment_status = 'awaiting_proof' THEN 'pending_review' ELSE appointment.payment_status END
+        FROM saved WHERE appointment.site_id = ${SITE_ID} AND appointment.id = saved.appointment_id
+        RETURNING appointment.id
+      )
+      SELECT saved.id, saved.uploaded_at, saved.status FROM saved JOIN updated ON updated.id = saved.appointment_id LIMIT 1`;
+    if (!rows.length) {
+      const appointment = await sql`SELECT status, payment_status AS "paymentStatus" FROM appointments WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND client_account_id = ${client.id} LIMIT 1`;
+      if (!appointment.length) return res.status(404).json({ error: 'That consultation was not found.' });
+      if (appointment[0].status === 'cancelled') return res.status(409).json({ error: 'The practice has released this booking. Contact the practice if you already sent payment.' });
+      return res.status(409).json({ error: 'Payment proof was already uploaded or this consultation is no longer awaiting proof.' });
+    }
+    res.status(201).json({ proof: { id: rows[0].id, status: rows[0].status, uploadedAt: rows[0].uploaded_at } });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'Payment proof has already been uploaded for this consultation.' });
+    console.error('payment proof upload failed', error);
+    res.status(503).json({ error: 'Could not save payment proof. Please try again while the booking is active.' });
+  }
 }));
 app.patch('/api/client/appointments/:id', csrfGuard, asyncRoute(async (req, res) => {
   const client = await currentClient(req); const id = String(req.params.id || '');
@@ -616,6 +717,59 @@ app.get('/api/admin/appointments', adminGuard, asyncRoute(async (_req, res) => {
   const rows = await sql`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, client.id AS "clientId", note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= (${localToday()}::date - interval '90 days')::date AND appointment.appointment_date <= (${localToday()}::date + interval '90 days')::date ORDER BY appointment.appointment_date ASC, appointment.appointment_time ASC LIMIT 300`;
   res.json({ appointments: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
 }));
+app.get('/api/admin/payments/unpaid', adminGuard, asyncRoute(async (_req, res) => {
+  const sql = getDb();
+  const rows = await sql`SELECT appointment.id, appointment.name, client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username, appointment.service, appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.created_at AS "createdAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time FROM appointments AS appointment LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE appointment.site_id = ${SITE_ID} AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) ORDER BY appointment.created_at ASC LIMIT 300`;
+  res.json({ bookings: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
+}));
+app.patch('/api/admin/payments/unpaid/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  const id = String(req.params.id || ''); const action = String(req.body?.action || '');
+  if (!/^[0-9a-f-]{36}$/i.test(id) || !['received', 'release'].includes(action)) return res.status(400).json({ error: 'Choose whether payment was received or the booking should be released.' });
+  const sql = getDb();
+  const rows = action === 'received'
+    ? await sql`UPDATE appointments AS appointment SET payment_status = 'approved', payment_manual_received_at = now() WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`
+    : await sql`UPDATE appointments AS appointment SET status = 'cancelled' WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`;
+  if (!rows.length) return res.status(409).json({ error: 'This booking is no longer awaiting payment proof. Refresh the payment list.' });
+  res.json({ appointment: rows[0], slotReleased: action === 'release' });
+}));
+app.get('/api/admin/payments', adminGuard, asyncRoute(async (_req, res) => {
+  const sql = getDb();
+  const rows = await sql`SELECT proof.id, proof.payment_method AS "paymentMethod", proof.review_status AS status, proof.uploaded_at AS "uploadedAt", appointment.id AS "appointmentId", appointment.name, appointment.service, appointment.status AS "appointmentStatus", appointment.payment_status AS "appointmentPaymentStatus", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, appointment.created_at AS "bookedAt", client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username FROM appointment_payment_proofs AS proof JOIN appointments AS appointment ON appointment.id = proof.appointment_id AND appointment.site_id = proof.site_id LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE proof.site_id = ${SITE_ID} ORDER BY proof.uploaded_at DESC LIMIT 300`;
+  res.json({ payments: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
+}));
+app.get('/api/internal/payment-sweeps', asyncRoute(async (req, res) => {
+  const secret = String(process.env.CRON_SECRET || '');
+  const expected = Buffer.from(`Bearer ${secret}`);
+  const actual = Buffer.from(String(req.get('authorization') || ''));
+  if (!secret || actual.length !== expected.length || !timingSafeEqual(actual, expected)) return res.status(401).json({ error: 'Scheduled payment check is not authorized.' });
+  try {
+    const result = await runPaymentReminderChecks(getDb(), SITE_ID);
+    res.json({ ok: true, reminders: result.reminders.length, ownerFollowups: result.ownerFollowups.length });
+  } catch (error) { console.error('payment reminder schedule failed', error); res.status(503).json({ error: 'Could not check pending payment bookings.' }); }
+}));
+app.get('/api/admin/payment-proofs/:id/image', adminGuard, asyncRoute(async (req, res) => {
+  const id = String(req.params.id || '');
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid payment proof id.' });
+  const sql = getDb();
+  const rows = await sql`SELECT image_mime_type AS "mimeType", image_base64 AS image FROM appointment_payment_proofs WHERE site_id = ${SITE_ID} AND id = ${id}::uuid LIMIT 1`;
+  if (!rows.length) return res.status(404).json({ error: 'Payment proof not found.' });
+  const mimeType = PAYMENT_PROOF_MIME_TYPES.includes(rows[0].mimeType) ? rows[0].mimeType : 'application/octet-stream';
+  res.setHeader('Content-Type', mimeType);
+  res.setHeader('Content-Disposition', 'inline; filename="payment-proof"');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.status(200).end(Buffer.from(paymentProofFromBase64(rows[0].image)));
+}));
+app.patch('/api/admin/payment-proofs/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  const id = String(req.params.id || ''); const decision = String(req.body?.status || '');
+  if (!/^[0-9a-f-]{36}$/i.test(id) || !['approved', 'rejected'].includes(decision)) return res.status(400).json({ error: 'Choose whether to approve or reject this payment proof.' });
+  const sql = getDb();
+  const rows = decision === 'approved'
+    ? await sql`WITH reviewed AS (UPDATE appointment_payment_proofs AS proof SET review_status = 'approved', reviewed_at = now() FROM appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), saved AS (UPDATE appointments AS appointment SET payment_status = 'approved' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN saved ON saved.id = reviewed.appointment_id`
+    : await sql`WITH reviewed AS (UPDATE appointment_payment_proofs AS proof SET review_status = 'rejected', reviewed_at = now() FROM appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), released AS (UPDATE appointments AS appointment SET payment_status = 'rejected', status = 'cancelled' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN released ON released.id = reviewed.appointment_id`;
+  if (!rows.length) return res.status(409).json({ error: 'This payment proof was already reviewed or the consultation is no longer active.' });
+  res.json({ proof: { id: rows[0].id, status: decision }, slotReleased: decision === 'rejected' });
+}));
 app.patch('/api/admin/appointments/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
   const id = String(req.params.id || '');
   const status = String(req.body?.status || '');
@@ -655,8 +809,9 @@ app.put('/api/site', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found.' }));
 app.use((error, _req, res, _next) => {
-  console.error('API error', error);
   if (res.headersSent) return;
+  if (error?.type === 'entity.too.large') return res.status(413).json({ error: 'Payment screenshots must be 3 MB or smaller.' });
+  console.error('API error', error);
   res.status(500).json({ error: 'Something went wrong. Please try again.' });
 });
 

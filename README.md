@@ -26,21 +26,27 @@ If you want optional signing locally, create an ignored `.dev.vars` file contain
 
 Older deployments return “Set CSRF_SECRET as a Worker secret before using the builder” when the builder's runtime secret is missing. Deploy this updated builder with `npm run deploy`, or configure that secret on the existing builder Worker (not just in its build environment). Refresh the page and retry the download.
 
-The builder now uses random double-submit tokens, an HttpOnly SameSite=Strict cookie (host-prefixed and Secure on HTTPS), and origin/fetch-metadata validation. It continues to verify HMAC signatures when `CSRF_SECRET` is configured. This secret-free mode is only for the public, stateless ZIP builder; the generated practice apps' secret requirements are unchanged. No permissive CORS headers are enabled.
+The builder uses random double-submit tokens, an HttpOnly SameSite=Strict cookie (host-prefixed and Secure on HTTPS), and origin/fetch-metadata validation. It verifies HMAC signatures when `CSRF_SECRET` is configured, but the builder itself can also run without a secret because it is a public, stateless ZIP service. This optional builder secret is separate from the generated sites' required CSRF/session secret. No permissive CORS headers are enabled.
 
 Run regression tests with `npm test`.
 
-The Worker serves the static interface and handles `/api/csrf` plus `/api/generate`. Choose Vercel or Cloudflare in the builder to download only that runtime's source-code package; generation does not deploy or publish a site. ZIP builds use the versioned scaffold in `public/_scaffold/templates/`, HttpOnly SameSite CSRF cookies with optional signing, origin validation, a bounded JSON body, security headers, and an in-Worker ZIP writer. No customer state or owner key is stored by the builder.
+The Worker serves the static builder interface and handles `/api/csrf` plus `/api/generate`. Choose Vercel or Cloudflare in the builder to download only that runtime's source-code package; generation does not deploy or publish a site. ZIP builds use the versioned scaffold in `public/_scaffold/templates/`, origin validation, a bounded JSON body, security headers, and an in-Worker ZIP writer. The builder does not store the admin credentials supplied for a generated site, a customer database, or practice data.
 
 Guided setup supports custom menu pages with their own menu label, URL, title, text content and optional banner image. Site identity includes GCash and Maya payment details; the displayed numbers are sample values and should be replaced before publishing.
 
-### Generated package environment variables
+### Generated package administrator and environment variables
 
-Each downloaded ZIP includes a ready-to-use environment file — `.dev.vars` for the Cloudflare target, `.env` for the Vercel target — instead of a `.example` template that has to be copied and renamed first. For every generated ZIP:
+Each downloaded ZIP includes a ready-to-use environment file — `.dev.vars` for the Cloudflare target, `.env` for the Vercel target — plus a `.gitignore` entry for that file. The builder asks for an administrator username, email, and password. Passwords must be 12–128 characters and contain a lowercase letter, uppercase letter, number, and symbol. The raw password is used only while the ZIP is built in memory; the environment file contains a salted PBKDF2 password hash. `ADMIN_API_KEY` is no longer used.
 
-- `ADMIN_API_KEY` and `CSRF_SECRET` are freshly generated random values, unique to that download.
+For every generated ZIP:
+
+- `ADMIN_USERNAME` and `ADMIN_EMAIL` come from the builder's administrator fields.
+- `ADMIN_PASSWORD_HASH` contains only a salted PBKDF2 hash of the chosen password.
+- `CSRF_SECRET` is freshly generated for that download and signs CSRF tokens and short-lived, HTTP-only owner sessions. It is not a login credential.
 - `DATABASE_URL` is filled in from the optional "Database connection" field in the builder's Deployment step. Pasted Neon URLs have `sslmode`/`channel_binding` query parameters stripped automatically (the generated app's Neon serverless driver uses HTTPS and does not need them). If the field is left blank, a clearly marked placeholder is written instead.
 
-The pasted database URL and the generated secrets are only used to build the ZIP in memory for that single request; the stateless builder does not log, store, or otherwise retain them, and they never flow into the generated site's public config (`site-config.js`, `/api/site`, or `db/seed.sql`).
+The owner dashboard URL is computed at request time in the generated site's configured time zone (default `Asia/Manila`) using this Monday-first animal sequence: Monday dog, Tuesday rat, Wednesday ant, Thursday fish, Friday fly, Saturday cat, Sunday cockroach. Take that day's animal's last character, append `admin` and the current day-of-month, then `/dashboard`. For example, Tuesday the 8th produces `/tadmin8/dashboard`, so the full URL is the site root plus `/tadmin8/dashboard`. The URL rotates at local midnight. The old `/admin.html` entry redirects to the current dynamic path on Vercel and is not served directly by the Cloudflare Worker. The changing path is obscurity only; the username/password login and signed owner session are the access control. The login form is intentionally blank—credentials are never embedded in the public page.
+
+The database URL and admin password are only used to build the ZIP in memory for that request. The builder does not log or retain them, and the account username, email, password hash, and secrets never flow into the generated site's public config (`site-config.js`, `/api/site`, or `db/seed.sql`).
 
 Cloudflare dashboard reference: [Create a Worker from a template or repository](https://dash.cloudflare.com/9d8cf0bed724c974cfd216a9e2eafcb6/workers-and-pages/create/deploy-to-workers?repository=https%3A%2F%2Fgithub.com%2Fcloudflare%2Ftemplates%2Ftree%2Fmain%2Fllm-chat-app-template). This project uses the Workers static-assets binding rather than the chat template's Workers AI binding.

@@ -12,10 +12,14 @@
     "start": "wrangler dev",
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
-    "check": "wrangler deploy --dry-run"
+    "check": "wrangler deploy --dry-run",
+    "payments:worker": "node --env-file=.dev.vars payment-reminder-worker.js"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.2"
+  },
+  "overrides": {
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "wrangler": "4.147.0"

@@ -7,6 +7,34 @@ function csrfCookie(request) {
     ? '__Host-canopy_builder_csrf' : 'canopy_builder_csrf';
 }
 const MAX_CONFIG_BYTES = 256 * 1024;
+async function readBoundedText(request, maxBytes) {
+  const declaredLength = Number(request.headers.get('Content-Length') || 0);
+  if (declaredLength > maxBytes) return { text: null, tooLarge: true };
+  const reader = request.body?.getReader();
+  if (!reader) return { text: '', tooLarge: false };
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        try { await reader.cancel(); } catch (_) { /* The body is already being discarded. */ }
+        return { text: null, tooLarge: true };
+      }
+      chunks.push(value);
+    }
+  } catch (_) {
+    return { text: null, tooLarge: false };
+  } finally {
+    try { reader.releaseLock(); } catch (_) { /* A cancelled stream may already be released. */ }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return { text: new TextDecoder().decode(bytes), tooLarge: false };
+}
 function secureHeaders(source = {}) {
   const headers = new Headers(source);
   headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
@@ -82,14 +110,12 @@ export default {
     if (url.pathname === '/api/csrf' && request.method === 'GET') return issueCsrf(request, env);
     if (url.pathname === '/api/generate' && request.method === 'POST') {
       if (!await csrfValid(request, env)) return failure('Cross-site request rejected or security token expired.', 403);
-      const length = Number(request.headers.get('Content-Length') || 0);
-      if (length > MAX_CONFIG_BYTES) return failure('The configuration is too large.', 413);
+      const body = await readBoundedText(request, MAX_CONFIG_BYTES);
+      if (body.tooLarge) return failure('The configuration is too large.', 413);
+      if (body.text === null) return failure('Send a valid site configuration object.');
       let input;
-      try {
-        const raw = await request.text();
-        if (encoder.encode(raw).length > MAX_CONFIG_BYTES) return failure('The configuration is too large.', 413);
-        input = JSON.parse(raw);
-      } catch (_) { return failure('Send a valid site configuration object.'); }
+      try { input = JSON.parse(body.text); }
+      catch (_) { return failure('Send a valid site configuration object.'); }
       if (!input || !['vercel', 'cloudflare'].includes(input.target)) return failure('Choose either the Vercel or Cloudflare code package.');
       try {
         const { buffer, filename } = await generateBundle(input, env, url.origin);
@@ -98,7 +124,7 @@ export default {
           'Content-Length': String(buffer.length), 'Cache-Control': 'no-store'
         }) });
       } catch (cause) {
-        if (/valid practice email|custom page|custom pages|HTTPS URL|Choose either the Vercel or Cloudflare|valid Neon database connection string/i.test(cause.message || '')) return failure(cause.message, 400);
+        if (/valid practice email|administrator username|administrator email|administrator password|custom page|custom pages|HTTPS URL|Choose either the Vercel or Cloudflare|valid Neon database connection string/i.test(cause.message || '')) return failure(cause.message, 400);
         console.error('Cloudflare builder ZIP generation failed', cause);
         return failure('The selected code package could not be prepared. Please try again.', 500);
       }

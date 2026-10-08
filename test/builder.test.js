@@ -1,9 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { verifyPasswordHash } from '../public/_scaffold/templates/shared/lib/admin-security.js';
 import worker from '../src/index.js';
 
 const origin = 'https://builder.example';
+const adminInput = {
+  adminUsername: 'practiceowner',
+  adminEmail: 'owner@example.test',
+  adminPassword: 'CanopyOwner!8'
+};
 const assets = {
   async fetch(request) {
     const path = new URL(request.url).pathname;
@@ -24,17 +30,50 @@ async function session(env = {}, base = origin) {
   }
   return { token, cookie: setCookie.split(';')[0] };
 }
-function generate(env, session, headers = {}, target = 'vercel') {
+function generate(env, auth, headers = {}, target = 'vercel', adminOverrides = {}) {
   return worker.fetch(new Request(`${origin}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: origin,
-      Cookie: session.cookie, 'X-CSRF-Token': session.token, ...headers },
-    body: JSON.stringify({ target, businessName: 'Test Practice' })
+      Cookie: auth.cookie, 'X-CSRF-Token': auth.token, ...headers },
+    body: JSON.stringify({ target, businessName: 'Test Practice', ...adminInput, ...adminOverrides })
   }), env);
 }
+function zipEntries(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const decoder = new TextDecoder();
+  const files = new Map();
+  let offset = 0;
+  while (offset + 30 <= bytes.length && view.getUint32(offset, true) === 0x04034b50) {
+    const size = view.getUint32(offset + 18, true);
+    const nameLength = view.getUint16(offset + 26, true);
+    const extraLength = view.getUint16(offset + 28, true);
+    const nameStart = offset + 30;
+    const dataStart = nameStart + nameLength + extraLength;
+    const dataEnd = dataStart + size;
+    const name = decoder.decode(bytes.subarray(nameStart, nameStart + nameLength));
+    files.set(name, decoder.decode(bytes.subarray(dataStart, dataEnd)));
+    offset = dataEnd;
+  }
+  return files;
+}
+test('builder and owner UI contain edit-page navigation but no admin-key connection flow', async () => {
+  const [builderHtml, ownerHtml, ownerJs] = await Promise.all([
+    readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/_scaffold/templates/shared/public/admin.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/_scaffold/templates/shared/public/admin.js', import.meta.url), 'utf8')
+  ]);
+  assert.match(builderHtml, /id="adminUsername"/);
+  assert.match(builderHtml, /id="adminEmail"/);
+  assert.match(builderHtml, /id="adminPassword"/);
+  for (const pageId of ['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments']) {
+    assert.match(ownerHtml, new RegExp(`data-admin-page-link="${pageId}"`));
+    assert.match(ownerHtml, new RegExp(`data-admin-page="${pageId}"`));
+  }
+  assert.doesNotMatch(`${builderHtml}\n${ownerHtml}\n${ownerJs}`, /ADMIN_API_KEY|adminKey|keyForm|sessionStorage|Bearer/i);
+});
 for (const secret of ['', 'test-only-secret']) {
   for (const target of ['vercel', 'cloudflare']) {
-    test(`downloads ${target} ZIP ${secret ? 'with' : 'without'} a configured secret`, async () => {
+    test(`downloads ${target} ZIP ${secret ? 'with' : 'without'} a configured builder CSRF secret`, async () => {
       const env = { CSRF_SECRET: secret, ASSETS: assets };
       const auth = await session(env);
       const response = await generate(env, auth, {}, target);
@@ -45,7 +84,7 @@ for (const secret of ['', 'test-only-secret']) {
       assert.ok(bytes.length > 1000);
     });
   }
-  test(`rejects invalid CSRF requests ${secret ? 'with' : 'without'} signing`, async () => {
+  test(`rejects invalid builder CSRF requests ${secret ? 'with' : 'without'} signing`, async () => {
     const env = { CSRF_SECRET: secret };
     const auth = await session(env);
     for (const headers of [
@@ -61,21 +100,147 @@ for (const secret of ['', 'test-only-secret']) {
     assert.equal((await generate(env, { token: invalid, cookie: `__Host-canopy_builder_csrf=${invalid}` })).status, 403);
   });
 }
-test('configured signing rejects forged matching cookie and header', async () => {
+test('generated Vercel and Cloudflare packages include private admin login settings and no admin API key', async () => {
+  for (const target of ['vercel', 'cloudflare']) {
+    const env = { ASSETS: assets };
+    const auth = await session(env);
+    const response = await generate(env, auth, {}, target, {
+      customPages: [{ id: 'privacy', menuName: 'Privacy', url: '/privacy', pageTitle: 'Privacy policy', pageContent: 'Our privacy policy.' }]
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    const files = zipEntries(new Uint8Array(await response.arrayBuffer()));
+    const envName = target === 'cloudflare' ? '.dev.vars' : '.env';
+    const variables = files.get(envName);
+    assert.ok(variables, `expected generated ${envName}`);
+    assert.match(variables, /^ADMIN_USERNAME="?practiceowner"?$/m);
+    assert.match(variables, /^ADMIN_EMAIL="?owner@example\.test"?$/m);
+    const passwordHash = variables.match(/^ADMIN_PASSWORD_HASH="?([^\r\n"]+)"?$/m)?.[1];
+    assert.ok(passwordHash, 'expected an administrator password hash in the environment file');
+    assert.equal(await verifyPasswordHash(adminInput.adminPassword, passwordHash), true);
+    if (target === 'vercel') assert.match(variables, /^CRON_SECRET=[A-Za-z0-9]+$/m);
+    assert.doesNotMatch(variables, /ADMIN_API_KEY=/);
+    assert.doesNotMatch(variables, new RegExp(adminInput.adminPassword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(files.get('.gitignore'), new RegExp(`^${envName.replace('.', '\\.')}\\n`, 'm'));
+
+    const adminHtmlPath = target === 'cloudflare' ? 'public/admin.html' : 'admin.html';
+    const adminHtml = files.get(adminHtmlPath);
+    assert.ok(adminHtml, 'expected the admin login page');
+    assert.match(adminHtml, /id="menuLinksForm"/);
+    assert.match(adminHtml, /id="menuLinksList"/);
+    assert.match(adminHtml, /action="\/api\/admin\/login"/);
+    assert.doesNotMatch(adminHtml, new RegExp(`value="${adminInput.adminUsername}"`));
+    assert.doesNotMatch(adminHtml, new RegExp(`value="${adminInput.adminPassword}"`));
+    for (const pageId of ['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments', 'payments']) {
+      assert.match(adminHtml, new RegExp(`data-admin-page-link="${pageId}"`));
+      assert.match(adminHtml, new RegExp(`data-admin-page="${pageId}"`));
+    }
+    const adminJsPath = target === 'cloudflare' ? 'public/admin.js' : 'admin.js';
+    const adminJs = files.get(adminJsPath);
+    assert.match(adminJs, /showAdminPage/);
+    assert.match(adminJs, /pushState/);
+    assert.match(adminJs, /safeMenuDestination/);
+    assert.match(adminJs, /menuLinks: links/);
+    assert.doesNotMatch(`${adminHtml}\n${adminJs}\n${files.get(target === 'cloudflare' ? 'public/admin.css' : 'admin.css')}`, /ADMIN_API_KEY|adminKey|keyForm|sessionStorage|Bearer/i);
+
+    const publicConfigPath = target === 'cloudflare' ? 'public/site-config.js' : 'site-config.js';
+    const publicConfig = files.get(publicConfigPath);
+    assert.doesNotMatch(publicConfig, /owner@example\.test|practiceowner/);
+    const generatedConfig = JSON.parse(publicConfig.slice(publicConfig.indexOf('=') + 1).trim().replace(/;$/, ''));
+    assert.deepEqual(generatedConfig.menuLinks.slice(0, 7).map(({ id }) => id), ['home', 'care', 'about', 'gallery', 'journal', 'appointments', 'contact']);
+    assert.deepEqual(generatedConfig.menuLinks.at(-1), { id: 'custom-privacy', label: 'Privacy', href: '/privacy.html' });
+    assert.ok(files.has(target === 'cloudflare' ? 'public/privacy.html' : 'privacy.html'));
+    assert.match(files.get(target === 'cloudflare' ? 'public/site.js' : 'site.js'), /renderMenuNavigation/);
+    assert.ok(files.has('lib/menu-links.js'), 'expected shared safe menu-link normalization');
+    assert.ok(files.has('lib/payment-proof.js'), 'expected the private payment proof image helper');
+    assert.ok(files.has('lib/payment-reminders.js'), 'expected shared payment reminder queries');
+    assert.ok(files.has('payment-reminder-worker.js'), 'expected the standalone Node.js payment reminder worker');
+    const siteRuntime = files.get(target === 'cloudflare' ? 'src/index.js' : 'api/index.js');
+    assert.match(siteRuntime, /cleanMenuLinks\(merged\.menuLinks, DEFAULT_CONFIG\.menuLinks\)/);
+    assert.match(siteRuntime, /\.\.\/lib\/menu-links\.js/);
+    assert.doesNotMatch(files.get('db/seed.sql'), /owner@example\.test|practiceowner|ADMIN_PASSWORD_HASH/);
+    const siteFiles = [...files.values()].join('\n');
+    assert.doesNotMatch(siteFiles, new RegExp(adminInput.adminPassword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(files.get('README.md'), /Tuesday.*rat.*Wednesday.*ant/s);
+    assert.match(files.get('README.md'), /\/tadmin8\/dashboard/);
+    assert.match(files.get('README.md'), /Menu links view.*rename, reorder, add or remove/s);
+    assert.doesNotMatch(files.get('README.md'), /practiceowner|owner@example\.test|CanopyOwner!8/);
+    const deployableFiles = [...files.entries()]
+      .filter(([path]) => path !== envName && path !== 'README.md' && !path.startsWith('db/'))
+      .map(([, contents]) => contents).join('\n');
+    assert.doesNotMatch(deployableFiles, /practiceowner|owner@example\.test|CanopyOwner!8/);
+    assert.match(files.get(target === 'cloudflare' ? 'src/index.js' : 'api/index.js'), /adminDashboardPath/);
+    if (target === 'cloudflare') {
+      assert.match(files.get('package.json'), /"sharp": "0\.35\.5"/);
+      assert.match(files.get('wrangler.jsonc'), /"run_worker_first": true/);
+      assert.match(files.get('wrangler.jsonc'), /"crons": \["\* \* \* \* \*"\]/);
+      assert.match(files.get('src/index.js'), /async scheduled\(_controller, env, ctx\)/);
+    } else {
+      assert.match(files.get('package.json'), /"node": ">=20\.6"/);
+      assert.match(files.get('vercel.json'), /:adminSegment\/dashboard/);
+      assert.match(files.get('vercel.json'), /payment-sweeps.*\* \* \* \* \*/);
+      assert.match(files.get('api/index.js'), /CRON_SECRET/);
+    }
+    assert.match(files.get('README.md'), /Bookings remain scheduled after 15 minutes/);
+    assert.match(files.get('README.md'), /even if the owner has independently marked the payment received/);
+    assert.match(files.get('README.md'), /schema\.sql.*safe to rerun/s);
+    assert.match(files.get('README.md'), /90-second client-reminder checks and 3-minute owner-follow-up checks/);
+  }
+});
+
+test('builder rejects weak or incomplete administrator credentials before creating a ZIP', async () => {
+  const env = { ASSETS: assets };
+  const auth = await session(env);
+  const invalidAccounts = [
+    { adminPassword: 'Abcdef1!234' },
+    { adminPassword: 'ABCDEFGHIJ1!' },
+    { adminPassword: 'abcdefghij1!' },
+    { adminPassword: 'Abcdefghij!!' },
+    { adminPassword: 'Abcdefghij12' },
+    { adminUsername: 'x' },
+    { adminEmail: 'bad-address' }
+  ];
+  for (const invalid of invalidAccounts) {
+    const response = await generate(env, auth, {}, 'vercel', invalid);
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /administrator/i);
+  }
+});
+
+test('configured signing rejects forged matching CSRF cookie and header', async () => {
   const token = `${'a'.repeat(32)}.${'b'.repeat(43)}`;
   assert.equal((await generate({ CSRF_SECRET: 'secret' }, {
     token, cookie: `__Host-canopy_builder_csrf=${token}`
   })).status, 403);
 });
-test('token issuance rejects cross-origin requests', async () => {
+test('builder CSRF token issuance rejects cross-origin requests', async () => {
   const response = await worker.fetch(new Request(`${origin}/api/csrf`, {
     headers: { Origin: 'https://evil.example' }
   }), {});
   assert.equal(response.status, 403);
 });
-test('tokens are random and HTTP localhost remains supported', async () => {
+test('builder CSRF tokens are random and HTTP localhost remains supported', async () => {
   const a = await session({}, 'http://localhost:8787');
   const b = await session({}, 'http://localhost:8787');
   assert.notEqual(a.token, b.token);
   assert.match(a.cookie, /^canopy_builder_csrf=/);
+});
+test('builder rejects oversized streamed JSON bodies without buffering them in full', async () => {
+  const env = { ASSETS: assets };
+  const auth = await session(env);
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(256 * 1024 + 1));
+      controller.close();
+    }
+  });
+  const request = new Request(`${origin}/api/generate`, {
+    method: 'POST',
+    headers: { Origin: origin, Cookie: auth.cookie, 'X-CSRF-Token': auth.token, 'Content-Type': 'application/json' },
+    body,
+    duplex: 'half'
+  });
+  assert.equal(request.headers.get('Content-Length'), null);
+  const response = await worker.fetch(request, env);
+  assert.equal(response.status, 413);
+  assert.match((await response.json()).error, /too large/i);
 });

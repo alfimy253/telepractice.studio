@@ -13,7 +13,7 @@
     <a class="site-brand" href="/" aria-label="Home"><span class="brand-symbol" id="brandSymbol">✳</span><span><strong id="brandName">__BRAND_NAME__</strong><small id="brandSubline">CARE THAT FEELS PERSONAL</small></span></a>
     <button class="nav-menu" id="navMenu" type="button" aria-label="Open menu"><span></span><span></span></button>
     <nav class="site-nav" id="siteNav" aria-label="Main navigation"><a href="/#care">Our care</a><a href="/#about">Our approach</a><a href="/#gallery" id="galleryNav">Gallery</a><a href="/#journal" id="journalNav">Journal</a><a href="/appointments.html" id="appointmentsNav" aria-current="page">Appointments</a><a href="/#contact">Contact</a></nav>
-    <a class="header-cta" href="/admin.html">Owner area <span>↗</span></a>
+    <a class="header-cta" href="/api/admin/entry">Owner area <span>↗</span></a>
   </header>
   <main id="appointmentsMain">
     <section class="appointments-hero section-wrap">
@@ -42,12 +42,14 @@
     </section>
     <section class="reservation-area section-wrap" id="reservationArea">
       <div class="reservation-card" id="reservationCard" hidden>
-        <div><span class="calendar-kicker">YOUR SELECTED TIME</span><h2 id="selectedSlotLabel">Choose a time above</h2><p>Appointments are reserved immediately when you confirm.</p></div>
+        <div><span class="calendar-kicker">YOUR SELECTED TIME</span><h2 id="selectedSlotLabel">Choose a time above</h2><p>Your appointment stays scheduled while the practice verifies payment. Please upload proof within 15 minutes.</p></div>
         <form id="reservationForm" class="reservation-form">
           <label><span>Type of consultation</span><select id="reservationService" name="service" required><option value="">Choose a service</option></select></label>
+          <label><span>Payment method</span><select id="reservationPaymentMethod" name="paymentMethod" required><option value="gcash">GCash</option><option value="maya">Maya</option></select></label>
           <label><span id="reservationContextLabel">Optional note for the practice</span><input id="reservationContext" name="context" maxlength="100" placeholder="A short detail to help us prepare"></label>
-          <label class="reservation-consent"><input id="reservationConsent" type="checkbox" required><span>I understand this time will be reserved for my account.</span></label>
-          <button type="submit" class="button button-primary" id="reserveButton">Reserve consultation <span>↗</span></button>
+          <p class="payment-window-note">After booking, pay the practice using your selected method and upload a screenshot of the successful transaction in your account within 15 minutes. We’ll remind you after 12 minutes if proof is still missing. Your appointment stays scheduled until the practice verifies payment or the owner releases it.</p>
+          <label class="reservation-consent"><input id="reservationConsent" type="checkbox" required><span>I understand I should upload proof within 15 minutes; the practice may release the booking if payment is not received.</span></label>
+          <button type="submit" class="button button-primary" id="reserveButton">Book & continue to payment <span>↗</span></button>
           <p id="reservationMessage" class="reservation-message" aria-live="polite"></p>
         </form>
       </div>
@@ -80,7 +82,7 @@
           <div class="client-appointments-block"><div class="client-appointments-heading"><div><span class="form-step">YOUR CONSULTATIONS</span><h3>Appointments & notes</h3></div><button type="button" id="refreshClientAppointments" class="refresh-button">Refresh ↻</button></div><div id="clientAppointmentsList" class="client-appointments-list"><p class="slot-empty">Loading your consultations…</p></div></div>
         </div>
       </div>
-      <p class="account-privacy-note">Your account is private to this practice. Consultation notes are visible only to the practice owner and the client booked for that consultation. This starter is not a certified electronic health-record system.</p>
+      <p class="account-privacy-note">Your account is private to this practice. Payment screenshots are stored privately and visible only to the practice owner. Consultation notes are visible only to the practice owner and the client booked for that consultation. This starter is not a certified electronic health-record system.</p>
     </section>
   </main>
   <footer class="site-footer" id="contact">

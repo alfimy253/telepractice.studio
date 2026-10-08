@@ -2,10 +2,33 @@
   const fallback = window.SITE_CONFIG || {};
   let site = { ...fallback, features: { ...(fallback.features || {}) } };
   let csrfToken = '';
+  let signedIn = false;
+  let paymentsRefreshTimer = null;
+  const ADMIN_PAGE_IDS = new Set(['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments', 'payments']);
+  const MAX_MENU_LINKS = 16;
   const $ = (id) => document.getElementById(id);
-  const keyStore = 'practice-admin-key';
+  const isSignedIn = () => signedIn;
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-  const key = () => sessionStorage.getItem(keyStore) || '';
+  function showAdminPage(pageId) {
+    const activePage = ADMIN_PAGE_IDS.has(pageId) ? pageId : 'identity';
+    document.querySelectorAll('[data-admin-page]').forEach((page) => { page.hidden = page.dataset.adminPage !== activePage; });
+    document.querySelectorAll('[data-admin-page-link]').forEach((button) => {
+      const active = button.dataset.adminPageLink === activePage;
+      button.classList.toggle('active', active);
+      if (active) button.setAttribute('aria-current', 'page');
+      else button.removeAttribute('aria-current');
+    });
+    return activePage;
+  }
+  function syncAdminPageFromHash() {
+    const requestedPage = window.location.hash.slice(1);
+    const activePage = showAdminPage(requestedPage);
+    if (requestedPage && requestedPage !== activePage) {
+      const url = new URL(window.location.href);
+      url.hash = activePage;
+      window.history.replaceState(null, '', url);
+    }
+  }
   function toast(message, detailOrError = false, isError = false) {
     const node = $('adminToast'); if (!node) return;
     const detail = typeof detailOrError === 'string' ? detailOrError : '';
@@ -23,7 +46,6 @@
   }
   async function api(path, options = {}) {
     const headers = { Accept: 'application/json', ...(options.headers || {}) };
-    if (key()) headers.Authorization = `Bearer ${key()}`;
     if (options.method && !['GET','HEAD'].includes(options.method.toUpperCase())) {
       if (!csrfToken) await getCsrf();
       headers['X-CSRF-Token'] = csrfToken;
@@ -51,6 +73,83 @@
     $('themePreviewLayout').textContent = `${themeForm.elements.theme.options[themeForm.elements.theme.selectedIndex]?.text.split(' · ')[0] || 'Canopy'} layout · fixed content system`;
     const isDental = site.specialty === 'dental';
     $('adminSymbol').textContent = isDental ? '✦' : '✳'; $('themeMiniMark').textContent = isDental ? '✦' : '✳';
+  }
+  function newMenuLinkId() {
+    const random = window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    return `custom-${random}`;
+  }
+  function readMenuLinks() {
+    return [...$('menuLinksList').querySelectorAll('[data-menu-link-row]')].map((row) => {
+      const feature = row.dataset.menuLinkFeature || '';
+      return {
+        id: row.dataset.menuLinkId,
+        label: row.querySelector('[data-menu-link-field="label"]').value.trim(),
+        href: row.querySelector('[data-menu-link-field="href"]').value.trim(),
+        ...(feature ? { feature } : {})
+      };
+    });
+  }
+  function updateMenuLinkPositions() {
+    const rows = [...$('menuLinksList').querySelectorAll('[data-menu-link-row]')];
+    rows.forEach((row, index) => {
+      row.querySelector('.admin-menu-link-position').textContent = String(index + 1).padStart(2, '0');
+      row.querySelector('[data-menu-action="up"]').disabled = index === 0;
+      row.querySelector('[data-menu-action="down"]').disabled = index === rows.length - 1;
+    });
+  }
+  function renderMenuLinks(items = site.menuLinks) {
+    const list = $('menuLinksList');
+    if (!list) return;
+    list.replaceChildren();
+    (Array.isArray(items) ? items.slice(0, MAX_MENU_LINKS) : []).forEach((item, index) => {
+      const row = document.createElement('div');
+      row.className = 'admin-menu-link-row';
+      row.dataset.menuLinkRow = 'true';
+      row.dataset.menuLinkId = String(item?.id || newMenuLinkId()).slice(0, 48);
+      row.dataset.menuLinkFeature = ['gallery', 'blog', 'scheduling'].includes(item?.feature) ? item.feature : '';
+      const position = document.createElement('span');
+      position.className = 'admin-menu-link-position';
+      position.setAttribute('aria-label', `Menu position ${index + 1}`);
+      const label = document.createElement('label');
+      label.className = 'admin-menu-link-field';
+      const labelTitle = document.createElement('span'); labelTitle.textContent = 'Link label';
+      const labelInput = document.createElement('input');
+      labelInput.type = 'text'; labelInput.maxLength = 60; labelInput.required = true;
+      labelInput.autocomplete = 'off'; labelInput.placeholder = 'e.g. Our care'; labelInput.value = String(item?.label || '');
+      labelInput.dataset.menuLinkField = 'label';
+      label.append(labelTitle, labelInput);
+      const destination = document.createElement('label');
+      destination.className = 'admin-menu-link-field admin-menu-link-destination';
+      const destinationTitle = document.createElement('span'); destinationTitle.textContent = 'Destination';
+      const destinationInput = document.createElement('input');
+      destinationInput.type = 'text'; destinationInput.inputMode = 'url'; destinationInput.maxLength = 2048;
+      destinationInput.required = true; destinationInput.autocomplete = 'url'; destinationInput.spellcheck = false;
+      destinationInput.placeholder = '/appointments.html or https://example.com';
+      destinationInput.value = String(item?.href || ''); destinationInput.dataset.menuLinkField = 'href';
+      destination.append(destinationTitle, destinationInput);
+      const actions = document.createElement('div'); actions.className = 'admin-menu-link-actions';
+      for (const [action, glyph, accessibleName] of [['up', '↑', 'Move link up'], ['down', '↓', 'Move link down'], ['remove', '×', 'Remove link']]) {
+        const button = document.createElement('button');
+        button.type = 'button'; button.dataset.menuAction = action; button.textContent = glyph;
+        button.setAttribute('aria-label', accessibleName); button.title = accessibleName;
+        actions.appendChild(button);
+      }
+      row.append(position, label, destination, actions);
+      list.appendChild(row);
+    });
+    updateMenuLinkPositions();
+  }
+  function safeMenuDestination(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw || raw.length > 2048 || /[\u0000-\u001f\u007f]/.test(raw)) return false;
+    if (raw.startsWith('/')) {
+      if (raw.startsWith('//') || raw.startsWith('/\\')) return false;
+      try { return new URL(raw, window.location.origin).origin === window.location.origin; } catch (_) { return false; }
+    }
+    try {
+      const url = new URL(raw);
+      return url.protocol === 'https:' && Boolean(url.hostname) && !url.username && !url.password;
+    } catch (_) { return false; }
   }
   function previewTheme() {
     const form = $('themeForm');
@@ -85,12 +184,45 @@
       const response = await fetch('/api/site', { headers: { Accept: 'application/json' } });
       if (response.ok) { const data = await response.json(); if (data.config) site = { ...site, ...data.config, features: { ...site.features, ...(data.config.features || {}) } }; }
     } catch (_) {}
-    applyToForm(); previewTheme();
+    applyToForm(); previewTheme(); renderMenuLinks(site.menuLinks);
   }
-  function setConnected(connected) {
-    $('connectPanel').classList.toggle('connected', connected);
-    $('keyMessage').textContent = connected ? 'Connected. Your key stays in this tab session.' : 'The key is never added to the website ZIP.';
-    $('adminKey').value = '';
+  function setSignedIn(value, email = '') {
+    signedIn = Boolean(value);
+    $('loginPanel').hidden = signedIn;
+    $('adminWorkspace').hidden = !signedIn;
+    $('adminFooter').hidden = !signedIn;
+    $('ownerIdentity').hidden = !signedIn;
+    $('logoutButton').hidden = !signedIn;
+    $('ownerEmail').textContent = signedIn ? `SIGNED IN · ${email}` : '';
+    if (signedIn && !paymentsRefreshTimer) paymentsRefreshTimer = window.setInterval(() => {
+      if (signedIn && document.visibilityState === 'visible') loadPayments();
+    }, 60_000);
+    else if (!signedIn && paymentsRefreshTimer) { window.clearInterval(paymentsRefreshTimer); paymentsRefreshTimer = null; }
+  }
+  async function loadAdminWorkspace() {
+    await loadSite();
+    await loadPosts();
+    await loadGallery();
+    await loadAppointments();
+    await loadAvailabilitySchedule();
+    await loadPayments();
+  }
+  async function initializeAdmin() {
+    try {
+      const session = await api('/api/admin/session');
+      if (window.location.pathname !== session.dashboardPath) {
+        const dashboardUrl = new URL(session.dashboardPath, window.location.href);
+        dashboardUrl.hash = window.location.hash;
+        window.location.replace(dashboardUrl);
+        return;
+      }
+      syncAdminPageFromHash();
+      setSignedIn(session.authenticated, session.email || '');
+      if (session.authenticated) await loadAdminWorkspace();
+    } catch (error) {
+      setSignedIn(false);
+      $('loginMessage').textContent = error.message || 'Could not check the owner session. Refresh and try again.';
+    }
   }
   function addPostGalleryRow(image = {}) {
     const rows = $('postGalleryRows');
@@ -147,7 +279,7 @@
   }
   async function loadPosts() {
     const list = $('postsList');
-    if (!key()) { list.innerHTML = '<p class="empty-posts">Connect your owner key to manage blog posts.</p>'; return; }
+    if (!isSignedIn()) { list.innerHTML = '<p class="empty-posts">Sign in to manage blog posts.</p>'; return; }
     try {
       const data = await api('/api/admin/posts');
       const posts = data.posts || [];
@@ -172,11 +304,11 @@
         });
         row.append(icon, copy, state, edit, remove); list.appendChild(row);
       });
-    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your owner key.</p>`; }
+    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your sign-in session.</p>`; }
   }
   async function loadGallery() {
     const list = $('galleryList');
-    if (!key()) { list.innerHTML = '<p class="empty-posts">Connect your owner key to manage gallery items.</p>'; return; }
+    if (!isSignedIn()) { list.innerHTML = '<p class="empty-posts">Sign in to manage gallery items.</p>'; return; }
     try {
       const data = await api('/api/admin/gallery');
       const items = data.items || [];
@@ -201,7 +333,7 @@
         });
         row.append(icon, copy, state, edit, remove); list.appendChild(row);
       });
-    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your owner key.</p>`; }
+    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your sign-in session.</p>`; }
   }
   function monthInTimeZone(date = new Date()) {
     const zone = site.timeZone || 'Asia/Manila';
@@ -248,7 +380,7 @@
     return { weeklyRules, exceptions };
   }
   async function loadAvailabilitySchedule() {
-    const month = $('availabilityMonth')?.value; if (!month || !key()) return;
+    const month = $('availabilityMonth')?.value; if (!month || !isSignedIn()) return;
     const button = $('publishAvailabilityButton'); if (button) button.disabled = true;
     try {
       const data = await api(`/api/admin/availability?month=${encodeURIComponent(month)}`);
@@ -269,7 +401,7 @@
   }
   async function submitAvailability(event) {
     event.preventDefault();
-    if (!key()) { toast('Connect your owner key first', true); return; }
+    if (!isSignedIn()) { toast('Sign in first', true); return; }
     const month = $('availabilityMonth').value;
     const button = $('publishAvailabilityButton'); button.disabled = true;
     try {
@@ -282,7 +414,7 @@
   }
   async function loadAppointments() {
     const list = $('appointmentsList');
-    if (!key()) { list.innerHTML = '<p class="empty-posts">Connect your owner key to review consultations.</p>'; return; }
+    if (!isSignedIn()) { list.innerHTML = '<p class="empty-posts">Sign in to review consultations.</p>'; return; }
     try {
       const data = await api('/api/admin/appointments');
       const appointments = data.appointments || [];
@@ -334,7 +466,7 @@
         }
         list.appendChild(item);
       });
-    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your owner key.</p>`; }
+    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your sign-in session.</p>`; }
   }
   async function updateAppointment(id, status) {
     const action = status === 'confirmed' ? 'Confirm this appointment?' : 'Cancel this reserved consultation? Owner cancellation requires at least 24 hours’ notice.';
@@ -342,20 +474,233 @@
     try { await api(`/api/admin/appointments/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status } }); toast(status === 'confirmed' ? 'Consultation confirmed' : 'Consultation cancelled'); await loadAppointments(); }
     catch (error) { toast(error.message, true); }
   }
+  function relativeElapsed(value) {
+    const timestamp = new Date(value).getTime();
+    if (!Number.isFinite(timestamp)) return 'time unavailable';
+    const elapsed = Math.max(0, Date.now() - timestamp);
+    if (elapsed < 60_000) return 'just now';
+    if (elapsed < 3_600_000) { const minutes = Math.floor(elapsed / 60_000); return `${minutes} minute${minutes === 1 ? '' : 's'} ago`; }
+    if (elapsed < 86_400_000) { const hours = Math.floor(elapsed / 3_600_000); return `${hours} hour${hours === 1 ? '' : 's'} ago`; }
+    const days = Math.floor(elapsed / 86_400_000); return `${days} day${days === 1 ? '' : 's'} ago`;
+  }
+  function bookingFirstName(record) {
+    const name = String(record.clientName || record.name || '').trim();
+    return name ? name.split(/\s+/)[0] : 'Client';
+  }
+  function paymentBookingSummary(record, timestampField) {
+    const booked = `Booked ${relativeElapsed(record[timestampField])}`;
+    const date = record.date ? new Date(`${String(record.date).slice(0, 10)}T12:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }) : '';
+    const slot = [date, record.timeLabel || record.time].filter(Boolean).join(' · ');
+    return [booked, record.service, slot].filter(Boolean).join(' · ');
+  }
+  function renderUnpaidBookings(bookings) {
+    const list = $('unpaidBookingsList'); list.replaceChildren();
+    $('unpaidBookingsCount').textContent = String(bookings.length);
+    if (!bookings.length) { const empty = document.createElement('p'); empty.className = 'empty-posts'; empty.textContent = 'No bookings are waiting for payment proof.'; list.appendChild(empty); return; }
+    bookings.forEach((booking) => {
+      const item = document.createElement('article'); item.className = 'payment-review-item';
+      const summary = document.createElement('div'); summary.className = 'payment-review-summary';
+      const person = document.createElement('span'); person.className = 'payment-review-person';
+      const name = document.createElement('strong'); name.textContent = `${bookingFirstName(booking)} · ${booking.username || 'Email unavailable'}`;
+      const detail = document.createElement('small'); detail.textContent = paymentBookingSummary(booking, 'createdAt'); person.append(name, detail);
+      const meta = document.createElement('div'); meta.className = 'payment-review-meta';
+      const method = document.createElement('span'); method.className = 'payment-review-status'; method.textContent = booking.paymentMethod === 'maya' ? 'Maya' : 'GCash';
+      const dueAt = new Date(booking.paymentDueAt).getTime();
+      const reminderDue = Boolean(booking.paymentReminderSentAt) || (Number.isFinite(dueAt) && Date.now() >= dueAt - 3 * 60_000);
+      const ownerCheckDue = Boolean(booking.paymentOwnerAttentionAt) || (Number.isFinite(dueAt) && Date.now() >= dueAt);
+      const timer = document.createElement('span'); timer.className = `payment-review-status payment-time-left${ownerCheckDue ? ' needs-owner-review' : ''}`;
+      timer.textContent = ownerCheckDue ? '15+ min · check payment' : reminderDue ? 'Reminder sent · awaiting proof' : 'Awaiting proof';
+      const actions = document.createElement('div'); actions.className = 'payment-review-actions';
+      const received = document.createElement('button'); received.type = 'button'; received.className = 'approve-payment'; received.textContent = 'Mark received';
+      const release = document.createElement('button'); release.type = 'button'; release.className = 'reject-payment'; release.textContent = 'Release booking';
+      received.addEventListener('click', () => updateUnpaidBooking(booking.id, 'received', received, release));
+      release.addEventListener('click', () => updateUnpaidBooking(booking.id, 'release', received, release));
+      actions.append(received, release); meta.append(method, timer, actions); summary.append(person, meta); item.appendChild(summary); list.appendChild(item);
+    });
+  }
+  async function updateUnpaidBooking(id, action, receivedButton, releaseButton) {
+    const confirmation = action === 'received'
+      ? 'Mark this payment as received? Confirm that you checked your GCash or Maya account.'
+      : 'Release this booking and reopen its appointment time? Confirm that you checked and did not receive the payment.';
+    if (!window.confirm(confirmation)) return;
+    receivedButton.disabled = true; releaseButton.disabled = true;
+    try {
+      await api(`/api/admin/payments/unpaid/${encodeURIComponent(id)}`, { method: 'PATCH', body: { action } });
+      toast(action === 'received' ? 'Payment marked received' : 'Booking released · time is open again');
+      await Promise.all([loadPayments(), loadAppointments()]);
+    } catch (error) { toast(error.message, true); receivedButton.disabled = false; releaseButton.disabled = false; }
+  }
+  function renderPayments(payments) {
+    const list = $('paymentsList'); list.replaceChildren();
+    $('paymentsCount').textContent = String(payments.length);
+    if (!payments.length) { const empty = document.createElement('p'); empty.className = 'empty-posts'; empty.textContent = 'No payment proofs have been uploaded.'; list.appendChild(empty); return; }
+    payments.forEach((payment) => {
+      const item = document.createElement('article'); item.className = 'payment-review-item'; item.dataset.paymentId = payment.id;
+      const summary = document.createElement('div'); summary.className = 'payment-review-summary';
+      const person = document.createElement('span'); person.className = 'payment-review-person';
+      const name = document.createElement('strong'); name.textContent = `${bookingFirstName(payment)} · ${payment.username || 'Email unavailable'}`;
+      const detail = document.createElement('small'); detail.textContent = `${paymentBookingSummary(payment, 'bookedAt')} · Proof uploaded ${relativeElapsed(payment.uploadedAt)}`; person.append(name, detail);
+      const meta = document.createElement('div'); meta.className = 'payment-review-meta';
+      const method = document.createElement('span'); method.className = 'payment-review-status'; method.textContent = payment.paymentMethod === 'maya' ? 'Maya' : 'GCash';
+      const state = document.createElement('span'); state.className = `payment-review-status ${payment.status === 'pending_review' ? '' : payment.status}`; state.textContent = payment.status === 'pending_review' ? 'Needs review' : payment.status || 'Unknown';
+      if (payment.appointmentStatus === 'cancelled') { state.classList.add('cancelled'); state.textContent += ' · slot released'; }
+      const actions = document.createElement('div'); actions.className = 'payment-review-actions';
+      const previewButton = document.createElement('button'); previewButton.type = 'button'; previewButton.textContent = 'View proof';
+      previewButton.addEventListener('click', () => togglePaymentPreview(item, previewButton, payment)); actions.appendChild(previewButton);
+      if (payment.status === 'pending_review' && payment.appointmentStatus !== 'cancelled') {
+        const approve = document.createElement('button'); approve.type = 'button'; approve.className = 'approve-payment'; approve.textContent = 'Approve';
+        approve.addEventListener('click', () => reviewPaymentProof(payment.id, 'approved', approve, reject));
+        const reject = document.createElement('button'); reject.type = 'button'; reject.className = 'reject-payment'; reject.textContent = 'Reject & release';
+        reject.addEventListener('click', () => reviewPaymentProof(payment.id, 'rejected', approve, reject));
+        actions.append(approve, reject);
+      }
+      meta.append(method, state, actions); summary.append(person, meta); item.appendChild(summary); list.appendChild(item);
+    });
+  }
+  function togglePaymentPreview(item, button, payment) {
+    const existing = item.querySelector('.payment-proof-preview-wrap');
+    if (existing) { existing.remove(); item.classList.remove('is-expanded'); button.textContent = 'View proof'; return; }
+    const wrap = document.createElement('div'); wrap.className = 'payment-proof-preview-wrap';
+    const image = document.createElement('img'); image.className = 'payment-proof-preview'; image.alt = `Private ${payment.paymentMethod === 'maya' ? 'Maya' : 'GCash'} transaction proof for ${bookingFirstName(payment)}`;
+    image.loading = 'lazy'; image.src = `/api/admin/payment-proofs/${encodeURIComponent(payment.id)}/image`;
+    image.addEventListener('error', () => { image.remove(); const error = document.createElement('p'); error.className = 'empty-posts'; error.textContent = 'The private screenshot could not be loaded. Refresh and sign in again.'; wrap.appendChild(error); }, { once: true });
+    wrap.appendChild(image); item.appendChild(wrap); item.classList.add('is-expanded'); button.textContent = 'Hide proof';
+  }
+  async function reviewPaymentProof(id, decision, approveButton, rejectButton) {
+    if (decision === 'rejected' && !window.confirm('Reject this screenshot and release the appointment time? The client will need to book another slot.')) return;
+    approveButton.disabled = true; rejectButton.disabled = true;
+    try {
+      await api(`/api/admin/payment-proofs/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status: decision } });
+      toast(decision === 'approved' ? 'Payment approved' : 'Payment rejected · slot released');
+      await Promise.all([loadPayments(), loadAppointments()]);
+    } catch (error) { toast(error.message, true); approveButton.disabled = false; rejectButton.disabled = false; }
+  }
+  async function loadUnpaidBookings() {
+    const list = $('unpaidBookingsList');
+    if (!isSignedIn()) return;
+    try { const data = await api('/api/admin/payments/unpaid'); renderUnpaidBookings(data.bookings || []); }
+    catch (error) { $('unpaidBookingsCount').textContent = '0'; list.innerHTML = `<p class="empty-posts">${esc(error.message)} — refresh to try again.</p>`; }
+  }
+  async function loadPaymentsWithProof() {
+    const list = $('paymentsList');
+    if (!isSignedIn()) return;
+    try { const data = await api('/api/admin/payments'); renderPayments(data.payments || []); }
+    catch (error) { $('paymentsCount').textContent = '0'; list.innerHTML = `<p class="empty-posts">${esc(error.message)} — refresh to try again.</p>`; }
+  }
+  async function loadPayments() {
+    if (!isSignedIn()) return;
+    await Promise.all([loadUnpaidBookings(), loadPaymentsWithProof()]);
+  }
+  function showPaymentTab(tab) {
+    const activeTab = tab === 'payments' ? 'payments' : 'unpaid';
+    document.querySelectorAll('[data-payment-tab]').forEach((button) => {
+      const active = button.dataset.paymentTab === activeTab;
+      button.classList.toggle('active', active); button.setAttribute('aria-selected', String(active));
+      button.tabIndex = active ? 0 : -1;
+    });
+    document.querySelectorAll('[data-payment-panel]').forEach((panel) => { panel.hidden = panel.dataset.paymentPanel !== activeTab; });
+  }
   function bind() {
-    $('keyForm').addEventListener('submit', async (event) => {
+    document.querySelectorAll('[data-admin-page-link]').forEach((button) => button.addEventListener('click', () => {
+      const pageId = button.dataset.adminPageLink;
+      if (!ADMIN_PAGE_IDS.has(pageId)) return;
+      showAdminPage(pageId);
+      if (window.location.hash !== `#${pageId}`) {
+        const url = new URL(window.location.href);
+        url.hash = pageId;
+        window.history.pushState(null, '', url);
+      }
+    }));
+    window.addEventListener('popstate', syncAdminPageFromHash);
+    window.addEventListener('hashchange', syncAdminPageFromHash);
+    $('menuLinksList').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-menu-action]');
+      if (!button) return;
+      const row = button.closest('[data-menu-link-row]');
+      if (!row) return;
+      const action = button.dataset.menuAction;
+      if (action === 'remove') row.remove();
+      else if (action === 'up' && row.previousElementSibling) row.parentNode.insertBefore(row, row.previousElementSibling);
+      else if (action === 'down' && row.nextElementSibling) row.parentNode.insertBefore(row.nextElementSibling, row);
+      updateMenuLinkPositions();
+      status('Unsaved menu changes');
+    });
+    $('menuLinksList').addEventListener('input', (event) => {
+      if (event.target.matches('[data-menu-link-field]')) status('Unsaved menu changes');
+    });
+    $('addMenuLink').addEventListener('click', () => {
+      const links = readMenuLinks();
+      if (links.length >= MAX_MENU_LINKS) { toast(`A menu can have up to ${MAX_MENU_LINKS} links.`, true); return; }
+      links.push({ id: newMenuLinkId(), label: 'New link', href: '' });
+      renderMenuLinks(links);
+      const labelInput = $('menuLinksList').lastElementChild?.querySelector('[data-menu-link-field="label"]');
+      labelInput?.focus(); labelInput?.select(); status('Unsaved menu changes');
+    });
+    $('menuLinksForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      const candidate = $('adminKey').value.trim();
-      if (!candidate) { $('keyMessage').textContent = 'Enter the owner key to continue.'; return; }
-      sessionStorage.setItem(keyStore, candidate);
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can change menu links.', true); return; }
+      const form = event.currentTarget;
+      const rows = [...$('menuLinksList').querySelectorAll('[data-menu-link-row]')];
+      rows.forEach((row) => row.querySelector('[data-menu-link-field="href"]').setCustomValidity(''));
+      if (!form.reportValidity()) return;
+      const links = readMenuLinks();
+      const invalidIndex = links.findIndex((link) => !safeMenuDestination(link.href));
+      if (invalidIndex >= 0) {
+        const input = rows[invalidIndex].querySelector('[data-menu-link-field="href"]');
+        input.setCustomValidity('Use a same-site path starting with / or a complete HTTPS URL.');
+        input.reportValidity();
+        $('menuLinksMessage').textContent = 'Check the highlighted destination. Use a same-site path or HTTPS URL.';
+        return;
+      }
+      const submitButton = form.querySelector('[type="submit"]');
+      submitButton.disabled = true;
+      $('menuLinksMessage').textContent = 'Saving menu links…';
       try {
-        await api('/api/admin/posts');
-        setConnected(true); toast('Owner editor connected'); await loadSite(); await loadPosts(); await loadGallery(); await loadAppointments(); await loadAvailabilitySchedule();
-      } catch (error) { sessionStorage.removeItem(keyStore); setConnected(false); $('keyMessage').textContent = error.message; toast('Could not connect', error.message, true); }
+        const update = { ...site, menuLinks: links };
+        const data = await api('/api/site', { method: 'PUT', body: update });
+        site = data.config || update;
+        renderMenuLinks(site.menuLinks);
+        $('menuLinksMessage').textContent = 'Menu saved. Your public navigation will use these links.';
+        status('Menu saved');
+        toast('Menu links updated', 'The order and destinations are saved to your website.');
+      } catch (error) {
+        $('menuLinksMessage').textContent = error.message || 'Could not save menu links.';
+        status('Could not save', true);
+        toast(error.message || 'Could not save menu links.', true);
+      } finally { submitButton.disabled = false; }
+    });
+    $('loginForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const username = $('adminUsername').value.trim();
+      const password = $('adminPassword').value;
+      const button = $('loginButton');
+      $('loginMessage').textContent = '';
+      button.disabled = true;
+      try {
+        const session = await api('/api/admin/login', { method: 'POST', body: { username, password } });
+        $('adminPassword').value = '';
+        setSignedIn(true, session.email || '');
+        toast('Owner signed in', 'Your session is protected and will expire automatically.');
+        await loadAdminWorkspace();
+      } catch (error) {
+        $('adminPassword').value = '';
+        $('loginMessage').textContent = error.message || 'Username or password is incorrect.';
+        setSignedIn(false);
+        toast('Sign-in failed', error.message || 'Check your username and password.', true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+    $('logoutButton').addEventListener('click', async () => {
+      try { await api('/api/admin/logout', { method: 'POST' }); }
+      catch (error) { toast('Could not sign out cleanly', error.message, true); }
+      setSignedIn(false);
+      $('adminPassword').value = '';
+      toast('Signed out', 'The owner session cookie was cleared.');
     });
     $('siteForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Connect your owner key first', 'Only a site owner can make changes.', true); return; }
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can make changes.', true); return; }
       const form = new FormData(event.currentTarget);
       const update = { ...site, businessName: String(form.get('businessName') || '').trim(), brandName: String(form.get('businessName') || '').trim().replace(/\s+(care|clinic|studio|practice|dental)$/i, '').trim(), location: String(form.get('location') || '').trim(), email: String(form.get('email') || '').trim(), phone: String(form.get('phone') || '').trim() };
       try { const data = await api('/api/site', { method: 'PUT', body: update }); site = data.config || update; applyToForm(); status('Details saved'); toast('Practice details updated', 'Your public site now has the latest contact information.'); }
@@ -369,7 +714,7 @@
     });
     $('themeForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Connect your owner key first', 'Only a site owner can make changes.', true); return; }
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can make changes.', true); return; }
       const form = event.currentTarget;
       const update = { ...site, theme: form.elements.theme.value, editorialAccent: form.elements.editorialAccent.value, primaryColor: form.elements.primaryColor.value, accentColor: form.elements.accentColor.value, paperColor: form.elements.paperColor.value, fontStyle: form.elements.fontStyle.value };
       try { const data = await api('/api/site', { method: 'PUT', body: update }); site = data.config || update; applyToForm(); previewTheme(); status('Appearance saved'); toast('Your theme is updated', 'The public website will pick up the new palette and type style.'); }
@@ -383,7 +728,7 @@
     $('addPostGalleryImage').addEventListener('click', () => addPostGalleryRow());
     $('postForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Connect your owner key first', 'Only a site owner can create posts.', true); return; }
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can create posts.', true); return; }
       const formElement = event.currentTarget;
       const form = new FormData(formElement);
       const post = { title: String(form.get('title') || '').trim(), slug: String(form.get('slug') || '').trim(), excerpt: String(form.get('excerpt') || '').trim(), body: String(form.get('body') || '').trim(), featureImageUrl: String(form.get('featureImageUrl') || '').trim(), featureImageAlt: String(form.get('featureImageAlt') || '').trim(), gallery: readPostGallery(), category: String(form.get('category') || '').trim(), status: String(form.get('status') || 'draft') };
@@ -393,7 +738,7 @@
     });
     $('galleryForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (!key()) { toast('Connect your owner key first', 'Only a site owner can manage gallery items.', true); return; }
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can manage gallery items.', true); return; }
       const formElement = event.currentTarget;
       const form = new FormData(formElement);
       const item = {
@@ -410,13 +755,18 @@
       } catch (error) { toast(error.message, true); }
     });
     $('refreshAppointments').addEventListener('click', loadAppointments);
+    document.querySelectorAll('[data-payment-tab]').forEach((button) => button.addEventListener('click', () => {
+      showPaymentTab(button.dataset.paymentTab);
+      loadPayments();
+    }));
+    $('refreshUnpaidBookings').addEventListener('click', loadUnpaidBookings);
+    $('refreshPayments').addEventListener('click', loadPaymentsWithProof);
+    showPaymentTab('unpaid');
     $('availabilityMonth').addEventListener('change', loadAvailabilitySchedule);
     $('availabilityForm').addEventListener('submit', submitAvailability);
     $('addScheduleException').addEventListener('click', () => addScheduleException());
   }
   $('availabilityMonth').value = shiftMonth(monthInTimeZone(), 1);
   bind();
-  loadSite();
-  setConnected(Boolean(key()));
-  if (key()) { loadPosts(); loadGallery(); loadAppointments(); loadAvailabilitySchedule(); }
+  initializeAdmin();
 })();
