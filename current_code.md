@@ -1,5 +1,76 @@
 # Current Code Logic and Operational Rules
 
+## Current UI functionality by user type
+
+The repository has four practical UI roles. Only **client** and **practice owner** are authenticated account types in a generated site; the builder operator and public visitor do not create accounts.
+
+### 1. Builder operator (no account)
+
+Through the Canopy Studio builder UI, a person can:
+
+- choose a veterinary or dental starting point and enter the practice name, location, email, phone, GCash details, and Maya details;
+- choose one of seven site layouts, change the brand color and typography, and see an immediate desktop or mobile preview;
+- enable or disable the blog, gallery, and appointment features;
+- use guided setup to add, reorder, edit, or remove up to eight generated custom pages, each with a menu label, URL, title, text, and optional banner-image URL;
+- choose either a Vercel or Cloudflare Workers package;
+- provide the initial owner username, owner email, owner password, and optional Neon database URL; and
+- download the selected deploy-ready ZIP. The UI does **not** deploy or publish the package.
+
+Non-secret builder settings are autosaved in the browser's local storage. The database URL and owner password are kept out of that saved configuration. The builder has no sign-up, login, hosted-project list, or cloud deployment account UI.
+
+### 2. Public visitor (no account)
+
+On a deployed generated site, a visitor can:
+
+- browse the public home page, enabled navigation links, generated custom pages, published blog posts, and published gallery items;
+- view practice contact and payment-account information;
+- view the public monthly appointment calendar, open 30-minute slots, schedule capacity, and available consultation services; and
+- create a client account or sign in from the appointments page.
+
+A visitor may inspect availability without signing in, but must use a client account to reserve a slot or view private consultation information.
+
+### 3. Client account
+
+From the appointments UI, a signed-in client can:
+
+- create an account with name, email, phone, and password; sign in; refresh their appointment list; and sign out;
+- reserve an available consultation slot, choose a service and GCash or Maya, add an optional short context note, and accept the payment-window acknowledgement;
+- view only their own appointments, statuses, payment state, and owner-written consultation notes;
+- upload one private PNG, JPEG, or WebP payment-proof image of up to 3 MiB for an eligible appointment;
+- see the in-dashboard missing-proof reminder after the reminder marker is recorded; and
+- cancel their own active appointment from their account UI.
+
+The UI does not provide client profile editing, password reset/change, email verification, or account deletion. Reminders are shown in the account dashboard; this code does not send client email, SMS, or push notifications.
+
+### 4. Practice owner account
+
+From the date-rotating owner dashboard, an authenticated owner can:
+
+- sign in with the builder-created username and password, view the configured owner email, view the public site, and sign out;
+- edit practice name, location, contact email, and phone;
+- add, rename, reorder, retarget, or remove public menu links, up to 16 links;
+- change the layout, editorial accent where applicable, brand/accent/background colors, and serif or sans typography;
+- create, edit, publish/draft, and delete blog posts, including a feature image and optional article gallery;
+- create, edit, publish/draft, order, and delete gallery items;
+- publish a month's 30-minute availability from weekly hours plus date-specific opening or closure exceptions;
+- review recent and upcoming appointments, cancel eligible appointments, and add or update a private client-visible consultation note;
+- review bookings awaiting payment proof, manually mark an eligible payment received, or release the booking;
+- privately preview uploaded payment screenshots, approve proof, or reject proof and release the slot; and
+- manually refresh appointment and payment lists.
+
+The owner UI does not manage owner credentials, create additional staff/owner roles, edit client profiles, issue refunds, process money directly, upload local CMS images, configure domains/hosting, or deploy code. CMS images are entered as HTTPS or same-site URLs; payment proofs are the separate private image-upload flow.
+
+### UI/account implementation cross-check
+
+The capability list above was checked against the rendered controls and their corresponding handlers/routes in:
+
+- builder UI: `public/index.html`, `public/app.js`, `src/index.js`, and `src/generator.js`;
+- generated public/client UI: `public/_scaffold/templates/shared/public/index.html`, `site.js`, `appointments.html`, and `appointments.js`;
+- generated owner UI: `public/_scaffold/templates/shared/public/admin.html` and `admin.js`; and
+- both generated backends: `public/_scaffold/templates/vercel/api/index.js` and `public/_scaffold/templates/cloudflare/src/index.js`.
+
+Feature toggles can hide blog, gallery, or scheduling UI in a generated site, and account/scheduling/CMS persistence requires a configured Neon database with the schema installed.
+
 **Status:** Code-derived documentation for the current repository state, reviewed 2026-10-08. This describes what the implementation does; it is not a deployment record or a claim that a live site/database has been tested. The repository has no separate implementation-plan Markdown file; the root `README.md` and the generated README text in `src/generator.js` were checked against the code.
 
 ## 1. What this repository builds
