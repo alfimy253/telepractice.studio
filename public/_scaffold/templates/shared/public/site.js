@@ -29,8 +29,8 @@
     if (site.paperColor) root.style.setProperty('--paper', site.paperColor);
     document.body.classList.toggle('font-sans', site.fontStyle === 'sans');
     document.body.classList.toggle('dental-site', site.specialty === 'dental');
-    document.body.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air');
-    if (['canopy','clay','coastal','editorial','neat','launcher','air'].includes(site.theme)) document.body.classList.add(`theme-${site.theme}`);
+    document.body.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air','theme-brivon-dark','theme-brivon-light');
+    if (['canopy','clay','coastal','editorial','neat','launcher','air','brivon-dark','brivon-light'].includes(site.theme)) document.body.classList.add(`theme-${site.theme}`);
   }
   function safeMenuNavigationHref(value) {
     const raw = String(value ?? '').trim();

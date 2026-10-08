@@ -23,8 +23,11 @@ const THEMES = {
   editorial: { primaryColor: '#202522', accentColor: '#c9a45b', paperColor: '#f6f5f1', label: 'Editorial', mood: 'considered & classic' },
   neat: { primaryColor: '#2d8078', accentColor: '#f0b768', paperColor: '#f7faf9', label: 'Neat', mood: 'portfolio & agency' },
   launcher: { primaryColor: '#c33e55', accentColor: '#f0c85c', paperColor: '#fff9f1', label: 'Launcher', mood: 'bold & welcoming' },
-  air: { primaryColor: '#dd356e', accentColor: '#fee856', paperColor: '#ffffff', label: 'Air', mood: 'light & vibrant' }
+  air: { primaryColor: '#dd356e', accentColor: '#fee856', paperColor: '#ffffff', label: 'Air', mood: 'light & vibrant', system: 'illustration' },
+  'brivon-dark': { primaryColor: '#d4ff3d', accentColor: '#d4ff3d', paperColor: '#0a0a0c', label: 'Brivon Dark', mood: 'editorial & high contrast', system: 'brivon' },
+  'brivon-light': { primaryColor: '#506f00', accentColor: '#506f00', paperColor: '#f5f5ef', label: 'Brivon Light', mood: 'editorial & bright', system: 'brivon' }
 };
+const ILLUSTRATION_THEMES = ['canopy', 'clay', 'coastal', 'editorial', 'neat', 'launcher', 'air'];
 const EDITORIAL_ACCENTS = { black: '#202522', teal: '#187c78', forest: '#2e6049' };
 const VERTICALS = {
   veterinary: {
@@ -113,6 +116,9 @@ function syncInputs() {
   $('bookingToggle').checked = config.features.scheduling;
   document.querySelectorAll('[data-specialty]').forEach((button) => button.classList.toggle('selected', button.dataset.specialty === config.specialty));
   document.querySelectorAll('.theme-template-card[data-theme]').forEach((button) => button.classList.toggle('active', button.dataset.theme === config.theme));
+  const brivonTheme = config.theme === 'brivon-dark' || config.theme === 'brivon-light';
+  if ($('designSystemSelect')) $('designSystemSelect').value = brivonTheme ? config.theme : 'illustration';
+  if ($('illustrationThemeGrid')) $('illustrationThemeGrid').hidden = brivonTheme;
   $('editorialAccentRow').hidden = config.theme !== 'editorial';
   $('airPaletteNote').hidden = config.theme !== 'air';
   document.querySelectorAll('[data-editorial-accent]').forEach((button) => button.classList.toggle('active', button.dataset.editorialAccent.toLowerCase() === config.primaryColor.toLowerCase()));
@@ -153,7 +159,7 @@ function updatePreview() {
   screen.style.setProperty('--site-paper', config.paperColor);
   screen.classList.toggle('editorial-sans', config.fontStyle === 'sans');
   screen.classList.toggle('dental-preview', config.specialty === 'dental');
-  screen.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air');
+  screen.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air','theme-brivon-dark','theme-brivon-light');
   if (THEMES[config.theme]) screen.classList.add(`theme-${config.theme}`);
   $('colorPreview').style.background = config.primaryColor;
   $('brandColorLabel').textContent = config.primaryColor.toUpperCase();
@@ -192,6 +198,13 @@ function setTheme(theme) {
   syncInputs();
   updatePreview();
   renderWizard();
+}
+function setDesignSystem(value) {
+  if (value === 'illustration') {
+    setTheme(ILLUSTRATION_THEMES.includes(config.theme) ? config.theme : 'canopy');
+    return;
+  }
+  if (value === 'brivon-dark' || value === 'brivon-light') setTheme(value);
 }
 function setEditorialAccent(accent) {
   if (!EDITORIAL_ACCENTS[accent]) return;
@@ -451,8 +464,10 @@ function renderWizard() {
     content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Let's make it yours.</h1><p class="wizard-lede">Add the essentials. These appear in the site header, contact section and booking confirmations.</p><div class="wizard-form-grid"><label class="form-field wizard-field-full"><span>Practice name</span><input id="wizardBusiness" maxlength="80" value="${esc(config.businessName)}" placeholder="e.g. Harborlight Veterinary Care"></label><label class="form-field wizard-field-full"><span>City or neighborhood</span><input id="wizardLocation" maxlength="100" value="${esc(config.location)}" placeholder="e.g. Quezon City"></label><label class="form-field"><span>Contact email</span><input id="wizardEmail" maxlength="120" type="email" value="${esc(config.email)}"></label><label class="form-field"><span>Phone number</span><input id="wizardPhone" maxlength="30" value="${esc(config.phone)}"></label></div><div class="wizard-tip"><svg><use href="#i-globe"/></svg><span>Your website is white-label. The owner can connect a custom domain after deployment.</span></div>`;
     ['wizardBusiness','wizardLocation','wizardEmail','wizardPhone'].forEach((id) => $(id).addEventListener('input', collectWizardFields));
   } else if (wizardStep === 2) {
-    content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Set a welcoming tone.</h1><p class="wizard-lede">Choose a starting palette and typography. Every color can be changed in the theme studio.</p><div class="wizard-theme-grid">${Object.entries(THEMES).map(([key, theme]) => `<button class="wizard-theme-card ${config.theme === key ? 'selected' : ''}" data-wizard-theme="${key}"><span class="wizard-theme-art" style="--swatch-bg:${theme.paperColor};--swatch-primary:${theme.primaryColor};--swatch-accent:${theme.accentColor}"><span></span><i></i></span><span class="wizard-radio"></span><strong>${theme.label}</strong><small>${theme.mood}</small></button>`).join('')}</div><div class="wizard-preview-tip"><span><svg><use href="#i-palette"/></svg></span><span>Theme settings are owner-editable after launch, without touching the generated code.</span></div>`;
-    content.querySelectorAll('[data-wizard-theme]').forEach((button) => button.addEventListener('click', () => setTheme(button.dataset.wizard-theme)));
+    const selectedSystem = config.theme.startsWith('brivon-') ? config.theme : 'illustration';
+    content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Choose a complete design system.</h1><p class="wizard-lede">Illustration uses the current friendly visual system. Brivon generates a separate editorial HTML, CSS and JavaScript experience.</p><label class="wizard-system-picker"><span>Design system</span><select id="wizardDesignSystem"><option value="illustration" ${selectedSystem === 'illustration' ? 'selected' : ''}>Illustration theme (current)</option><option value="brivon-dark" ${selectedSystem === 'brivon-dark' ? 'selected' : ''}>Brivon · Dark</option><option value="brivon-light" ${selectedSystem === 'brivon-light' ? 'selected' : ''}>Brivon · Light</option></select></label><div class="wizard-theme-grid" id="wizardIllustrationThemes" ${selectedSystem !== 'illustration' ? 'hidden' : ''}>${ILLUSTRATION_THEMES.map((key) => [key, THEMES[key]]).map(([key, theme]) => `<button class="wizard-theme-card ${config.theme === key ? 'selected' : ''}" data-wizard-theme="${key}"><span class="wizard-theme-art" style="--swatch-bg:${theme.paperColor};--swatch-primary:${theme.primaryColor};--swatch-accent:${theme.accentColor}"><span></span><i></i></span><span class="wizard-radio"></span><strong>${theme.label}</strong><small>${theme.mood}</small></button>`).join('')}</div><div class="wizard-preview-tip"><span><svg><use href="#i-palette"/></svg></span><span>Brivon includes light and dark variants and corrected heading line spacing.</span></div>`;
+    $('wizardDesignSystem').addEventListener('change', (event) => { setDesignSystem(event.target.value); renderWizard(); });
+    content.querySelectorAll('[data-wizard-theme]').forEach((button) => button.addEventListener('click', () => setTheme(button.dataset.wizardTheme)));
   } else if (wizardStep === 3) {
     content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Build your menu links.</h1><p class="wizard-lede">Add custom pages to your site. Each page gets a menu link and its own URL, title, content and optional banner image.</p><div class="wizard-page-manager"><div class="wizard-page-list" id="wizardPageList"></div><button class="wizard-add-page" type="button" id="addWizardPage"><svg><use href="#i-plus"/></svg> Add a page</button><p class="wizard-page-limit">Up to ${MAX_CUSTOM_PAGES} custom pages. Menu order follows the list; use the controls on each page to rearrange or remove it.</p></div>`;
     renderCustomPageList();
@@ -629,6 +644,7 @@ function bindEvents() {
   $('galleryToggle').addEventListener('change', (event) => { config.features.gallery = event.target.checked; updatePreview(); });
   $('bookingToggle').addEventListener('change', (event) => { config.features.scheduling = event.target.checked; updatePreview(); });
   document.querySelectorAll('.theme-template-card[data-theme]').forEach((button) => button.addEventListener('click', () => setTheme(button.dataset.theme)));
+  $('designSystemSelect').addEventListener('change', (event) => setDesignSystem(event.target.value));
   document.querySelectorAll('[data-editorial-accent]').forEach((button) => button.addEventListener('click', () => setEditorialAccent(button.dataset.editorialAccent)));
   $('resetTheme').addEventListener('click', resetTheme);
   $('resetPreview').addEventListener('click', resetCopy);

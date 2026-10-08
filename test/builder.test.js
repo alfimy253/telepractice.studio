@@ -244,3 +244,36 @@ test('builder rejects oversized streamed JSON bodies without buffering them in f
   assert.equal(response.status, 413);
   assert.match((await response.json()).error, /too large/i);
 });
+
+test('builder exposes Brivon in the layout section and guided modal and updates the preview', async () => {
+  const [html, app, styles] = await Promise.all([
+    readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../public/styles.css', import.meta.url), 'utf8')
+  ]);
+  assert.match(html, /<select id="designSystemSelect">[\s\S]*Brivon · Dark[\s\S]*Brivon · Light/);
+  assert.match(app, /id="wizardDesignSystem"[\s\S]*Brivon · Dark[\s\S]*Brivon · Light/);
+  assert.match(app, /designSystemSelect'\)\.addEventListener\('change',[\s\S]*setDesignSystem/);
+  assert.match(app, /wizardDesignSystem'\)\.addEventListener\('change',[\s\S]*setDesignSystem/);
+  assert.match(app, /screen\.classList\.add\(`theme-\$\{config\.theme\}`\)/);
+  assert.match(styles, /\.preview-screen\.theme-brivon-dark/);
+  assert.match(styles, /\.preview-screen\.theme-brivon-light/);
+  assert.match(styles, /theme-brivon-dark \.site-hero-preview/);
+});
+
+test('Brivon light and dark generate a separate design-system homepage', async () => {
+  for (const theme of ['brivon-dark', 'brivon-light']) {
+    const env = { ASSETS: assets };
+    const auth = await session(env);
+    const response = await generate(env, auth, {}, 'vercel', { theme });
+    assert.equal(response.status, 200, await response.clone().text());
+    const files = zipEntries(new Uint8Array(await response.arrayBuffer()));
+    assert.match(files.get('index.html'), new RegExp(`class="brivon-shell theme-${theme}"`));
+    assert.match(files.get('index.html'), /href="\/brivon\.css"/);
+    assert.match(files.get('index.html'), /src="\/brivon\.js"/);
+    assert.match(files.get('brivon.css'), /line-height:calc\(1em \+ 5px\)/);
+    assert.match(files.get('appointments.html'), /href="\/brivon\.css"/);
+    const config = JSON.parse(files.get('site-config.js').split('=').slice(1).join('=').trim().replace(/;$/, ''));
+    assert.equal(config.theme, theme);
+  }
+});

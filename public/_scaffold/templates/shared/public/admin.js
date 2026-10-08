@@ -65,6 +65,12 @@
       $(field === 'primaryColor' ? 'colorReadout' : field === 'accentColor' ? 'accentReadout' : 'paperReadout').textContent = themeForm.elements[field].value.toUpperCase();
     }
     themeForm.elements.fontStyle.value = site.fontStyle || 'serif';
+    const brivonSystem = String(site.theme || '').startsWith('brivon-');
+    [...themeForm.elements.theme.options].forEach((option) => {
+      const optionIsBrivon = option.value.startsWith('brivon-');
+      option.hidden = optionIsBrivon !== brivonSystem;
+      option.disabled = optionIsBrivon !== brivonSystem;
+    });
     themeForm.elements.theme.value = site.theme || 'canopy';
     themeForm.elements.editorialAccent.value = site.editorialAccent || 'black';
     $('editorialAccentField').hidden = themeForm.elements.theme.value !== 'editorial';
@@ -161,8 +167,8 @@
     document.documentElement.style.setProperty('--paper', paper);
     document.body.classList.toggle('font-sans', form.elements.fontStyle.value === 'sans');
     const previewBox = $('themePreviewBox');
-    previewBox.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air');
-    if (['canopy','clay','coastal','editorial','neat','launcher','air'].includes(form.elements.theme.value)) previewBox.classList.add(`theme-${form.elements.theme.value}`);
+    previewBox.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air','theme-brivon-dark','theme-brivon-light');
+    if (['canopy','clay','coastal','editorial','neat','launcher','air','brivon-dark','brivon-light'].includes(form.elements.theme.value)) previewBox.classList.add(`theme-${form.elements.theme.value}`);
     $('editorialAccentField').hidden = form.elements.theme.value !== 'editorial';
     $('themeMiniMark').style.background = primary;
     $('colorReadout').textContent = primary.toUpperCase(); $('accentReadout').textContent = accent.toUpperCase(); $('paperReadout').textContent = paper.toUpperCase();
@@ -172,7 +178,8 @@
     const form = $('themeForm');
     const presets = {
       canopy: ['#376f62','#e9b36e','#fbf8f1'], clay: ['#ac6550','#e8b897','#fbf6ef'], coastal: ['#397c87','#dfb75d','#f4f8f7'],
-      editorial: ['#202522','#c9a45b','#f6f5f1'], neat: ['#2d8078','#f0b768','#f7faf9'], launcher: ['#c33e55','#f0c85c','#fff9f1'], air: ['#dd356e','#fee856','#ffffff']
+      editorial: ['#202522','#c9a45b','#f6f5f1'], neat: ['#2d8078','#f0b768','#f7faf9'], launcher: ['#c33e55','#f0c85c','#fff9f1'], air: ['#dd356e','#fee856','#ffffff'],
+      'brivon-dark': ['#d4ff3d','#d4ff3d','#0a0a0c'], 'brivon-light': ['#506f00','#506f00','#f5f5ef']
     };
     const palette = presets[form.elements.theme.value] || presets.canopy;
     if (form.elements.theme.value === 'editorial') palette[0] = ({ black:'#202522', teal:'#187c78', forest:'#2e6049' })[form.elements.editorialAccent.value] || palette[0];

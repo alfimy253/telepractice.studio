@@ -197,7 +197,7 @@ function cleanSiteConfig(input = {}) {
     accentColor: color(merged.accentColor, DEFAULT_CONFIG.accentColor),
       paperColor: color(merged.paperColor, DEFAULT_CONFIG.paperColor),
     fontStyle: merged.fontStyle === 'sans' ? 'sans' : 'serif',
-    theme: ['canopy','clay','coastal','editorial','neat','launcher','air'].includes(merged.theme) ? merged.theme : DEFAULT_CONFIG.theme,
+    theme: ['canopy','clay','coastal','editorial','neat','launcher','air','brivon-dark','brivon-light'].includes(merged.theme) ? merged.theme : DEFAULT_CONFIG.theme,
     editorialAccent: ['black','teal','forest'].includes(merged.editorialAccent) ? merged.editorialAccent : 'black',
     features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false },
     payments: cleanPaymentDetails(merged.payments),
