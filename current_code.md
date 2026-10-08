@@ -9,7 +9,7 @@ The repository has four practical UI roles. Only **client** and **practice owner
 Through the Canopy Studio builder UI, a person can:
 
 - choose a veterinary or dental starting point and enter the practice name, location, email, phone, GCash details, and Maya details;
-- choose one of seven site layouts, change the brand color and typography, and see an immediate desktop or mobile preview;
+- choose the Illustration design system with one of seven layouts, or the separate Brivon design system in dark or light mode; change supported colors and typography; and see an immediate desktop or mobile preview;
 - enable or disable the blog, gallery, and appointment features;
 - use guided setup to add, reorder, edit, or remove up to eight generated custom pages, each with a menu label, URL, title, text, and optional banner-image URL;
 - choose either a Vercel or Cloudflare Workers package;
@@ -49,7 +49,7 @@ From the date-rotating owner dashboard, an authenticated owner can:
 - sign in with the builder-created username and password, view the configured owner email, view the public site, and sign out;
 - edit practice name, location, contact email, and phone;
 - add, rename, reorder, retarget, or remove public menu links, up to 16 links;
-- change the layout, editorial accent where applicable, brand/accent/background colors, and serif or sans typography;
+- change appearance settings within the generated design-system family (Illustration layouts, or Brivon light/dark), including supported brand/accent/background colors and typography;
 - create, edit, publish/draft, and delete blog posts, including a feature image and optional article gallery;
 - create, edit, publish/draft, order, and delete gallery items;
 - publish a month's 30-minute availability from weekly hours plus date-specific opening or closure exceptions;

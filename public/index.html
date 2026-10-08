@@ -119,10 +119,11 @@
             </div>
             <article class="panel theme-panel">
               <div class="theme-panel-row">
-                <div><span class="panel-kicker">CHOOSE A SITE LAYOUT</span><p class="panel-description">Reference-inspired layouts, tailored for practice websites.</p></div>
+                <div><span class="panel-kicker">CHOOSE A SITE LAYOUT</span><p class="panel-description">Choose a complete design system. Brivon uses its own generated HTML, CSS and JavaScript—not an Illustration color variation.</p></div>
                 <button class="reset-link" id="resetTheme">Reset</button>
               </div>
-              <div class="theme-template-grid" role="group" aria-label="Website layout themes">
+              <label class="design-system-picker"><span>Design system</span><select id="designSystemSelect"><option value="illustration">Illustration theme (current)</option><option value="brivon-dark">Brivon · Dark</option><option value="brivon-light">Brivon · Light</option></select><small id="designSystemHelp">Choose an Illustration layout below, or switch to a separate Brivon UI system.</small></label>
+              <div class="theme-template-grid" id="illustrationThemeGrid" role="group" aria-label="Illustration layout themes">
                 <button class="theme-template-card active" type="button" data-theme="canopy"><span class="theme-thumb thumb-canopy"><i></i><b></b><em></em></span><strong>Canopy</strong><small>Calm, grounded</small></button>
                 <button class="theme-template-card" type="button" data-theme="clay"><span class="theme-thumb thumb-clay"><i></i><b></b><em></em></span><strong>Soft clay</strong><small>Warm, welcoming</small></button>
                 <button class="theme-template-card" type="button" data-theme="coastal"><span class="theme-thumb thumb-coastal"><i></i><b></b><em></em></span><strong>Coastal</strong><small>Bright, clear</small></button>

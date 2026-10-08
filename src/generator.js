@@ -45,7 +45,9 @@ const THEME_DEFAULTS = {
   editorial: { primaryColor: '#202522', accentColor: '#c9a45b', paperColor: '#f6f5f1' },
   neat: { primaryColor: '#2d8078', accentColor: '#f0b768', paperColor: '#f7faf9' },
   launcher: { primaryColor: '#c33e55', accentColor: '#f0c85c', paperColor: '#fff9f1' },
-  air: { primaryColor: '#dd356e', accentColor: '#fee856', paperColor: '#ffffff' }
+  air: { primaryColor: '#dd356e', accentColor: '#fee856', paperColor: '#ffffff' },
+  'brivon-dark': { primaryColor: '#d4ff3d', accentColor: '#d4ff3d', paperColor: '#0a0a0c' },
+  'brivon-light': { primaryColor: '#506f00', accentColor: '#506f00', paperColor: '#f5f5ef' }
 };
 const EDITORIAL_ACCENTS = { black: '#202522', teal: '#187c78', forest: '#2e6049' };
 const VERTICALS = {
@@ -226,9 +228,10 @@ function replaceTokens(text, config) {
     '__BUSINESS_NAME__': htmlEscape(config.businessName), '__BRAND_NAME__': htmlEscape(config.brandName),
     '__LOCATION__': htmlEscape(config.location), '__EMAIL__': htmlEscape(config.email),
     '__PHONE__': htmlEscape(config.phone), '__PAPER_COLOR__': config.paperColor,
+    '__THEME_CLASS__': `theme-${config.theme}`,
     '__DEPLOY_TARGET__': htmlEscape(config.target === 'cloudflare' ? 'Cloudflare Workers' : 'Vercel')
   };
-  return text.replace(/__SITE_ID__|__SITE_CONFIG_JSON__|__BUSINESS_NAME__|__BRAND_NAME__|__LOCATION__|__EMAIL__|__PHONE__|__PAPER_COLOR__|__DEPLOY_TARGET__/g, (token) => tokens[token]);
+  return text.replace(/__SITE_ID__|__SITE_CONFIG_JSON__|__BUSINESS_NAME__|__BRAND_NAME__|__LOCATION__|__EMAIL__|__PHONE__|__PAPER_COLOR__|__THEME_CLASS__|__DEPLOY_TARGET__/g, (token) => tokens[token]);
 }
 // Applied only to the generated .dev.vars / .env files. Kept separate from
 // replaceTokens() so a real DATABASE_URL or generated secret can never leak
@@ -305,6 +308,7 @@ function generatedCustomPageHtml(config, page) {
   <meta name="description" content="${e(page.pageTitle)} — ${e(config.businessName)}">
   <title>${e(page.pageTitle)} · ${e(config.businessName)}</title>
   <link rel="stylesheet" href="/site.css">
+  <link rel="stylesheet" href="/brivon.css">
   <script src="/site-config.js" defer></script>
   <script src="/site.js" defer></script>
 </head>
@@ -354,7 +358,10 @@ async function buildFiles(input, env, origin) {
   files.set('.gitignore', `node_modules/\n${ENV_FILE_BY_TARGET[target]}\n`);
 
   for (const relative of manifest.sharedPublic) {
-    const content = replaceTokens(await readScaffold(env, origin, `shared/${relative}`), config);
+    let content = replaceTokens(await readScaffold(env, origin, `shared/${relative}`), config);
+    if (relative === 'public/index.html' && config.theme.startsWith('brivon-')) {
+      content = replaceTokens(await readScaffold(env, origin, 'shared/designs/brivon-index.html'), config);
+    }
     files.set(publicPath(relative), content);
   }
   for (const relative of manifest.sharedDb) {
