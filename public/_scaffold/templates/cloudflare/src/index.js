@@ -2,6 +2,8 @@ import { createNeonClient } from '../db/connection.js';
 import { createAdminSession, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
 import { adminDashboardPath, isAdminDashboardPath } from '../lib/admin-url.js';
 import { cleanMenuLinks } from '../lib/menu-links.js';
+import { detectPaymentProofMime, MAX_PAYMENT_PROOF_BYTES, PAYMENT_PROOF_MIME_TYPES, paymentProofFromBase64, paymentProofToBase64 } from '../lib/payment-proof.js';
+import { runPaymentReminderChecks } from '../lib/payment-reminders.js';
 
 const SITE_ID = '__SITE_ID__';
 const DEFAULT_CONFIG = __SITE_CONFIG_JSON__;
@@ -11,6 +13,7 @@ const CLIENT_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const PASSWORD_ITERATIONS = 210000;
 const SITE_TIME_ZONE = DEFAULT_CONFIG.timeZone || 'Asia/Manila';
 const encoder = new TextEncoder();
+const MAX_JSON_BYTES = 256 * 1024;
 
 function headersWithSecurity(source = {}) {
   const headers = new Headers(source);
@@ -332,12 +335,28 @@ function adminFailure(env) {
 }
 async function readJson(request) {
   const contentLength = Number(request.headers.get('Content-Length') || 0);
-  if (contentLength > 256 * 1024) return null;
+  if (contentLength > MAX_JSON_BYTES) return null;
+  const reader = request.body?.getReader();
+  if (!reader) return null;
+  const chunks = [];
+  let total = 0;
   try {
-    const text = await request.text();
-    if (encoder.encode(text).length > 256 * 1024) return null;
-    return JSON.parse(text);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_JSON_BYTES) {
+        try { await reader.cancel(); } catch (_) { /* The body is already being discarded. */ }
+        return null;
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return JSON.parse(new TextDecoder().decode(bytes));
   } catch (_) { return null; }
+  finally { try { reader.releaseLock(); } catch (_) { /* A cancelled stream may already be released. */ } }
 }
 async function siteConfig(env) {
   if (!env.DATABASE_URL) return { config: DEFAULT_CONFIG, source: 'generated-fallback' };
@@ -554,11 +573,12 @@ async function routeApi(request, env) {
     if (!client) return error('Sign in or create a client account to reserve a consultation.', 401);
     const value = await readJson(request); if (!value || typeof value !== 'object') return error('Send a valid booking form.');
     const slotId = String(value.slotId || ''); const service = cleanText(value.service, 120); const context = cleanText(value.context, 100);
-    if (!/^[0-9a-f-]{36}$/i.test(slotId) || !DEFAULT_CONFIG.services.includes(service)) return error('Choose a valid open time and visit type.');
+    const paymentMethod = ['gcash', 'maya'].includes(value.paymentMethod) ? value.paymentMethod : '';
+    if (!/^[0-9a-f-]{36}$/i.test(slotId) || !DEFAULT_CONFIG.services.includes(service) || !paymentMethod) return error('Choose a valid open time, visit type and GCash or Maya payment method.');
     try {
-      const rows = await sql(env)`INSERT INTO appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${client.phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed' FROM consultation_slots AS slot JOIN monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${SITE_TIME_ZONE} > now() AND NOT EXISTS (SELECT 1 FROM appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time`;
+      const rows = await sql(env)`INSERT INTO appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status, payment_method, payment_status, payment_due_at) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${client.phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed', ${paymentMethod}, 'awaiting_proof', now() + interval '15 minutes' FROM consultation_slots AS slot JOIN monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${SITE_TIME_ZONE} > now() AND NOT EXISTS (SELECT 1 FROM appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time, payment_due_at AS "paymentDueAt"`;
       if (!rows.length) return error('That time was just taken or is no longer available. Refresh the calendar and choose another.', 409);
-      return json({ ok: true, appointment: { ...rows[0], timeLabel: displayTime(rows[0].time), status: 'confirmed' } }, 201);
+      return json({ ok: true, appointment: { ...rows[0], timeLabel: displayTime(rows[0].time), status: 'confirmed', paymentStatus: 'awaiting_proof', paymentMethod } }, 201);
     } catch (cause) {
       if (cause.code === '23505') return error('That time was just taken. Refresh the calendar and choose another.', 409);
       console.error('appointment reservation failed', cause); return error('We could not reserve this consultation. Please try again.', 503);
@@ -568,9 +588,77 @@ async function routeApi(request, env) {
     const client = await currentClient(request, env);
     if (!client) return error('Sign in to view your consultations.', 401);
     try {
-      const appointments = await sql(env)`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id AND note.client_account_id = appointment.client_account_id WHERE appointment.site_id = ${SITE_ID} AND appointment.client_account_id = ${client.id} ORDER BY appointment.appointment_date DESC, appointment.appointment_time DESC LIMIT 200`;
+      const appointments = await sql(env)`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.payment_status AS "paymentStatus", appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.payment_manual_received_at AS "paymentManualReceivedAt", appointment.created_at AS "createdAt", proof.id AS "paymentProofId", proof.review_status AS "paymentProofStatus", proof.uploaded_at AS "paymentProofUploadedAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN appointment_payment_proofs AS proof ON proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id AND proof.client_account_id = appointment.client_account_id LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id AND note.client_account_id = appointment.client_account_id WHERE appointment.site_id = ${SITE_ID} AND appointment.client_account_id = ${client.id} ORDER BY appointment.appointment_date DESC, appointment.appointment_time DESC LIMIT 200`;
       return json({ appointments: appointments.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
     } catch (cause) { console.error('client appointment list failed', cause); return error('Could not load your consultations.', 503); }
+  }
+  if (path.startsWith('/api/client/appointments/') && path.endsWith('/payment-proof') && method === 'POST') {
+    if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
+    if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
+    const client = await currentClient(request, env);
+    if (!client) return error('Sign in to upload payment proof.', 401);
+    const id = path.slice('/api/client/appointments/'.length, -'/payment-proof'.length);
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid appointment id.');
+    const contentType = String(request.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+    if (!PAYMENT_PROOF_MIME_TYPES.includes(contentType)) return error('Upload a PNG, JPEG or WebP payment screenshot.', 415);
+    const declaredLength = Number(request.headers.get('Content-Length') || 0);
+    if (declaredLength > MAX_PAYMENT_PROOF_BYTES) return error('Payment screenshots must be 3 MB or smaller.', 413);
+    let bytes = null;
+    try {
+      const reader = request.body?.getReader();
+      if (!reader) return error('Choose a payment screenshot to upload.');
+      const chunks = []; let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_PAYMENT_PROOF_BYTES) { await reader.cancel(); return error('Payment screenshots must be 3 MB or smaller.', 413); }
+        chunks.push(value);
+      }
+      bytes = new Uint8Array(total); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    } catch (_) { return error('Could not read the uploaded screenshot. Try again.'); }
+    if (!bytes?.length) return error('Choose a payment screenshot to upload.');
+    if (detectPaymentProofMime(bytes) !== contentType) return error('The uploaded image format does not match its file type.');
+    try {
+      const imageBase64 = paymentProofToBase64(bytes);
+      const rows = await sql(env)`
+        WITH target AS (
+          SELECT appointment.id, appointment.client_account_id, appointment.payment_method, appointment.payment_status
+          FROM appointments AS appointment
+          WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid
+            AND appointment.client_account_id = ${client.id} AND appointment.status <> 'cancelled'
+          AND (
+            appointment.payment_status = 'awaiting_proof'
+            OR (appointment.payment_status = 'approved' AND appointment.payment_manual_received_at IS NOT NULL)
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM appointment_payment_proofs AS existing_proof
+            WHERE existing_proof.site_id = appointment.site_id AND existing_proof.appointment_id = appointment.id
+          )
+          FOR UPDATE
+        ), saved AS (
+          INSERT INTO appointment_payment_proofs (site_id, appointment_id, client_account_id, payment_method, image_mime_type, image_base64, review_status)
+          SELECT ${SITE_ID}, target.id, target.client_account_id, target.payment_method, ${contentType}, ${imageBase64}, CASE WHEN target.payment_status = 'approved' THEN 'approved' ELSE 'pending_review' END
+          FROM target
+          RETURNING id, appointment_id, uploaded_at, review_status AS status
+        ), updated AS (
+          UPDATE appointments AS appointment SET payment_status = CASE WHEN appointment.payment_status = 'awaiting_proof' THEN 'pending_review' ELSE appointment.payment_status END
+          FROM saved WHERE appointment.site_id = ${SITE_ID} AND appointment.id = saved.appointment_id
+          RETURNING appointment.id
+        )
+        SELECT saved.id, saved.uploaded_at, saved.status FROM saved JOIN updated ON updated.id = saved.appointment_id LIMIT 1`;
+      if (!rows.length) {
+        const appointments = await sql(env)`SELECT status, payment_status AS "paymentStatus" FROM appointments WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND client_account_id = ${client.id} LIMIT 1`;
+        if (!appointments.length) return error('That consultation was not found.', 404);
+        if (appointments[0].status === 'cancelled') return error('The practice has released this booking. Contact the practice if you already sent payment.', 409);
+        return error('Payment proof was already uploaded or this consultation is no longer awaiting proof.', 409);
+      }
+      return json({ proof: { id: rows[0].id, status: rows[0].status, uploadedAt: rows[0].uploaded_at } }, 201);
+    } catch (cause) {
+      if (cause.code === '23505') return error('Payment proof has already been uploaded for this consultation.', 409);
+      console.error('payment proof upload failed', cause); return error('Could not save payment proof. Please try again while the booking is active.', 503);
+    }
   }
   if (path.startsWith('/api/client/appointments/') && method === 'PATCH') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
@@ -588,6 +676,58 @@ async function routeApi(request, env) {
       const appointments = await sql(env)`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, client.id AS "clientId", note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= (${localToday()}::date - interval '90 days')::date AND appointment.appointment_date <= (${localToday()}::date + interval '90 days')::date ORDER BY appointment.appointment_date ASC, appointment.appointment_time ASC LIMIT 300`;
       return json({ appointments: appointments.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
     } catch (cause) { console.error('appointment list failed', cause); return error('Could not load appointment requests. Check the Neon schema.', 503); }
+  }
+  if (path === '/api/admin/payments/unpaid' && method === 'GET') {
+    if (!await adminOk(request, env)) return adminFailure(env);
+    try {
+      const bookings = await sql(env)`SELECT appointment.id, appointment.name, client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username, appointment.service, appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.created_at AS "createdAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time FROM appointments AS appointment LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE appointment.site_id = ${SITE_ID} AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) ORDER BY appointment.created_at ASC LIMIT 300`;
+      return json({ bookings: bookings.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
+    } catch (cause) { console.error('unpaid booking list failed', cause); return error('Could not load bookings awaiting payment proof.', 503); }
+  }
+  if (path.startsWith('/api/admin/payments/unpaid/') && method === 'PATCH') {
+    if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
+    if (!await adminOk(request, env)) return adminFailure(env);
+    const id = path.slice('/api/admin/payments/unpaid/'.length); const value = await readJson(request); const action = String(value?.action || '');
+    if (!/^[0-9a-f-]{36}$/i.test(id) || !['received', 'release'].includes(action)) return error('Choose whether payment was received or the booking should be released.');
+    try {
+      const rows = action === 'received'
+        ? await sql(env)`UPDATE appointments AS appointment SET payment_status = 'approved', payment_manual_received_at = now() WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`
+        : await sql(env)`UPDATE appointments AS appointment SET status = 'cancelled' WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`;
+      if (!rows.length) return error('This booking is no longer awaiting payment proof. Refresh the payment list.', 409);
+      return json({ appointment: rows[0], slotReleased: action === 'release' });
+    } catch (cause) { console.error('unpaid booking update failed', cause); return error('Could not update this booking.', 503); }
+  }
+  if (path === '/api/admin/payments' && method === 'GET') {
+    if (!await adminOk(request, env)) return adminFailure(env);
+    try {
+      const payments = await sql(env)`SELECT proof.id, proof.payment_method AS "paymentMethod", proof.review_status AS status, proof.uploaded_at AS "uploadedAt", appointment.id AS "appointmentId", appointment.name, appointment.service, appointment.status AS "appointmentStatus", appointment.payment_status AS "appointmentPaymentStatus", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, appointment.created_at AS "bookedAt", client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username FROM appointment_payment_proofs AS proof JOIN appointments AS appointment ON appointment.id = proof.appointment_id AND appointment.site_id = proof.site_id LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE proof.site_id = ${SITE_ID} ORDER BY proof.uploaded_at DESC LIMIT 300`;
+      return json({ payments: payments.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
+    } catch (cause) { console.error('payment list failed', cause); return error('Could not load payment proofs.', 503); }
+  }
+  if (path.startsWith('/api/admin/payment-proofs/') && path.endsWith('/image') && method === 'GET') {
+    if (!await adminOk(request, env)) return adminFailure(env);
+    const id = path.slice('/api/admin/payment-proofs/'.length, -'/image'.length);
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid payment proof id.');
+    try {
+      const rows = await sql(env)`SELECT image_mime_type AS "mimeType", image_base64 AS image FROM appointment_payment_proofs WHERE site_id = ${SITE_ID} AND id = ${id}::uuid LIMIT 1`;
+      if (!rows.length) return error('Payment proof not found.', 404);
+      const mimeType = PAYMENT_PROOF_MIME_TYPES.includes(rows[0].mimeType) ? rows[0].mimeType : 'application/octet-stream';
+      const headers = headersWithSecurity({ 'Content-Type': mimeType, 'Content-Disposition': 'inline; filename="payment-proof"', 'Cache-Control': 'private, no-store' });
+      return new Response(paymentProofFromBase64(rows[0].image), { status: 200, headers });
+    } catch (cause) { console.error('payment proof image read failed', cause); return error('Could not load the payment proof.', 503); }
+  }
+  if (path.startsWith('/api/admin/payment-proofs/') && method === 'PATCH') {
+    if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
+    if (!await adminOk(request, env)) return adminFailure(env);
+    const id = path.slice('/api/admin/payment-proofs/'.length); const value = await readJson(request); const decision = String(value?.status || '');
+    if (!/^[0-9a-f-]{36}$/i.test(id) || !['approved', 'rejected'].includes(decision)) return error('Choose whether to approve or reject this payment proof.');
+    try {
+      const rows = decision === 'approved'
+        ? await sql(env)`WITH reviewed AS (UPDATE appointment_payment_proofs AS proof SET review_status = 'approved', reviewed_at = now() FROM appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), saved AS (UPDATE appointments AS appointment SET payment_status = 'approved' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN saved ON saved.id = reviewed.appointment_id`
+        : await sql(env)`WITH reviewed AS (UPDATE appointment_payment_proofs AS proof SET review_status = 'rejected', reviewed_at = now() FROM appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), released AS (UPDATE appointments AS appointment SET payment_status = 'rejected', status = 'cancelled' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN released ON released.id = reviewed.appointment_id`;
+      if (!rows.length) return error('This payment proof was already reviewed or the consultation is no longer active.', 409);
+      return json({ proof: { id: rows[0].id, status: decision }, slotReleased: decision === 'rejected' });
+    } catch (cause) { console.error('payment proof review failed', cause); return error('Could not update the payment proof.', 503); }
   }
   if (path.startsWith('/api/admin/appointments/') && method === 'PATCH') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
@@ -735,5 +875,14 @@ export default {
     const headers = headersWithSecurity(response.headers);
     if (url.pathname === '/' || url.pathname.endsWith('.html')) headers.set('Cache-Control', 'no-store');
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  },
+  async scheduled(_controller, env, ctx) {
+    if (!env.DATABASE_URL) return;
+    const job = runPaymentReminderChecks(sql(env), SITE_ID)
+      .then(({ reminders, ownerFollowups }) => {
+        if (reminders.length || ownerFollowups.length) console.info(`[payment-reminders] ${reminders.length} client reminder(s), ${ownerFollowups.length} owner follow-up(s)`);
+      })
+      .catch((cause) => console.error('scheduled payment reminder check failed', cause));
+    ctx.waitUntil(job);
   }
 };

@@ -5,6 +5,8 @@
   let monthData = null;
   let selectedDate = '';
   let pendingSlot = null;
+  const PAYMENT_PROOF_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+  const MAX_PAYMENT_PROOF_BYTES = 3 * 1024 * 1024;
   const $ = (id) => document.getElementById(id);
   const timeZone = () => site.timeZone || 'Asia/Manila';
   const currentYearMonth = () => {
@@ -148,11 +150,112 @@
       $('calendarStatus').textContent = error.message; renderMeter({});
     }
   }
+  async function loadSiteSettings() {
+    try {
+      const data = await api('/api/site');
+      if (data.config && typeof data.config === 'object') site = { ...site, ...data.config, features: { ...site.features, ...(data.config.features || {}) } };
+    } catch (_) { /* Use the generated public configuration if the settings API is unavailable. */ }
+  }
   function populateServices() {
     const select = $('reservationService');
     const services = Array.isArray(site.services) && site.services.length ? site.services : ['Consultation', 'Follow-up'];
     services.forEach((service) => select.add(new Option(service, service)));
     $('reservationContextLabel').textContent = site.specialty === 'dental' ? 'Reason for your visit (optional)' : 'Pet name or note for the practice (optional)';
+  }
+  function paymentReminderDue(appointment) {
+    const dueAt = new Date(appointment.paymentDueAt).getTime();
+    return Boolean(appointment.paymentReminderSentAt) || (Number.isFinite(dueAt) && Date.now() >= dueAt - 3 * 60_000);
+  }
+  function formatPaymentFollowup(appointment) {
+    const dueAt = new Date(appointment.paymentDueAt).getTime();
+    if (!Number.isFinite(dueAt)) return 'Please upload proof when you can. The booking stays scheduled until the practice updates it.';
+    const remaining = dueAt - Date.now();
+    if (remaining <= 0) return 'The 15-minute check-in has passed. Your appointment remains scheduled while the practice verifies payment or releases the time.';
+    if (remaining <= 3 * 60_000) return 'Please upload your transaction screenshot now. Your appointment remains scheduled while payment is checked.';
+    const minutes = Math.ceil((remaining - 3 * 60_000) / 60_000);
+    return `Please upload proof within 15 minutes. We’ll remind you in about ${minutes} minute${minutes === 1 ? '' : 's'} if it is still missing.`;
+  }
+  function paymentAccountDetails(method) {
+    const payments = site.payments || {};
+    const prefix = method === 'maya' ? 'maya' : 'gcash';
+    return [payments[`${prefix}Name`], payments[`${prefix}Number`]].map((value) => String(value || '').trim()).filter(Boolean).join(' · ');
+  }
+  function addPaymentProofPanel(row, appointment) {
+    const panel = document.createElement('div'); panel.className = `client-payment-panel payment-${appointment.paymentStatus || 'approved'}`;
+    const heading = document.createElement('strong'); heading.className = 'client-payment-heading';
+    const method = appointment.paymentMethod === 'maya' ? 'Maya' : 'GCash';
+    const statuses = {
+      awaiting_proof: 'Payment proof needed', pending_review: 'Payment proof uploaded · awaiting review',
+      approved: 'Payment received', rejected: 'Payment rejected · time released', expired: 'Payment window expired · time released'
+    };
+    const cancelled = appointment.status === 'cancelled' && !['expired', 'rejected'].includes(appointment.paymentStatus);
+    heading.textContent = `${method} · ${cancelled ? 'Appointment cancelled' : statuses[appointment.paymentStatus] || 'Payment status'}`;
+    panel.appendChild(heading);
+    const manuallyReceivedWithoutProof = appointment.paymentStatus === 'approved'
+      && Boolean(appointment.paymentManualReceivedAt) && !appointment.paymentProofId;
+    const missingProofCanBeUploaded = appointment.status !== 'cancelled' && !appointment.paymentProofId
+      && (appointment.paymentStatus === 'awaiting_proof' || manuallyReceivedWithoutProof);
+    if (missingProofCanBeUploaded) {
+      if (manuallyReceivedWithoutProof) {
+        const recipient = document.createElement('p'); recipient.className = 'client-payment-recipient';
+        recipient.textContent = 'The practice confirmed your payment. You can attach the transaction screenshot to this booking.';
+        panel.appendChild(recipient);
+      } else {
+        const details = paymentAccountDetails(appointment.paymentMethod);
+        if (details) { const recipient = document.createElement('p'); recipient.className = 'client-payment-recipient'; recipient.textContent = `Send payment to ${method}: ${details}`; panel.appendChild(recipient); }
+      }
+      if (paymentReminderDue(appointment)) {
+        const reminder = document.createElement('p'); reminder.className = 'payment-reminder-alert'; reminder.setAttribute('role', 'status');
+        reminder.textContent = manuallyReceivedWithoutProof
+          ? 'Payment reminder: the practice confirmed receipt, but your screenshot is still missing. Upload the transaction image to attach it to your booking.'
+          : 'Payment reminder: please upload a screenshot of the successful transaction now. Your appointment remains scheduled while the practice checks payment.';
+        panel.appendChild(reminder);
+      }
+      if (!manuallyReceivedWithoutProof) {
+        const timer = document.createElement('small'); timer.className = 'client-payment-deadline'; timer.textContent = formatPaymentFollowup(appointment); panel.appendChild(timer);
+      }
+      const label = document.createElement('label'); label.className = 'payment-proof-upload-label'; label.textContent = 'Upload successful transaction screenshot';
+      const file = document.createElement('input'); file.type = 'file'; file.accept = 'image/png,image/jpeg,image/webp'; file.required = true;
+      const upload = document.createElement('button'); upload.type = 'button'; upload.className = 'payment-proof-upload-button'; upload.textContent = 'Upload payment proof';
+      const message = document.createElement('small'); message.className = 'payment-proof-upload-message'; message.setAttribute('aria-live', 'polite'); message.textContent = 'PNG, JPEG or WebP · maximum 3 MB';
+      upload.addEventListener('click', async () => {
+        const screenshot = file.files?.[0];
+        if (!screenshot) { file.reportValidity(); return; }
+        upload.disabled = true; file.disabled = true; message.classList.remove('error'); message.textContent = 'Uploading securely…';
+        try {
+          if (!PAYMENT_PROOF_MIME_TYPES.includes(screenshot.type)) throw new Error('Choose a PNG, JPEG or WebP image.');
+          if (screenshot.size > MAX_PAYMENT_PROOF_BYTES) throw new Error('Payment screenshots must be 3 MB or smaller.');
+          const result = await uploadPaymentProof(appointment.id, screenshot);
+          message.textContent = result.proof?.status === 'approved'
+            ? 'Proof uploaded. The practice has already confirmed payment.'
+            : 'Proof uploaded. The practice owner will review it.';
+          toast('Payment proof uploaded');
+          await loadClientAppointments();
+        } catch (error) { message.textContent = error.message; message.classList.add('error'); toast(error.message, true); }
+        finally { upload.disabled = false; file.disabled = false; }
+      });
+      label.appendChild(file); panel.append(label, upload, message);
+    } else if (appointment.paymentStatus === 'pending_review' && appointment.status !== 'cancelled') {
+      const detail = document.createElement('p'); detail.className = 'client-payment-recipient';
+      detail.textContent = appointment.paymentProofUploadedAt ? `Uploaded ${new Date(appointment.paymentProofUploadedAt).toLocaleString()}. The appointment remains held while the owner checks the receipt.` : 'The appointment remains held while the owner checks the receipt.';
+      panel.appendChild(detail);
+    } else if (appointment.paymentStatus === 'approved' && appointment.paymentManualReceivedAt && appointment.paymentProofId) {
+      const detail = document.createElement('p'); detail.className = 'client-payment-recipient';
+      detail.textContent = 'The practice confirmed payment and your transaction screenshot is on file.'; panel.appendChild(detail);
+    } else if (cancelled || appointment.paymentStatus === 'expired' || appointment.paymentStatus === 'rejected') {
+      const detail = document.createElement('p'); detail.className = 'client-payment-recipient'; detail.textContent = cancelled ? 'The practice released this booking. Contact them if you already sent payment.' : 'This appointment time is no longer reserved. Choose another open time to book again.'; panel.appendChild(detail);
+    }
+    row.appendChild(panel);
+  }
+  async function uploadPaymentProof(appointmentId, file) {
+    if (!csrfToken) await getCsrf();
+    const response = await fetch(`/api/client/appointments/${encodeURIComponent(appointmentId)}/payment-proof`, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { Accept: 'application/json', 'Content-Type': file.type, 'X-CSRF-Token': csrfToken }, body: file
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || `Upload failed (${response.status}).`);
+    return result;
   }
   function renderClientAppointments(appointments) {
     const list = $('clientAppointmentsList'); list.replaceChildren();
@@ -161,10 +264,15 @@
       const row = document.createElement('article'); row.className = 'client-appointment-row';
       const heading = document.createElement('div'); heading.className = 'client-appointment-heading';
       const date = document.createElement('strong'); date.textContent = `${formatDate(appointment.date)} · ${appointment.timeLabel || appointment.time}`;
-      const state = document.createElement('span'); state.className = `client-appointment-status ${appointment.status === 'cancelled' ? 'is-cancelled' : ''}`; state.textContent = appointment.status === 'confirmed' ? 'Reserved' : appointment.status || 'Reserved';
+      const paymentLabels = { awaiting_proof: paymentReminderDue(appointment) ? 'Proof reminder' : 'Awaiting proof', pending_review: 'Payment under review', approved: 'Payment received', rejected: 'Payment rejected', expired: 'Slot released' };
+      const paymentStatus = appointment.paymentStatus || '';
+      let stateText = appointment.status === 'cancelled' && !['expired', 'rejected'].includes(paymentStatus) ? 'Cancelled' : paymentLabels[paymentStatus] || (appointment.status === 'confirmed' ? 'Reserved' : appointment.status || 'Reserved');
+      if (paymentStatus === 'approved' && appointment.paymentManualReceivedAt && !appointment.paymentProofId && paymentReminderDue(appointment)) stateText = 'Payment received · proof reminder';
+      const state = document.createElement('span'); state.className = `client-appointment-status ${appointment.status === 'cancelled' || ['expired', 'rejected'].includes(paymentStatus) ? 'is-cancelled' : paymentStatus === 'approved' ? 'is-paid' : ''}`; state.textContent = stateText;
       heading.append(date, state);
       const detail = document.createElement('p'); detail.className = 'client-appointment-detail'; detail.textContent = `${appointment.service}${appointment.context ? ` · ${appointment.context}` : ''}`;
       row.append(heading, detail);
+      if (paymentStatus) addPaymentProofPanel(row, appointment);
       if (appointment.noteBody) {
         const note = document.createElement('div'); note.className = 'private-consultation-note';
         const noteTitle = document.createElement('strong'); noteTitle.textContent = 'A private note from the practice';
@@ -211,12 +319,15 @@
     if (!pendingSlot) { setMessage('reservationMessage', 'Choose an open time on the calendar first.', true); return; }
     if (!client) { setMessage('reservationMessage', 'Sign in or create a client account below to reserve this consultation.', true); $('clientAccountSection').scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
     if (!form.reportValidity()) return;
+    const selectedPaymentMethod = $('reservationPaymentMethod').value;
+    if (!paymentAccountDetails(selectedPaymentMethod)) { setMessage('reservationMessage', `The practice has not added ${selectedPaymentMethod === 'maya' ? 'Maya' : 'GCash'} payment details yet. Please contact the practice before booking.`, true); return; }
     const button = $('reserveButton'); button.disabled = true; setMessage('reservationMessage', 'Reserving your consultation…');
     try {
-      const data = await api('/api/appointments', { method: 'POST', body: { slotId: pendingSlot.id, service: $('reservationService').value, context: $('reservationContext').value.trim() } });
-      setMessage('reservationMessage', 'Your consultation is reserved. You can see it in your account below.');
-      toast('Consultation reserved'); pendingSlot = null; $('reservationCard').hidden = true; form.reset();
+      await api('/api/appointments', { method: 'POST', body: { slotId: pendingSlot.id, service: $('reservationService').value, context: $('reservationContext').value.trim(), paymentMethod: $('reservationPaymentMethod').value } });
+      setMessage('reservationMessage', 'Your appointment is scheduled. Upload the successful payment screenshot from your account; we will remind you after 12 minutes if proof is missing.');
+      toast('Appointment scheduled · payment proof reminder after 12 minutes'); pendingSlot = null; $('reservationCard').hidden = true; form.reset();
       await loadMonth(monthData?.month || currentYearMonth()); await loadClientAppointments();
+      $('clientAccountSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (error) { setMessage('reservationMessage', error.message, true); await loadMonth(monthData?.month || currentYearMonth()); }
     finally { button.disabled = false; }
   }
@@ -242,7 +353,9 @@
     $('refreshClientAppointments').addEventListener('click', loadClientAppointments);
   }
   async function initialize() {
-    bind(); populateServices();
+    bind();
+    await loadSiteSettings();
+    populateServices();
     const month = currentYearMonth();
     if (!site.features?.scheduling) {
       $('calendarStatus').textContent = 'Online appointments are not enabled for this practice. Please contact the team.';
@@ -251,6 +364,11 @@
     await Promise.all([getCsrf().catch(() => {}), loadMonth(month)]);
     try { const result = await api('/api/auth/me'); if (result.client) showClient(result.client); }
     catch (_) { /* A visitor can still view published availability without signing in. */ }
+    window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      loadMonth(monthData?.month || currentYearMonth());
+      if (client) loadClientAppointments();
+    }, 60_000);
   }
   initialize();
 })();

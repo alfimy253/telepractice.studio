@@ -24,6 +24,7 @@
         <button type="button" data-admin-page-link="gallery" aria-controls="galleryEditor"><span class="admin-nav-number">05</span><span>Gallery</span></button>
         <button type="button" data-admin-page-link="availability" aria-controls="availabilityManager"><span class="admin-nav-number">06</span><span>Availability</span></button>
         <button type="button" data-admin-page-link="appointments" aria-controls="appointmentManager"><span class="admin-nav-number">07</span><span>Appointments</span></button>
+        <button type="button" data-admin-page-link="payments" aria-controls="paymentsManager"><span class="admin-nav-number">08</span><span>Payments</span></button>
         <small class="admin-page-nav-note">Your changes are saved to this practice site.</small>
       </nav>
       <div class="admin-main-column">
@@ -89,9 +90,24 @@
           </form>
         </section>
         <section class="panel-admin admin-card appointment-admin-card" id="appointmentManager" data-admin-page="appointments" hidden>
-          <div class="admin-card-heading"><div><span class="admin-section-index">07 / SCHEDULING</span><h2>Consultations & follow-up</h2><p>Reservations are immediate. Owner cancellations need 24 hours’ notice; clients can cancel from their account at any time. Optional clinical or non-clinical notes appear only in the linked client’s account. This starter is not a compliant EHR; review privacy and security before entering sensitive clinical details.</p></div><span class="card-icon card-icon-calendar">◷</span></div>
+          <div class="admin-card-heading"><div><span class="admin-section-index">07 / SCHEDULING</span><h2>Consultations & follow-up</h2><p>Bookings stay scheduled while payment is being verified. Clients are reminded after 12 minutes to upload proof; after 15 minutes, review the payment and decide whether to mark it received or release the booking. Other owner cancellations still require 24 hours’ notice; clients can cancel from their account. Optional consultation notes appear only in the linked client’s account.</p></div><span class="card-icon card-icon-calendar">◷</span></div>
           <div class="appointment-toolbar"><span id="appointmentCount">Recent & upcoming consultations</span><button type="button" id="refreshAppointments">Refresh list ↻</button></div>
           <div id="appointmentsList" class="appointments-list"><p class="empty-posts">Sign in to review appointment requests.</p></div>
+        </section>
+        <section class="panel-admin admin-card payments-admin-card" id="paymentsManager" data-admin-page="payments" hidden>
+          <div class="admin-card-heading"><div><span class="admin-section-index">08 / PAYMENTS</span><h2>Payment proof review</h2><p>Clients are reminded after 12 minutes to upload GCash or Maya transaction proof. Bookings remain scheduled after 15 minutes until you mark payment received or release the booking.</p></div><span class="card-icon card-icon-payment">₱</span></div>
+          <div class="payment-tabs" role="tablist" aria-label="Payment review tabs">
+            <button type="button" class="active" id="unpaidBookingsTab" role="tab" aria-selected="true" aria-controls="unpaidBookingsPanel" data-payment-tab="unpaid">Bookings Without Payments <span id="unpaidBookingsCount">0</span></button>
+            <button type="button" id="paymentsTab" role="tab" aria-selected="false" aria-controls="paymentsPanel" data-payment-tab="payments">Payments <span id="paymentsCount">0</span></button>
+          </div>
+          <section id="unpaidBookingsPanel" class="payment-tab-panel" role="tabpanel" aria-labelledby="unpaidBookingsTab" data-payment-panel="unpaid">
+            <div class="payment-list-toolbar"><p>Bookings still waiting for proof. At 15 minutes, check your payment account; mark funds received or manually release the booking.</p><button type="button" id="refreshUnpaidBookings">Refresh ↻</button></div>
+            <div id="unpaidBookingsList" class="payment-review-list"><p class="empty-posts">No bookings are waiting for payment proof.</p></div>
+          </section>
+          <section id="paymentsPanel" class="payment-tab-panel" role="tabpanel" aria-labelledby="paymentsTab" data-payment-panel="payments" hidden>
+            <div class="payment-list-toolbar"><p>Uploaded screenshots stay private. Approve a successful payment or reject it and release the time.</p><button type="button" id="refreshPayments">Refresh ↻</button></div>
+            <div id="paymentsList" class="payment-review-list"><p class="empty-posts">No payment proofs have been uploaded.</p></div>
+          </section>
         </section>
       </div>
       <aside class="admin-aside">

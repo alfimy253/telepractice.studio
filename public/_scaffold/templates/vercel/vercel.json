@@ -1,5 +1,8 @@
 {
   "version": 2,
+  "crons": [
+    { "path": "/api/internal/payment-sweeps", "schedule": "* * * * *" }
+  ],
   "redirects": [
     { "source": "/admin.html", "destination": "/api/admin/entry", "permanent": false }
   ],

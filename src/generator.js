@@ -213,6 +213,8 @@ async function buildSecrets(input) {
     // This random key signs CSRF tokens and short-lived admin sessions; it is
     // separate from the username/password login and is not an admin API key.
     csrfSecret: randomSecret(32),
+    // A separate bearer secret protects the Vercel Cron payment reminder route.
+    cronSecret: randomSecret(32),
     // Only the Neon connection string is user-provided — the builder has no
     // database of its own and cannot invent one.
     databaseUrl: normalizeDatabaseUrl(input.databaseUrl)
@@ -238,9 +240,10 @@ function replaceSecretTokens(text, secrets) {
     '__ADMIN_USERNAME__': secrets.adminUsername,
     '__ADMIN_EMAIL__': secrets.adminEmail,
     '__ADMIN_PASSWORD_HASH__': secrets.adminPasswordHash,
-    '__CSRF_SECRET__': secrets.csrfSecret
+    '__CSRF_SECRET__': secrets.csrfSecret,
+    '__CRON_SECRET__': secrets.cronSecret
   };
-  return text.replace(/__DATABASE_URL__|__ADMIN_USERNAME__|__ADMIN_EMAIL__|__ADMIN_PASSWORD_HASH__|__CSRF_SECRET__/g, (token) => tokens[token]);
+  return text.replace(/__DATABASE_URL__|__ADMIN_USERNAME__|__ADMIN_EMAIL__|__ADMIN_PASSWORD_HASH__|__CSRF_SECRET__|__CRON_SECRET__/g, (token) => tokens[token]);
 }
 function createSeedSql(config) {
   const lines = [
@@ -264,21 +267,24 @@ function generatedReadme(config, secrets) {
     `# ${config.businessName} — ${targetName} code package`, '',
     `This ZIP contains the ${targetName} project only. It is a source-code package; it does not deploy or publish your website.`, '',
     '## Environment variables',
-    `${code(envFile)} is included ready to use — not a ${code('.example')} template. The owner username and email were taken from the builder. The supplied password is stored only as a salted PBKDF2 hash in ${code('ADMIN_PASSWORD_HASH')}; it is never written in plaintext. A unique ${code('CSRF_SECRET')} signs CSRF tokens and short-lived owner sessions; it is not an admin API key.`,
+    `${code(envFile)} is included ready to use — not a ${code('.example')} template. The owner username and email were taken from the builder. The supplied password is stored only as a salted PBKDF2 hash in ${code('ADMIN_PASSWORD_HASH')}; it is never written in plaintext. A unique ${code('CSRF_SECRET')} signs CSRF tokens and short-lived owner sessions; it is not an admin API key. For Vercel, a separate ${code('CRON_SECRET')} protects the scheduled payment-reminder endpoint.`,
     hasDatabaseUrl
       ? `${code('DATABASE_URL')} was filled in from the Neon connection string you entered in the builder. ${code('sslmode')}/${code('channel_binding')} query parameters were removed automatically — the generated runtime uses Neon's secure HTTP transport and does not use them.`
       : `${code('DATABASE_URL')} still has a placeholder value because no database connection string was entered in the builder. Replace it with your pooled Neon URL, for example ${code('postgresql://USER:PASSWORD@HOST.neon.tech/DB')} (leave out ${code('sslmode')}/${code('channel_binding')} — the generated runtime uses Neon's secure HTTP transport and does not use them).`,
     `Treat ${code(envFile)} as a secret: it is already ignored by the included ${code('.gitignore')}, so keep it out of source control.`, '',
     '## Database setup',
-    `Create a Neon Postgres database (if you have not already), then run ${code('db/schema.sql')} and ${code('db/seed.sql')} once. The seed file includes the generated site configuration, payment details, custom pages and sample practice content.`, '',
+    `Create a Neon Postgres database (if you have not already), then run ${code('db/schema.sql')} (safe to rerun; it includes idempotent migrations) and ${code('db/seed.sql')}. The seed file includes the generated site configuration, payment details, custom pages and sample practice content.`, '',
     config.target === 'vercel' ? '## Deploy to Vercel' : '## Deploy to Cloudflare Workers',
     config.target === 'vercel'
-      ? `Deploy this folder to Vercel. In the Vercel dashboard, copy the values from ${code('.env')} into the project's Environment Variables (the ${code('.env')} file itself is only read locally). For local development, run ${code('npm install')} and ${code('npm run dev')}.`
+      ? `Use Node.js 20.6+ for the standalone worker script, then deploy this folder to Vercel. In the Vercel dashboard, copy the values from ${code('.env')} into the project's Environment Variables (the ${code('.env')} file itself is only read locally). For local development, run ${code('npm install')} and ${code('npm run dev')}.`
       : `Use Node.js 22+ and run ${code('npm install')}. In the Cloudflare dashboard, set the values from ${code('.dev.vars')} under Worker Settings → Variables and Secrets. Store ${code('DATABASE_URL')}, ${code('ADMIN_PASSWORD_HASH')} and ${code('CSRF_SECRET')} as secrets; set ${code('ADMIN_USERNAME')} and ${code('ADMIN_EMAIL')} as variables or secrets. Wrangler does not upload ${code('.dev.vars')} during ${code('npm run deploy')}. For local development, ${code('.dev.vars')} is already in place, so just run ${code('npm run dev')}.`, '',
     '## Owner dashboard and sign-in',
     `The owner dashboard path is generated from the current date in the site's time zone (default ${code(config.timeZone)}). Today, when this package was generated, its path is ${code(currentAdminPath)}; it changes at local midnight. Sign in there using the administrator account configured in the builder. The public sign-in form intentionally starts blank; the raw password is never embedded in public site assets.`,
     `Path scheme: Monday = dog, Tuesday = rat, Wednesday = ant, Thursday = fish, Friday = fly, Saturday = cat, Sunday = cockroach. Take the animal's last letter, append ${code('admin')} and the current calendar day number, then append ${code('/dashboard')}. For example, Tuesday on the 8th is ${code('/tadmin8/dashboard')}. The changing path is only an obscurity measure—the username/password sign-in is the actual access control.`,
     `The Menu links view in the owner dashboard can rename, reorder, add or remove public navigation links. Links accept same-site paths or HTTPS URLs; the site starts with ${config.customPages.length} generated custom menu page${config.customPages.length === 1 ? '' : 's'}. GCash/Maya payment details are also configured in the generated settings.`, '',
+    '## Payment reminders and booking release',
+    'Bookings remain scheduled after 15 minutes; that is a review threshold, not an automatic cancellation deadline. If no proof is uploaded after 12 minutes, the client dashboard displays a reminder—even if the owner has independently marked the payment received. The client can still upload proof after 15 minutes while the booking remains active; a manually confirmed payment stays confirmed when its screenshot is attached. The owner can mark a payment received or manually release the booking after checking the payment account.',
+    `The deployed ${targetName} scheduler is configured for minute-level checks, subject to the hosting plan’s cron limits. An exact Node.js background worker is also included: run ${code('npm run payments:worker')} under a process manager on an always-on Node.js host for 90-second client-reminder checks and 3-minute owner-follow-up checks. The standalone worker is not run inside Vercel serverless functions or Cloudflare Workers; those use their native scheduled triggers.`, '',
     '## Site notes',
     'The starter includes fixed-field blog and gallery content, client accounts and appointment scheduling. Appointment availability remains unpublished until the site owner configures it. Review the privacy and security guidance in the owner editor before adding sensitive information. This starter is not a compliant electronic health record system.', '',
     `Generated practice: **${config.businessName}** (${config.specialtyLabel}) · Site ID: ${code(config.siteId)} · Selected target: **${targetName}**`

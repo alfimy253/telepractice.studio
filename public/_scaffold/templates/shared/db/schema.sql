@@ -143,11 +143,23 @@ CREATE TABLE IF NOT EXISTS appointments (
   appointment_time time NOT NULL,
   context varchar(100) NOT NULL DEFAULT '',
   status varchar(12) NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'confirmed', 'cancelled')),
+  payment_method varchar(12) NOT NULL DEFAULT 'gcash' CHECK (payment_method IN ('gcash', 'maya')),
+  payment_status varchar(20) NOT NULL DEFAULT 'approved' CHECK (payment_status IN ('awaiting_proof', 'pending_review', 'approved', 'rejected', 'expired')),
+  payment_due_at timestamptz NOT NULL DEFAULT now(),
+  payment_reminder_sent_at timestamptz,
+  payment_owner_attention_at timestamptz,
+  payment_manual_received_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 -- Idempotent migration for existing appointment tables and their new account/slot relations.
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS client_account_id uuid;
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS availability_slot_id uuid;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_method varchar(12) NOT NULL DEFAULT 'gcash' CHECK (payment_method IN ('gcash', 'maya'));
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_status varchar(20) NOT NULL DEFAULT 'approved' CHECK (payment_status IN ('awaiting_proof', 'pending_review', 'approved', 'rejected', 'expired'));
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_due_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_reminder_sent_at timestamptz;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_owner_attention_at timestamptz;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_manual_received_at timestamptz;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'appointments'::regclass AND conname = 'appointments_client_account_fk') THEN
     ALTER TABLE appointments ADD CONSTRAINT appointments_client_account_fk FOREIGN KEY (client_account_id) REFERENCES client_accounts(id) ON DELETE SET NULL;
@@ -164,6 +176,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS appointments_availability_slot_idx
   WHERE availability_slot_id IS NOT NULL AND status <> 'cancelled';
 CREATE INDEX IF NOT EXISTS appointments_client_idx ON appointments(site_id, client_account_id, appointment_date, appointment_time);
 CREATE INDEX IF NOT EXISTS appointments_date_idx ON appointments(site_id, appointment_date, status);
+CREATE INDEX IF NOT EXISTS appointments_payment_due_idx ON appointments(site_id, payment_status, payment_due_at) WHERE status <> 'cancelled';
+
+-- Private proof images are stored as bounded base64 in Neon, never in public assets.
+-- The owner-only API serves proof bytes after session authentication.
+CREATE TABLE IF NOT EXISTS appointment_payment_proofs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  site_id text NOT NULL REFERENCES sites(site_id) ON DELETE CASCADE,
+  appointment_id uuid NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+  client_account_id uuid NOT NULL REFERENCES client_accounts(id) ON DELETE CASCADE,
+  payment_method varchar(12) NOT NULL CHECK (payment_method IN ('gcash', 'maya')),
+  image_mime_type varchar(20) NOT NULL CHECK (image_mime_type IN ('image/jpeg', 'image/png', 'image/webp')),
+  image_base64 text NOT NULL CHECK (length(image_base64) BETWEEN 16 AND 4194304),
+  review_status varchar(20) NOT NULL DEFAULT 'pending_review' CHECK (review_status IN ('pending_review', 'approved', 'rejected')),
+  uploaded_at timestamptz NOT NULL DEFAULT now(),
+  reviewed_at timestamptz,
+  UNIQUE (site_id, appointment_id)
+);
+CREATE INDEX IF NOT EXISTS appointment_payment_proofs_status_idx ON appointment_payment_proofs(site_id, review_status, uploaded_at DESC);
 
 -- One optional private owner-to-client note per consultation. The client API only
 -- returns a note when the authenticated account owns that appointment.

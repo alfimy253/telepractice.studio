@@ -117,6 +117,7 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     const passwordHash = variables.match(/^ADMIN_PASSWORD_HASH="?([^\r\n"]+)"?$/m)?.[1];
     assert.ok(passwordHash, 'expected an administrator password hash in the environment file');
     assert.equal(await verifyPasswordHash(adminInput.adminPassword, passwordHash), true);
+    if (target === 'vercel') assert.match(variables, /^CRON_SECRET=[A-Za-z0-9]+$/m);
     assert.doesNotMatch(variables, /ADMIN_API_KEY=/);
     assert.doesNotMatch(variables, new RegExp(adminInput.adminPassword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.match(files.get('.gitignore'), new RegExp(`^${envName.replace('.', '\\.')}\\n`, 'm'));
@@ -129,7 +130,7 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     assert.match(adminHtml, /action="\/api\/admin\/login"/);
     assert.doesNotMatch(adminHtml, new RegExp(`value="${adminInput.adminUsername}"`));
     assert.doesNotMatch(adminHtml, new RegExp(`value="${adminInput.adminPassword}"`));
-    for (const pageId of ['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments']) {
+    for (const pageId of ['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments', 'payments']) {
       assert.match(adminHtml, new RegExp(`data-admin-page-link="${pageId}"`));
       assert.match(adminHtml, new RegExp(`data-admin-page="${pageId}"`));
     }
@@ -150,6 +151,9 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     assert.ok(files.has(target === 'cloudflare' ? 'public/privacy.html' : 'privacy.html'));
     assert.match(files.get(target === 'cloudflare' ? 'public/site.js' : 'site.js'), /renderMenuNavigation/);
     assert.ok(files.has('lib/menu-links.js'), 'expected shared safe menu-link normalization');
+    assert.ok(files.has('lib/payment-proof.js'), 'expected the private payment proof image helper');
+    assert.ok(files.has('lib/payment-reminders.js'), 'expected shared payment reminder queries');
+    assert.ok(files.has('payment-reminder-worker.js'), 'expected the standalone Node.js payment reminder worker');
     const siteRuntime = files.get(target === 'cloudflare' ? 'src/index.js' : 'api/index.js');
     assert.match(siteRuntime, /cleanMenuLinks\(merged\.menuLinks, DEFAULT_CONFIG\.menuLinks\)/);
     assert.match(siteRuntime, /\.\.\/lib\/menu-links\.js/);
@@ -165,8 +169,21 @@ test('generated Vercel and Cloudflare packages include private admin login setti
       .map(([, contents]) => contents).join('\n');
     assert.doesNotMatch(deployableFiles, /practiceowner|owner@example\.test|CanopyOwner!8/);
     assert.match(files.get(target === 'cloudflare' ? 'src/index.js' : 'api/index.js'), /adminDashboardPath/);
-    if (target === 'cloudflare') assert.match(files.get('wrangler.jsonc'), /"run_worker_first": true/);
-    else assert.match(files.get('vercel.json'), /:adminSegment\/dashboard/);
+    if (target === 'cloudflare') {
+      assert.match(files.get('package.json'), /"sharp": "0\.35\.5"/);
+      assert.match(files.get('wrangler.jsonc'), /"run_worker_first": true/);
+      assert.match(files.get('wrangler.jsonc'), /"crons": \["\* \* \* \* \*"\]/);
+      assert.match(files.get('src/index.js'), /async scheduled\(_controller, env, ctx\)/);
+    } else {
+      assert.match(files.get('package.json'), /"node": ">=20\.6"/);
+      assert.match(files.get('vercel.json'), /:adminSegment\/dashboard/);
+      assert.match(files.get('vercel.json'), /payment-sweeps.*\* \* \* \* \*/);
+      assert.match(files.get('api/index.js'), /CRON_SECRET/);
+    }
+    assert.match(files.get('README.md'), /Bookings remain scheduled after 15 minutes/);
+    assert.match(files.get('README.md'), /even if the owner has independently marked the payment received/);
+    assert.match(files.get('README.md'), /schema\.sql.*safe to rerun/s);
+    assert.match(files.get('README.md'), /90-second client-reminder checks and 3-minute owner-follow-up checks/);
   }
 });
 
@@ -206,4 +223,24 @@ test('builder CSRF tokens are random and HTTP localhost remains supported', asyn
   const b = await session({}, 'http://localhost:8787');
   assert.notEqual(a.token, b.token);
   assert.match(a.cookie, /^canopy_builder_csrf=/);
+});
+test('builder rejects oversized streamed JSON bodies without buffering them in full', async () => {
+  const env = { ASSETS: assets };
+  const auth = await session(env);
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(256 * 1024 + 1));
+      controller.close();
+    }
+  });
+  const request = new Request(`${origin}/api/generate`, {
+    method: 'POST',
+    headers: { Origin: origin, Cookie: auth.cookie, 'X-CSRF-Token': auth.token, 'Content-Type': 'application/json' },
+    body,
+    duplex: 'half'
+  });
+  assert.equal(request.headers.get('Content-Length'), null);
+  const response = await worker.fetch(request, env);
+  assert.equal(response.status, 413);
+  assert.match((await response.json()).error, /too large/i);
 });

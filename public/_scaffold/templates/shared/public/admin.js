@@ -3,7 +3,8 @@
   let site = { ...fallback, features: { ...(fallback.features || {}) } };
   let csrfToken = '';
   let signedIn = false;
-  const ADMIN_PAGE_IDS = new Set(['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments']);
+  let paymentsRefreshTimer = null;
+  const ADMIN_PAGE_IDS = new Set(['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments', 'payments']);
   const MAX_MENU_LINKS = 16;
   const $ = (id) => document.getElementById(id);
   const isSignedIn = () => signedIn;
@@ -193,6 +194,10 @@
     $('ownerIdentity').hidden = !signedIn;
     $('logoutButton').hidden = !signedIn;
     $('ownerEmail').textContent = signedIn ? `SIGNED IN · ${email}` : '';
+    if (signedIn && !paymentsRefreshTimer) paymentsRefreshTimer = window.setInterval(() => {
+      if (signedIn && document.visibilityState === 'visible') loadPayments();
+    }, 60_000);
+    else if (!signedIn && paymentsRefreshTimer) { window.clearInterval(paymentsRefreshTimer); paymentsRefreshTimer = null; }
   }
   async function loadAdminWorkspace() {
     await loadSite();
@@ -200,6 +205,7 @@
     await loadGallery();
     await loadAppointments();
     await loadAvailabilitySchedule();
+    await loadPayments();
   }
   async function initializeAdmin() {
     try {
@@ -468,6 +474,132 @@
     try { await api(`/api/admin/appointments/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status } }); toast(status === 'confirmed' ? 'Consultation confirmed' : 'Consultation cancelled'); await loadAppointments(); }
     catch (error) { toast(error.message, true); }
   }
+  function relativeElapsed(value) {
+    const timestamp = new Date(value).getTime();
+    if (!Number.isFinite(timestamp)) return 'time unavailable';
+    const elapsed = Math.max(0, Date.now() - timestamp);
+    if (elapsed < 60_000) return 'just now';
+    if (elapsed < 3_600_000) { const minutes = Math.floor(elapsed / 60_000); return `${minutes} minute${minutes === 1 ? '' : 's'} ago`; }
+    if (elapsed < 86_400_000) { const hours = Math.floor(elapsed / 3_600_000); return `${hours} hour${hours === 1 ? '' : 's'} ago`; }
+    const days = Math.floor(elapsed / 86_400_000); return `${days} day${days === 1 ? '' : 's'} ago`;
+  }
+  function bookingFirstName(record) {
+    const name = String(record.clientName || record.name || '').trim();
+    return name ? name.split(/\s+/)[0] : 'Client';
+  }
+  function paymentBookingSummary(record, timestampField) {
+    const booked = `Booked ${relativeElapsed(record[timestampField])}`;
+    const date = record.date ? new Date(`${String(record.date).slice(0, 10)}T12:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }) : '';
+    const slot = [date, record.timeLabel || record.time].filter(Boolean).join(' · ');
+    return [booked, record.service, slot].filter(Boolean).join(' · ');
+  }
+  function renderUnpaidBookings(bookings) {
+    const list = $('unpaidBookingsList'); list.replaceChildren();
+    $('unpaidBookingsCount').textContent = String(bookings.length);
+    if (!bookings.length) { const empty = document.createElement('p'); empty.className = 'empty-posts'; empty.textContent = 'No bookings are waiting for payment proof.'; list.appendChild(empty); return; }
+    bookings.forEach((booking) => {
+      const item = document.createElement('article'); item.className = 'payment-review-item';
+      const summary = document.createElement('div'); summary.className = 'payment-review-summary';
+      const person = document.createElement('span'); person.className = 'payment-review-person';
+      const name = document.createElement('strong'); name.textContent = `${bookingFirstName(booking)} · ${booking.username || 'Email unavailable'}`;
+      const detail = document.createElement('small'); detail.textContent = paymentBookingSummary(booking, 'createdAt'); person.append(name, detail);
+      const meta = document.createElement('div'); meta.className = 'payment-review-meta';
+      const method = document.createElement('span'); method.className = 'payment-review-status'; method.textContent = booking.paymentMethod === 'maya' ? 'Maya' : 'GCash';
+      const dueAt = new Date(booking.paymentDueAt).getTime();
+      const reminderDue = Boolean(booking.paymentReminderSentAt) || (Number.isFinite(dueAt) && Date.now() >= dueAt - 3 * 60_000);
+      const ownerCheckDue = Boolean(booking.paymentOwnerAttentionAt) || (Number.isFinite(dueAt) && Date.now() >= dueAt);
+      const timer = document.createElement('span'); timer.className = `payment-review-status payment-time-left${ownerCheckDue ? ' needs-owner-review' : ''}`;
+      timer.textContent = ownerCheckDue ? '15+ min · check payment' : reminderDue ? 'Reminder sent · awaiting proof' : 'Awaiting proof';
+      const actions = document.createElement('div'); actions.className = 'payment-review-actions';
+      const received = document.createElement('button'); received.type = 'button'; received.className = 'approve-payment'; received.textContent = 'Mark received';
+      const release = document.createElement('button'); release.type = 'button'; release.className = 'reject-payment'; release.textContent = 'Release booking';
+      received.addEventListener('click', () => updateUnpaidBooking(booking.id, 'received', received, release));
+      release.addEventListener('click', () => updateUnpaidBooking(booking.id, 'release', received, release));
+      actions.append(received, release); meta.append(method, timer, actions); summary.append(person, meta); item.appendChild(summary); list.appendChild(item);
+    });
+  }
+  async function updateUnpaidBooking(id, action, receivedButton, releaseButton) {
+    const confirmation = action === 'received'
+      ? 'Mark this payment as received? Confirm that you checked your GCash or Maya account.'
+      : 'Release this booking and reopen its appointment time? Confirm that you checked and did not receive the payment.';
+    if (!window.confirm(confirmation)) return;
+    receivedButton.disabled = true; releaseButton.disabled = true;
+    try {
+      await api(`/api/admin/payments/unpaid/${encodeURIComponent(id)}`, { method: 'PATCH', body: { action } });
+      toast(action === 'received' ? 'Payment marked received' : 'Booking released · time is open again');
+      await Promise.all([loadPayments(), loadAppointments()]);
+    } catch (error) { toast(error.message, true); receivedButton.disabled = false; releaseButton.disabled = false; }
+  }
+  function renderPayments(payments) {
+    const list = $('paymentsList'); list.replaceChildren();
+    $('paymentsCount').textContent = String(payments.length);
+    if (!payments.length) { const empty = document.createElement('p'); empty.className = 'empty-posts'; empty.textContent = 'No payment proofs have been uploaded.'; list.appendChild(empty); return; }
+    payments.forEach((payment) => {
+      const item = document.createElement('article'); item.className = 'payment-review-item'; item.dataset.paymentId = payment.id;
+      const summary = document.createElement('div'); summary.className = 'payment-review-summary';
+      const person = document.createElement('span'); person.className = 'payment-review-person';
+      const name = document.createElement('strong'); name.textContent = `${bookingFirstName(payment)} · ${payment.username || 'Email unavailable'}`;
+      const detail = document.createElement('small'); detail.textContent = `${paymentBookingSummary(payment, 'bookedAt')} · Proof uploaded ${relativeElapsed(payment.uploadedAt)}`; person.append(name, detail);
+      const meta = document.createElement('div'); meta.className = 'payment-review-meta';
+      const method = document.createElement('span'); method.className = 'payment-review-status'; method.textContent = payment.paymentMethod === 'maya' ? 'Maya' : 'GCash';
+      const state = document.createElement('span'); state.className = `payment-review-status ${payment.status === 'pending_review' ? '' : payment.status}`; state.textContent = payment.status === 'pending_review' ? 'Needs review' : payment.status || 'Unknown';
+      if (payment.appointmentStatus === 'cancelled') { state.classList.add('cancelled'); state.textContent += ' · slot released'; }
+      const actions = document.createElement('div'); actions.className = 'payment-review-actions';
+      const previewButton = document.createElement('button'); previewButton.type = 'button'; previewButton.textContent = 'View proof';
+      previewButton.addEventListener('click', () => togglePaymentPreview(item, previewButton, payment)); actions.appendChild(previewButton);
+      if (payment.status === 'pending_review' && payment.appointmentStatus !== 'cancelled') {
+        const approve = document.createElement('button'); approve.type = 'button'; approve.className = 'approve-payment'; approve.textContent = 'Approve';
+        approve.addEventListener('click', () => reviewPaymentProof(payment.id, 'approved', approve, reject));
+        const reject = document.createElement('button'); reject.type = 'button'; reject.className = 'reject-payment'; reject.textContent = 'Reject & release';
+        reject.addEventListener('click', () => reviewPaymentProof(payment.id, 'rejected', approve, reject));
+        actions.append(approve, reject);
+      }
+      meta.append(method, state, actions); summary.append(person, meta); item.appendChild(summary); list.appendChild(item);
+    });
+  }
+  function togglePaymentPreview(item, button, payment) {
+    const existing = item.querySelector('.payment-proof-preview-wrap');
+    if (existing) { existing.remove(); item.classList.remove('is-expanded'); button.textContent = 'View proof'; return; }
+    const wrap = document.createElement('div'); wrap.className = 'payment-proof-preview-wrap';
+    const image = document.createElement('img'); image.className = 'payment-proof-preview'; image.alt = `Private ${payment.paymentMethod === 'maya' ? 'Maya' : 'GCash'} transaction proof for ${bookingFirstName(payment)}`;
+    image.loading = 'lazy'; image.src = `/api/admin/payment-proofs/${encodeURIComponent(payment.id)}/image`;
+    image.addEventListener('error', () => { image.remove(); const error = document.createElement('p'); error.className = 'empty-posts'; error.textContent = 'The private screenshot could not be loaded. Refresh and sign in again.'; wrap.appendChild(error); }, { once: true });
+    wrap.appendChild(image); item.appendChild(wrap); item.classList.add('is-expanded'); button.textContent = 'Hide proof';
+  }
+  async function reviewPaymentProof(id, decision, approveButton, rejectButton) {
+    if (decision === 'rejected' && !window.confirm('Reject this screenshot and release the appointment time? The client will need to book another slot.')) return;
+    approveButton.disabled = true; rejectButton.disabled = true;
+    try {
+      await api(`/api/admin/payment-proofs/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status: decision } });
+      toast(decision === 'approved' ? 'Payment approved' : 'Payment rejected · slot released');
+      await Promise.all([loadPayments(), loadAppointments()]);
+    } catch (error) { toast(error.message, true); approveButton.disabled = false; rejectButton.disabled = false; }
+  }
+  async function loadUnpaidBookings() {
+    const list = $('unpaidBookingsList');
+    if (!isSignedIn()) return;
+    try { const data = await api('/api/admin/payments/unpaid'); renderUnpaidBookings(data.bookings || []); }
+    catch (error) { $('unpaidBookingsCount').textContent = '0'; list.innerHTML = `<p class="empty-posts">${esc(error.message)} — refresh to try again.</p>`; }
+  }
+  async function loadPaymentsWithProof() {
+    const list = $('paymentsList');
+    if (!isSignedIn()) return;
+    try { const data = await api('/api/admin/payments'); renderPayments(data.payments || []); }
+    catch (error) { $('paymentsCount').textContent = '0'; list.innerHTML = `<p class="empty-posts">${esc(error.message)} — refresh to try again.</p>`; }
+  }
+  async function loadPayments() {
+    if (!isSignedIn()) return;
+    await Promise.all([loadUnpaidBookings(), loadPaymentsWithProof()]);
+  }
+  function showPaymentTab(tab) {
+    const activeTab = tab === 'payments' ? 'payments' : 'unpaid';
+    document.querySelectorAll('[data-payment-tab]').forEach((button) => {
+      const active = button.dataset.paymentTab === activeTab;
+      button.classList.toggle('active', active); button.setAttribute('aria-selected', String(active));
+      button.tabIndex = active ? 0 : -1;
+    });
+    document.querySelectorAll('[data-payment-panel]').forEach((panel) => { panel.hidden = panel.dataset.paymentPanel !== activeTab; });
+  }
   function bind() {
     document.querySelectorAll('[data-admin-page-link]').forEach((button) => button.addEventListener('click', () => {
       const pageId = button.dataset.adminPageLink;
@@ -623,6 +755,13 @@
       } catch (error) { toast(error.message, true); }
     });
     $('refreshAppointments').addEventListener('click', loadAppointments);
+    document.querySelectorAll('[data-payment-tab]').forEach((button) => button.addEventListener('click', () => {
+      showPaymentTab(button.dataset.paymentTab);
+      loadPayments();
+    }));
+    $('refreshUnpaidBookings').addEventListener('click', loadUnpaidBookings);
+    $('refreshPayments').addEventListener('click', loadPaymentsWithProof);
+    showPaymentTab('unpaid');
     $('availabilityMonth').addEventListener('change', loadAvailabilitySchedule);
     $('availabilityForm').addEventListener('submit', submitAvailability);
     $('addScheduleException').addEventListener('click', () => addScheduleException());

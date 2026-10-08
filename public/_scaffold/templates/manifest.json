@@ -20,18 +20,22 @@
   "sharedRuntime": [
     "lib/admin-security.js",
     "lib/admin-url.js",
-    "lib/menu-links.js"
+    "lib/menu-links.js",
+    "lib/payment-proof.js",
+    "lib/payment-reminders.js"
   ],
   "vercel": [
     ".env",
     "api/index.js",
     "dev.js",
+    "payment-reminder-worker.js",
     "package.json",
     "vercel.json"
   ],
   "cloudflare": [
     ".dev.vars",
     "package.json",
+    "payment-reminder-worker.js",
     "src/index.js",
     "wrangler.jsonc"
   ]
