@@ -382,6 +382,9 @@
   letter-spacing: -0.018em;
 }
 .brivon-shell .hero-headline .lime { color: var(--lime); }
+/* site.js rewrites #heroHeadline and wraps the second line in <em>, so it
+   needs the same accent treatment as the template's .lime span. */
+.brivon-shell .hero-headline em { color: var(--lime); font-style: normal; }
 .brivon-shell .hero-headline .slash { color: var(--paper-mute); font-weight: 400; }
 .brivon-shell .hero-sub {
   color: var(--fg-soft);
