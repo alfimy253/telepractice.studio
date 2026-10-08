@@ -1,4 +1,6 @@
-const ADMIN_PASSWORD_ITERATIONS = 210000;
+// Cloudflare Workers reject PBKDF2 above 100,000 iterations (deriveBits throws
+// NotSupportedError in production), which broke ZIP generation for both targets.
+const ADMIN_PASSWORD_ITERATIONS = 100000;
 const ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

@@ -150,6 +150,15 @@ function updatePreview() {
   $('serviceOne').textContent = kind.services[0];
   $('serviceTwo').textContent = kind.services[1];
   $('serviceThree').textContent = kind.services[2];
+  if ($('brivonPreview')) {
+    $('bvBrand').textContent = business.toLocaleUpperCase();
+    $('bvEyebrow').textContent = kind.eyebrow;
+    $('bvHeadline').innerHTML = `${esc(headline[0])}<br><em>${esc(headline[1] || '')}</em>`;
+    $('bvSub').textContent = kind.subhead;
+    $('bvServiceOne').textContent = kind.services[0];
+    $('bvServiceTwo').textContent = kind.services[1];
+    $('bvServiceThree').textContent = kind.services[2];
+  }
   renderPreviewMenuLinks();
   const logoUse = document.querySelector('.preview-logo use');
   if (logoUse) logoUse.setAttribute('href', `#${kind.icon}`);
@@ -161,6 +170,7 @@ function updatePreview() {
   screen.classList.toggle('dental-preview', config.specialty === 'dental');
   screen.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air','theme-brivon-dark','theme-brivon-light');
   if (THEMES[config.theme]) screen.classList.add(`theme-${config.theme}`);
+  $('brivonPreview')?.setAttribute('aria-hidden', String(!config.theme.startsWith('brivon-')));
   $('colorPreview').style.background = config.primaryColor;
   $('brandColorLabel').textContent = config.primaryColor.toUpperCase();
   const shortTheme = THEMES[config.theme]?.label || 'Custom';
