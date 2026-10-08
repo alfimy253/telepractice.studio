@@ -9,3 +9,10 @@ node_modules/
 # ZIP-generation time, never real secrets.
 !public/_scaffold/templates/cloudflare/.dev.vars
 !public/_scaffold/templates/vercel/.env
+
+# Local Brivon preview / scratch artifacts (not part of the builder).
+.brivon-*.mjs
+.brivon-*.css
+.brivon-*.log
+.scope-brivon-css.mjs
+preview-out/
