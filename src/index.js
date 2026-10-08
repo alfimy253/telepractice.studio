@@ -1,4 +1,4 @@
-import { generateBundle } from './generator.js';
+import { buildPreviewDocument, generateBundle } from './generator.js';
 
 const encoder = new TextEncoder();
 // The HTTPS prefix prevents sibling domains from injecting the CSRF cookie.
@@ -37,7 +37,9 @@ async function readBoundedText(request, maxBytes) {
 }
 function secureHeaders(source = {}) {
   const headers = new Headers(source);
-  headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
+  // Google Fonts hosts are allowed only for the Brivon live preview, which is
+  // injected into a sandboxed iframe that inherits this policy.
+  headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   headers.set('X-Frame-Options', 'DENY');
@@ -53,11 +55,49 @@ function failure(message, status = 400) { return json({ error: message }, status
 function csrfSecret(env) {
   return String(env.CSRF_SECRET || '').trim();
 }
-function sameOrigin(request) {
-  const origin = request.headers.get('Origin');
+// Every host the builder can be reached through: the one the Worker itself
+// sees, any X-Forwarded-Host chain, and an optional explicit allowlist. A
+// reverse proxy (a preview host, a load balancer, a custom domain) may rewrite
+// Host or terminate TLS, so a byte-for-byte comparison of Origin against the
+// Worker's own URL would reject the builder's own browser tab.
+function trustedHosts(request, env) {
+  const hosts = new Set([new URL(request.url).host.toLowerCase()]);
+  const wildcards = [];
+  for (const entry of String(request.headers.get('X-Forwarded-Host') || '').split(',')) {
+    const host = entry.trim().toLowerCase();
+    if (host) hosts.add(host);
+  }
+  // Optional deployment setting, e.g. ALLOWED_ORIGINS=https://builder.example,*.builder.dev
+  for (const entry of String(env?.ALLOWED_ORIGINS || '').split(',')) {
+    const value = entry.trim();
+    if (!value) continue;
+    let host = value.toLowerCase();
+    try { host = new URL(host).host; } catch (_) { /* already a bare host or wildcard */ }
+    if (host.startsWith('*.')) wildcards.push(host.slice(1));
+    else if (host) hosts.add(host);
+  }
+  return { hosts, wildcards };
+}
+function hostIsTrusted({ hosts, wildcards }, host) {
+  if (hosts.has(host)) return true;
+  return wildcards.some((suffix) => host.endsWith(suffix) && host.length > suffix.length);
+}
+function sameOrigin(request, env) {
   const site = request.headers.get('Sec-Fetch-Site');
-  return (!origin || origin === new URL(request.url).origin)
-    && (!site || site === 'same-origin' || site === 'none');
+  // Browsers set Sec-Fetch-Site themselves and page scripts cannot override
+  // it, so 'same-origin' is proof the request came from a builder tab.
+  const browserAssertedSameOrigin = site === 'same-origin';
+  if (site && site !== 'none' && !browserAssertedSameOrigin) return false;
+  const origin = request.headers.get('Origin');
+  if (!origin) return true;
+  let parsed;
+  try { parsed = new URL(origin); } catch (_) { return false; }
+  if (hostIsTrusted(trustedHosts(request, env), parsed.host.toLowerCase())) return true;
+  // A proxy that rewrites Host leaves Origin pointing at the public host the
+  // browser is really on. The browser's own same-origin assertion, the
+  // SameSite=Strict cookie and the matching double-submit token still gate
+  // the request, so this stays a same-site-only path.
+  return browserAssertedSameOrigin;
 }
 function base64url(bytes) {
   let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -82,7 +122,7 @@ function equal(left, right) {
   return difference === 0;
 }
 async function issueCsrf(request, env) {
-  if (!sameOrigin(request)) return failure('Cross-site request rejected.', 403);
+  if (!sameOrigin(request, env)) return failure('Cross-site request rejected.', 403);
   const secret = csrfSecret(env);
   const nonce = base64url(crypto.getRandomValues(new Uint8Array(24)));
   // This public, stateless builder needs no shared signing key. Keep optional
@@ -92,7 +132,7 @@ async function issueCsrf(request, env) {
   return json({ token }, 200, { 'Set-Cookie': `${csrfCookie(request)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600${secure}` });
 }
 async function csrfValid(request, env) {
-  if (!sameOrigin(request)) return false;
+  if (!sameOrigin(request, env)) return false;
   const cookie = cookieValue(request.headers.get('Cookie'), csrfCookie(request));
   const header = request.headers.get('X-CSRF-Token');
   const secret = csrfSecret(env);
@@ -102,12 +142,38 @@ async function csrfValid(request, env) {
   if (!nonce || !signature || rest.length) return false;
   return equal(signature, base64url(await sign(nonce, secret)));
 }
+// The live preview renders caller-supplied public settings with the same
+// scaffold files as the ZIP. It holds no secrets and changes no state, sends
+// no CORS headers and cannot be framed, so it is safe without a CSRF token.
+const MAX_PREVIEW_CONFIG_BYTES = 16 * 1024;
+async function preview(request, env, origin) {
+  const raw = new URL(request.url).searchParams.get('config') || '';
+  if (!raw) return failure('Send a preview configuration.', 400);
+  if (raw.length > MAX_PREVIEW_CONFIG_BYTES) return failure('The preview configuration is too large.', 413);
+  let input;
+  try { input = JSON.parse(raw); }
+  catch (_) { return failure('Send a valid preview configuration.'); }
+  try {
+    const { html } = await buildPreviewDocument(input, env, origin);
+    const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    // Applied when this document is opened directly; the builder injects it
+    // into a sandboxed iframe, which inherits the builder page's policy.
+    headers.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src data: https:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+    headers.set('X-Content-Type-Options', 'nosniff');
+    headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    return new Response(html, { status: 200, headers });
+  } catch (cause) {
+    console.error('Builder preview generation failed', cause);
+    return failure('The live preview could not be prepared.', 500);
+  }
+}
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname.startsWith('/_scaffold/')) return failure('Not found.', 404);
     if (url.pathname === '/api/health' && request.method === 'GET') return json({ ok: true, runtime: 'cloudflare-workers-builder' });
     if (url.pathname === '/api/csrf' && request.method === 'GET') return issueCsrf(request, env);
+    if (url.pathname === '/api/preview' && request.method === 'GET') return preview(request, env, url.origin);
     if (url.pathname === '/api/generate' && request.method === 'POST') {
       if (!await csrfValid(request, env)) return failure('Cross-site request rejected or security token expired.', 403);
       const body = await readBoundedText(request, MAX_CONFIG_BYTES);

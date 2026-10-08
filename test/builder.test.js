@@ -277,3 +277,165 @@ test('Brivon light and dark generate a separate design-system homepage', async (
     assert.equal(config.theme, theme);
   }
 });
+
+test('builder downloads still work behind a proxy that changes Host or terminates TLS', async () => {
+  const env = { ASSETS: assets };
+  const proxyOrigin = 'https://8787-preview.example';
+  const cases = [
+    { Origin: proxyOrigin, 'Sec-Fetch-Site': 'same-origin' },
+    { Origin: proxyOrigin, 'X-Forwarded-Host': '8787-preview.example' },
+    { Origin: 'https://builder.example', 'Sec-Fetch-Site': 'same-origin' }
+  ];
+  for (const headers of cases) {
+    const issued = await worker.fetch(new Request(`${origin}/api/csrf`, { headers }), env);
+    assert.equal(issued.status, 200, `csrf rejected for ${JSON.stringify(headers)}`);
+    const { token } = await issued.json();
+    const cookie = issued.headers.get('Set-Cookie').split(';')[0];
+    const response = await generate(env, { token, cookie }, { ...headers, 'Sec-Fetch-Site': 'same-origin' }, 'cloudflare');
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal(response.headers.get('Content-Type'), 'application/zip');
+  }
+});
+
+test('builder accepts an explicitly allowed origin suffix but not a look-alike', async () => {
+  const env = { ASSETS: assets, ALLOWED_ORIGINS: 'https://other.example, *.preview.example' };
+  const allowed = await worker.fetch(new Request(`${origin}/api/csrf`, { headers: { Origin: 'https://8787.preview.example' } }), env);
+  assert.equal(allowed.status, 200);
+  const { token } = await allowed.json();
+  const cookie = allowed.headers.get('Set-Cookie').split(';')[0];
+  assert.equal((await generate(env, { token, cookie }, { Origin: 'https://8787.preview.example' })).status, 200);
+  for (const host of ['https://preview.example.evil', 'https://evilpreview.example']) {
+    assert.equal((await worker.fetch(new Request(`${origin}/api/csrf`, { headers: { Origin: host } }), env)).status, 403);
+  }
+});
+
+async function previewDocument(input) {
+  const response = await worker.fetch(
+    new Request(`${origin}/api/preview?config=${encodeURIComponent(JSON.stringify(input))}`), { ASSETS: assets }
+  );
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.match(response.headers.get('Content-Type'), /^text\/html/);
+  return response.text();
+}
+
+test('builder live preview renders the real Brivon service-page layout', async () => {
+  for (const theme of ['brivon-dark', 'brivon-light']) {
+    const html = await previewDocument({
+      theme, businessName: 'Preview Practice', brandName: 'Preview', location: 'Makati, Philippines',
+      email: 'hello@preview.example', phone: '+63 2 8000 0000',
+      payments: { gcashName: 'Preview Practice', gcashNumber: '+63 900 000 0000', mayaName: 'Preview Practice', mayaNumber: '+63 900 000 0001' },
+      customPages: [{ id: 'rates', menuName: 'Rates', url: '/rates.html', pageTitle: 'Rates', pageContent: 'Our rates.' }]
+    });
+    assert.match(html, new RegExp(`class="brivon-shell theme-${theme}"`));
+    // The template's service-page layout, section by section.
+    for (const section of ['tier-grid', 'tier-card featured', 'process-grid', 'faq-grid', 'closing-cta', 'site-footer']) {
+      assert.match(html, new RegExp(section), `missing ${section}`);
+    }
+    // Self-contained: the stylesheet is inlined, scripts and tokens are gone.
+    assert.match(html, /<style>\n[\s\S]*\.brivon-shell \.tier-grid/);
+    assert.doesNotMatch(html, /<script/);
+    assert.doesNotMatch(html, /__[A-Z_]+__/);
+    // site.js-rendered regions are pre-rendered from the builder settings.
+    assert.match(html, /id="siteNav"[\s\S]*?<a href="#home">Rates<\/a>/);
+    assert.match(html, /id="drawerNav"[\s\S]*?<a href="#home">Rates<\/a>/);
+    // Nothing in the preview can navigate the frame to a page the builder
+    // does not serve; same-page anchors survive.
+    assert.doesNotMatch(html, /href="\//);
+    assert.match(html, /<a href="#care">Our care<\/a>/);
+    assert.match(html, /class="gallery-card gallery-card-0"/);
+    assert.match(html, /class="post-card"/);
+    assert.match(html, /class="footer-payment-method"><strong>GCash<\/strong>/);
+    assert.match(html, /data:image\/svg\+xml/);
+    assert.doesNotMatch(html, /loading-copy">A few scenes/);
+    assert.doesNotMatch(html, /loading-copy">New notes/);
+  }
+});
+
+test('builder live preview follows the specialty, features and contact details', async () => {
+  const html = await previewDocument({
+    specialty: 'dental', theme: 'brivon-dark', businessName: 'Brightside Dental Studio',
+    email: 'hello@brightside.example', phone: '+63 2 8123 4567',
+    features: { blog: false, gallery: true, scheduling: false }
+  });
+  assert.match(html, /id="heroHeadline">A reason to<br><em>smile easier\.<\/em>/);
+  assert.match(html, /<h3 class="service-title">Preventive care<\/h3>/);
+  assert.match(html, /<section id="journal" class="hidden">/);
+  assert.match(html, /<section id="book" class="closing-cta hidden">/);
+  assert.doesNotMatch(html, /Wellness &amp; prevention/);
+  assert.match(html, /Brightside Dental Studio/);
+});
+
+test('builder live preview keeps working with half-finished input', async () => {
+  const html = await previewDocument({ theme: 'brivon-dark', email: 'not-an-email', customPages: [{ menuName: '' }] });
+  assert.match(html, /class="brivon-shell theme-brivon-dark"/);
+  assert.match(html, /Harborlight Veterinary Care/);
+});
+
+test('builder live preview rejects missing, invalid or oversized configurations', async () => {
+  const call = (query) => worker.fetch(new Request(`${origin}/api/preview${query}`), { ASSETS: assets });
+  assert.equal((await call('')).status, 400);
+  assert.equal((await call('?config=%7Bbroken')).status, 400);
+  assert.equal((await call(`?config=${encodeURIComponent(JSON.stringify({ businessName: 'a'.repeat(17 * 1024) }))}`)).status, 413);
+});
+
+test('builder swaps the preview panel to the generated Brivon homepage', async () => {
+  const [html, app] = await Promise.all([
+    readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/app.js', import.meta.url), 'utf8')
+  ]);
+  assert.match(html, /id="previewScreenBrivon" hidden/);
+  assert.match(html, /<iframe class="brivon-preview-frame" id="brivonPreviewFrame"[^>]*sandbox=""/);
+  assert.match(app, /\/api\/preview\?config=/);
+  assert.match(app, /frame\.srcdoc = html/);
+  assert.match(app, /syncPreviewSurface\(\);\n  saveConfig\(\);/);
+  assert.match(app, /BRIVON_PREVIEW_WIDTHS\[/);
+});
+
+test('Brivon continuity rules never restyle the Brivon homepage', async () => {
+  // The homepage body is `brivon-shell theme-brivon-dark`, so a compatibility
+  // rule written for the site.css pages would also match it and win on
+  // specificity, repainting the real template (and turning --paper, and with
+  // it --fg, into the page background color).
+  const css = await readFile(new URL('../public/_scaffold/templates/shared/public/brivon.css', import.meta.url), 'utf8');
+  const block = css.slice(css.indexOf('Brivon continuity for functional'));
+  const selectors = [...block.matchAll(/(?:^|\})\s*((?:body\.theme-brivon-[^{]+))\{/gm)]
+    .flatMap((match) => match[1].split(',').map((selector) => selector.trim())).filter(Boolean);
+  assert.ok(selectors.length >= 40, `expected to parse the compatibility layer, found ${selectors.length}`);
+  for (const selector of selectors) {
+    assert.match(selector, /body\.theme-brivon-(dark|light):not\(\.brivon-shell\)/, `unscoped compatibility selector: ${selector}`);
+  }
+  assert.doesNotMatch(css, /body\.theme-brivon-(dark|light)\s*\{/);
+  assert.doesNotMatch(css, /body\.theme-brivon-(dark|light)\s+[a-z]/);
+  // The template's own heading spacing must survive on the homepage.
+  assert.match(css, /\.brivon-shell \.hero-headline \{[\s\S]{0,120}line-height: 1\.15/);
+  assert.match(css, /\.brivon-shell \.hero-headline em \{ color: var\(--lime\)/);
+});
+
+test('downloaded Brivon packages scope the continuity layer away from the shell', async () => {
+  const env = { ASSETS: assets };
+  const auth = await session(env);
+  const response = await generate(env, auth, {}, 'vercel', { theme: 'brivon-dark' });
+  assert.equal(response.status, 200, await response.clone().text());
+  const files = zipEntries(new Uint8Array(await response.arrayBuffer()));
+  const css = files.get('brivon.css');
+  assert.match(css, /:not\(\.brivon-shell\)/);
+  assert.doesNotMatch(css, /body\.theme-brivon-dark\s*\{/);
+  // The continuity layer is still there for the site.css pages.
+  assert.match(css, /body\.theme-brivon-dark:not\(\.brivon-shell\) \.site-header/);
+  assert.match(files.get('appointments.html'), /href="\/brivon\.css"/);
+});
+
+test('builder live preview accepts menu-only custom pages and stays within its limit', async () => {
+  const pages = Array.from({ length: 8 }, (_, index) => ({ menuName: `Page ${index + 1}`, url: `/page-${index + 1}.html` }));
+  const html = await previewDocument({ theme: 'brivon-dark', customPages: pages });
+  for (const page of pages) assert.match(html, new RegExp(`<a href="#home">${page.menuName}</a>`), `missing ${page.menuName}`);
+  const encoded = encodeURIComponent(JSON.stringify({ theme: 'brivon-dark', customPages: pages }));
+  assert.ok(encoded.length < 16 * 1024, `menu-only payload should stay small, was ${encoded.length}`);
+  // A page whose title or body is still empty in the wizard must not drop the
+  // whole menu from the preview.
+  const partial = await previewDocument({ theme: 'brivon-dark', customPages: [{ menuName: 'Grooming', url: '/grooming.html' }] });
+  assert.match(partial, /<a href="#home">Grooming<\/a>/);
+  // And the builder really does trim page bodies out of the preview request.
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(app, /customPages: normalizeSavedPages\(config\.customPages\)\.map\(\(\{ menuName, url \}\) => \(\{ menuName, url \}\)\)/);
+});

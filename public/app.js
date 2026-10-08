@@ -52,6 +52,13 @@ let activePageId = '';
 let csrfToken = '';
 const WIZARD_STEP_COUNT = 5;
 const MAX_CUSTOM_PAGES = 8;
+// The Brivon design system is generated from its own HTML/CSS layout, so its
+// preview is the real generated homepage rendered in a sandboxed iframe.
+const BRIVON_THEMES = ['brivon-dark', 'brivon-light'];
+const BRIVON_PREVIEW_WIDTHS = { desktop: 1440, mobile: 390 };
+const BRIVON_PREVIEW_DEBOUNCE_MS = 280;
+let brivonPreviewTimer = 0;
+let brivonPreviewRequestId = 0;
 const ADMIN_PASSWORD_POLICY = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).{12,128}$/;
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -94,6 +101,9 @@ function saveConfig() {
   localStorage.setItem('canopy-site-config', JSON.stringify(persisted));
   const indicator = document.querySelector('.autosave');
   if (indicator) indicator.innerHTML = '<span class="status-dot"></span> All changes saved';
+  // Fields such as the contact email, phone and payment details only persist
+  // here, so the Brivon preview refreshes from the same path.
+  scheduleBrivonPreview();
 }
 function slugify(value) {
   return String(value || '').normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 55) || 'my-practice';
@@ -134,6 +144,90 @@ function renderPreviewMenuLinks() {
     return item;
   }));
 }
+function isBrivonTheme() { return BRIVON_THEMES.includes(config.theme); }
+// Public site settings only — never the admin credentials or database URL.
+function brivonPreviewConfig() {
+  const kind = vertical();
+  const name = config.businessName.trim() || kind.defaultName;
+  return {
+    specialty: config.specialty,
+    businessName: name,
+    brandName: name.replace(/\s+(care|clinic|studio|practice|dental)$/i, '').trim() || name,
+    location: config.location.trim() || 'Your neighborhood',
+    email: config.email.trim() || `hello@${slugify(name)}.example`,
+    phone: config.phone.trim() || '+1 555 010 0000',
+    theme: config.theme,
+    primaryColor: safeColor(config.primaryColor, '#d4ff3d'),
+    accentColor: safeColor(config.accentColor, '#d4ff3d'),
+    paperColor: safeColor(config.paperColor, '#0a0a0c'),
+    fontStyle: config.fontStyle === 'sans' ? 'sans' : 'serif',
+    features: { blog: Boolean(config.features.blog), gallery: config.features.gallery !== false, scheduling: Boolean(config.features.scheduling) },
+    payments: {
+      gcashName: String(config.payments.gcashName || '').trim(), gcashNumber: String(config.payments.gcashNumber || '').trim(),
+      mayaName: String(config.payments.mayaName || '').trim(), mayaNumber: String(config.payments.mayaNumber || '').trim()
+    },
+    // Only the menu label and route reach the preview, so page bodies never
+    // push the request past the endpoint's configuration limit.
+    customPages: normalizeSavedPages(config.customPages).map(({ menuName, url }) => ({ menuName, url }))
+  };
+}
+function brivonPreviewStatus(message) {
+  const status = $('brivonPreviewStatus');
+  if (!status) return;
+  status.hidden = !message;
+  if (message) status.textContent = message;
+}
+async function renderBrivonPreview() {
+  const frame = $('brivonPreviewFrame');
+  if (!frame || !isBrivonTheme()) return;
+  const requestId = (brivonPreviewRequestId += 1);
+  try {
+    const query = encodeURIComponent(JSON.stringify(brivonPreviewConfig()));
+    const response = await fetch(`/api/preview?config=${query}`, { credentials: 'same-origin', headers: { Accept: 'text/html' } });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || `the preview request failed (${response.status})`);
+    }
+    const html = await response.text();
+    if (requestId !== brivonPreviewRequestId) return; // a newer edit is already on its way
+    frame.srcdoc = html;
+    brivonPreviewStatus('');
+    layoutBrivonPreview();
+  } catch (error) {
+    if (requestId !== brivonPreviewRequestId) return;
+    brivonPreviewStatus(`Brivon preview unavailable — ${error.message || 'the builder could not render it.'}`);
+  }
+}
+function scheduleBrivonPreview() {
+  if (!isBrivonTheme()) return;
+  window.clearTimeout(brivonPreviewTimer);
+  brivonPreviewTimer = window.setTimeout(renderBrivonPreview, BRIVON_PREVIEW_DEBOUNCE_MS);
+}
+function layoutBrivonPreview() {
+  const screen = $('previewScreenBrivon');
+  const frame = $('brivonPreviewFrame');
+  const viewport = $('brivonPreviewViewport');
+  if (!screen || !frame || !viewport || screen.hidden) return;
+  const width = BRIVON_PREVIEW_WIDTHS[$('browserWindow').classList.contains('mobile-preview') ? 'mobile' : 'desktop'];
+  const availableWidth = viewport.clientWidth || screen.clientWidth || 480;
+  const availableHeight = viewport.clientHeight || screen.clientHeight || 460;
+  // Lay the real page out at its own width, then scale it into the panel, so
+  // the preview keeps the generated site's desktop (or mobile) breakpoints.
+  const scale = Math.min(availableWidth / width, 1);
+  frame.style.width = `${width}px`;
+  frame.style.height = `${Math.round(availableHeight / scale)}px`;
+  frame.style.transform = `scale(${scale})`;
+}
+function syncPreviewSurface() {
+  const brivon = isBrivonTheme();
+  const illustration = $('previewScreen');
+  const brivonScreen = $('previewScreenBrivon');
+  if (illustration) illustration.hidden = brivon;
+  if (brivonScreen) brivonScreen.hidden = !brivon;
+  if (!brivon) { brivonPreviewStatus(''); return; }
+  layoutBrivonPreview();
+  scheduleBrivonPreview();
+}
 function updatePreview() {
   const kind = vertical();
   const business = config.businessName.trim() || kind.defaultName;
@@ -168,6 +262,7 @@ function updatePreview() {
   $('summaryTheme').textContent = `${shortTheme} · ${config.fontStyle === 'serif' ? 'editorial serif' : 'modern sans'}`;
   $('summaryModules').textContent = [config.features.blog && 'Blog', config.features.gallery !== false && 'Gallery', config.features.scheduling && 'Scheduling'].filter(Boolean).join(' + ') || 'Core pages only';
   document.querySelectorAll('.preview-brand strong').forEach((node) => node.title = business);
+  syncPreviewSurface();
   saveConfig();
 }
 function setSpecialty(specialty) {
@@ -565,7 +660,7 @@ async function downloadPackage() {
     const csrfResponse = await fetch('/api/csrf', { credentials: 'same-origin' });
     if (!csrfResponse.ok) {
       const error = await csrfResponse.json().catch(() => ({}));
-      throw new Error(error.error || 'Could not initialize the secure build session.');
+      throw new Error(`${error.error || 'Could not initialize the secure build session.'} (/api/csrf → ${csrfResponse.status})`);
     }
     const csrf = await csrfResponse.json();
     csrfToken = csrf.token;
@@ -577,7 +672,7 @@ async function downloadPackage() {
     });
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || 'The code package could not be generated.');
+      throw new Error(`${error.error || `The ${displayName} code package could not be generated.`} (/api/generate → ${response.status})`);
     }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
@@ -673,7 +768,10 @@ function bindEvents() {
   document.querySelectorAll('.device-button').forEach((button) => button.addEventListener('click', () => {
     document.querySelectorAll('.device-button').forEach((node) => node.classList.toggle('active', node === button));
     $('browserWindow').classList.toggle('mobile-preview', button.dataset.device === 'mobile');
+    layoutBrivonPreview();
   }));
+  window.addEventListener('resize', layoutBrivonPreview);
+  if (window.ResizeObserver && $('brivonPreviewViewport')) new ResizeObserver(() => layoutBrivonPreview()).observe($('brivonPreviewViewport'));
   $('menuToggle').addEventListener('click', () => $('sidebar').classList.toggle('open'));
   document.querySelectorAll('.side-nav .nav-link').forEach((link) => link.addEventListener('click', () => {
     document.querySelectorAll('.side-nav .nav-link').forEach((node) => node.classList.toggle('active', node === link));

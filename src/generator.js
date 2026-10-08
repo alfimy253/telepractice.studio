@@ -347,6 +347,165 @@ async function readScaffold(env, origin, filename) {
   if (!response.ok) throw new Error(`Missing build scaffold file: ${filename}`);
   return response.text();
 }
+// --- Live builder preview -------------------------------------------------
+// The builder's preview panel shows the *real* generated Brivon homepage
+// (shared/designs/brivon-index.html + public/brivon.css) instead of a
+// hand-drawn imitation, so what the owner sees is the layout they download.
+// The document is assembled here — CSS inlined, scripts removed, the
+// site.js-rendered regions (menu, gallery, journal, payments) pre-rendered —
+// so the browser can drop it straight into a sandboxed iframe with no
+// subresource requests.
+const PREVIEW_DESIGN_FILE = 'shared/designs/brivon-index.html';
+const PREVIEW_STYLE_FILE = 'shared/public/brivon.css';
+const MAX_PREVIEW_INLINE_IMAGES = 6;
+const GALLERY_ORNAMENTS = ['✳', '⌂', '♡', '✦'];
+function previewConfig(input = {}) {
+  const theme = String(input?.theme || '').startsWith('brivon-') ? input.theme : 'brivon-dark';
+  const specialty = input?.specialty === 'dental' ? 'dental' : 'veterinary';
+  // The preview only renders a page's menu label and route, so the builder
+  // sends just those. Accept a page that is still missing its title or body
+  // instead of dropping every page from the preview menu.
+  const customPages = (Array.isArray(input?.customPages) ? input.customPages : []).map((page) => ({
+    ...page,
+    pageTitle: clean(page?.pageTitle, 120) || clean(page?.menuName, 80),
+    pageContent: clean(page?.pageContent, 6000) || clean(page?.menuName, 80)
+  }));
+  // Typing in the builder produces transient invalid values (a half-typed
+  // email, a custom page with no URL yet). Fall back step by step so the
+  // preview keeps showing the practice details instead of resetting.
+  for (const attempt of [{ ...input, target: 'vercel', customPages }, { ...input, target: 'vercel', customPages: [] }]) {
+    try { return normalizeConfig(attempt); } catch (_) { /* try the next fallback */ }
+  }
+  return normalizeConfig({ target: 'vercel', specialty, theme });
+}
+function featureEnabled(config, feature) { return feature ? config.features[feature] !== false : true; }
+// Finds the opening tag carrying id="elementId" and returns its bounds.
+function findOpeningTag(html, elementId) {
+  const idPattern = new RegExp(`id="${elementId}"`);
+  const idIndex = html.search(idPattern);
+  if (idIndex < 0) return null;
+  const start = html.lastIndexOf('<', idIndex);
+  const end = html.indexOf('>', idIndex);
+  if (start < 0 || end < 0 || !/^<[a-zA-Z]/.test(html.slice(start, end + 1))) return null;
+  return { start, end, tag: html.slice(start, end + 1) };
+}
+// Replaces the inner HTML of the element with that id, tracking nested tags of
+// the same name so nested wrappers (e.g. #footerPayments) stay intact.
+function replaceElementContent(html, elementId, content) {
+  const found = findOpeningTag(html, elementId);
+  if (!found) return html;
+  const tagName = /^<\s*([a-zA-Z][a-zA-Z0-9-]*)/.exec(found.tag)[1].toLowerCase();
+  if (/\/\s*>$/.test(found.tag)) return html;
+  const scanner = new RegExp(`<\\/?${tagName}(?=[\\s/>])`, 'gi');
+  scanner.lastIndex = found.end + 1;
+  let depth = 1;
+  let match;
+  while ((match = scanner.exec(html)) !== null) {
+    depth += match[0].startsWith('</') ? -1 : 1;
+    if (depth === 0) return `${html.slice(0, found.end + 1)}${content}${html.slice(match.index)}`;
+  }
+  return html;
+}
+function setElementText(html, elementId, text) {
+  return replaceElementContent(html, elementId, htmlEscape(String(text ?? '')));
+}
+function setElementClass(html, elementId, className, enabled) {
+  const found = findOpeningTag(html, elementId);
+  if (!found) return html;
+  const classes = (found.tag.match(/\bclass="([^"]*)"/)?.[1] || '').split(/\s+/).filter(Boolean);
+  const has = classes.includes(className);
+  if (enabled === has) return html;
+  const next = enabled ? [...classes, className] : classes.filter((name) => name !== className);
+  const attribute = next.length ? ` class="${next.join(' ')}"` : '';
+  const tag = found.tag.replace(/\s*class="[^"]*"/, '').replace(/>$/, `${attribute}>`);
+  return `${html.slice(0, found.start)}${tag}${html.slice(found.end + 1)}`;
+}
+function previewMenuHtml(config) {
+  const links = config.menuLinks.filter((link) => featureEnabled(config, link.feature));
+  return links.map((link) => `<a href="${htmlEscape(link.href)}">${htmlEscape(link.label)}</a>`).join('\n          ');
+}
+function previewGalleryHtml(config) {
+  if (!featureEnabled(config, 'gallery')) return '<p class="loading-copy">Gallery turned off for this site.</p>';
+  return config.demoGallery.map((item, index) => `
+            <figure class="gallery-card gallery-card-${index % 4}">
+              <div class="gallery-image gallery-placeholder" role="img" aria-label="${htmlEscape(item.altText)}"><span class="gallery-ornament" aria-hidden="true">${GALLERY_ORNAMENTS[index % GALLERY_ORNAMENTS.length]}</span></div>
+              <figcaption><span class="gallery-category">${htmlEscape(item.category)}</span><strong>${htmlEscape(item.title)}</strong><p>${htmlEscape(item.caption)}</p></figcaption>
+            </figure>`).join('');
+}
+function previewPostsHtml(config) {
+  if (!featureEnabled(config, 'blog')) return '<p class="loading-copy">Journal turned off for this site.</p>';
+  return config.demoPosts.map((post, index) => {
+    const published = new Date(post.publishedAt);
+    const date = Number.isNaN(published.valueOf())
+      ? 'A note from our team'
+      : published.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    return `
+            <article class="post-card">
+              <div class="post-image"><img src="${htmlEscape(post.featureImageUrl)}" alt="${htmlEscape(post.featureImageAlt)}" loading="lazy" decoding="async"></div>
+              <div class="post-card-content">
+                <span class="post-category">${htmlEscape(post.category)}</span>
+                <h3>${htmlEscape(post.title)}</h3>
+                <p>${htmlEscape(post.excerpt)}</p>
+                <div class="post-meta">${htmlEscape(date)}</div>
+              </div>
+            </article>`;
+  }).join('');
+}
+function previewPaymentsHtml(config) {
+  const methods = [
+    { name: 'GCash', account: config.payments.gcashName, number: config.payments.gcashNumber },
+    { name: 'Maya', account: config.payments.mayaName, number: config.payments.mayaNumber }
+  ].filter((item) => item.account || item.number);
+  return methods.map((item) => `<div class="footer-payment-method"><strong>${htmlEscape(item.name)}</strong><span>${htmlEscape(item.account)}</span><span>${htmlEscape(item.number)}</span></div>`).join('');
+}
+// The generated site serves /images/*.svg itself; the builder does not, so
+// inline the few sample illustrations as data URIs to avoid broken images.
+async function inlinePreviewImages(html, env, origin) {
+  const paths = [...new Set([...html.matchAll(/src="(\/images\/[^"]+\.svg)"/g)].map((match) => match[1]))].slice(0, MAX_PREVIEW_INLINE_IMAGES);
+  for (const path of paths) {
+    let image;
+    try { image = await readScaffold(env, origin, `shared/public${path}`); } catch (_) { continue; }
+    html = html.split(path).join(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(image)}`);
+  }
+  return html;
+}
+async function buildPreviewDocument(input, env, origin) {
+  const config = previewConfig(input);
+  const [design, css] = await Promise.all([
+    readScaffold(env, origin, PREVIEW_DESIGN_FILE),
+    readScaffold(env, origin, PREVIEW_STYLE_FILE)
+  ]);
+  let html = replaceTokens(design, config);
+  const [firstLine, ...rest] = String(config.heroHeadline).split('\n');
+  let serviceIndex = 0;
+  html = html
+    .replace(/\s*<script\b[^>]*><\/script>/g, '')
+    .replace(/<link rel="stylesheet" href="\/brivon\.css">/, () => `<style>\n${css}\n</style>`)
+    .replace(/<h3 class="service-title">[\s\S]*?<\/h3>/g, (match) => {
+      const service = config.services[serviceIndex];
+      serviceIndex += 1;
+      return service ? `<h3 class="service-title">${htmlEscape(service)}</h3>` : match;
+    });
+  html = replaceElementContent(html, 'siteNav', previewMenuHtml(config));
+  html = replaceElementContent(html, 'drawerNav', previewMenuHtml(config));
+  html = replaceElementContent(html, 'galleryGrid', previewGalleryHtml(config));
+  html = replaceElementContent(html, 'postGrid', previewPostsHtml(config));
+  html = replaceElementContent(html, 'paymentDetails', previewPaymentsHtml(config));
+  html = setElementText(html, 'yearNow', new Date().getFullYear());
+  html = setElementText(html, 'heroEyebrow', config.heroEyebrow);
+  html = replaceElementContent(html, 'heroHeadline', `${htmlEscape(firstLine)}<br><em>${htmlEscape(rest.join(' ') || 'good care.')}</em>`);
+  html = setElementText(html, 'heroText', config.heroText);
+  html = setElementClass(html, 'gallery', 'hidden', !featureEnabled(config, 'gallery'));
+  html = setElementClass(html, 'journal', 'hidden', !featureEnabled(config, 'blog'));
+  html = setElementClass(html, 'book', 'hidden', !featureEnabled(config, 'scheduling'));
+  html = setElementClass(html, 'footerPayments', 'hidden', !config.payments.gcashNumber && !config.payments.mayaNumber);
+  // The builder serves no /appointments.html, so a page link would navigate the
+  // preview frame to a 404. Keep same-page anchors scrolling, and point page
+  // links back at the top of the preview.
+  html = html.replace(/href="\/(#?[^"]*)"/g, (match, target) => `href="${target.startsWith('#') ? target : '#home'}"`);
+  html = await inlinePreviewImages(html, env, origin);
+  return { html, theme: config.theme, siteId: config.siteId };
+}
 const ENV_FILE_BY_TARGET = { cloudflare: '.dev.vars', vercel: '.env' };
 async function buildFiles(input, env, origin) {
   const config = normalizeConfig(input);
@@ -397,4 +556,4 @@ async function generateBundle(input, env, origin) {
   const buffer = createZip([...files.entries()]);
   return { config, buffer, filename: `${config.siteId}-${config.target}.zip` };
 }
-export { generateBundle, normalizeAdminAccount, normalizeConfig };
+export { buildPreviewDocument, generateBundle, normalizeAdminAccount, normalizeConfig };
