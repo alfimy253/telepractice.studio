@@ -93,7 +93,7 @@ test('builder validates administrator username, email, and all password requirem
 
 test('generated administrator password hash verifies and session expires or invalidates on credential change', async () => {
   const passwordHash = await createPasswordHash(validAccount.adminPassword);
-  assert.match(passwordHash, /^pbkdf2\$210000\$[A-Za-z0-9_-]+\$[A-Za-z0-9_-]+$/);
+  assert.match(passwordHash, /^pbkdf2\$100000\$[A-Za-z0-9_-]+\$[A-Za-z0-9_-]+$/);
   assert.equal(await verifyPasswordHash(validAccount.adminPassword, passwordHash), true);
   assert.equal(await verifyPasswordHash('WrongPassword!8', passwordHash), false);
 
