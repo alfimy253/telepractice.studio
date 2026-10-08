@@ -362,10 +362,18 @@ const GALLERY_ORNAMENTS = ['✳', '⌂', '♡', '✦'];
 function previewConfig(input = {}) {
   const theme = String(input?.theme || '').startsWith('brivon-') ? input.theme : 'brivon-dark';
   const specialty = input?.specialty === 'dental' ? 'dental' : 'veterinary';
+  // The preview only renders a page's menu label and route, so the builder
+  // sends just those. Accept a page that is still missing its title or body
+  // instead of dropping every page from the preview menu.
+  const customPages = (Array.isArray(input?.customPages) ? input.customPages : []).map((page) => ({
+    ...page,
+    pageTitle: clean(page?.pageTitle, 120) || clean(page?.menuName, 80),
+    pageContent: clean(page?.pageContent, 6000) || clean(page?.menuName, 80)
+  }));
   // Typing in the builder produces transient invalid values (a half-typed
   // email, a custom page with no URL yet). Fall back step by step so the
   // preview keeps showing the practice details instead of resetting.
-  for (const attempt of [{ ...input, target: 'vercel' }, { ...input, target: 'vercel', customPages: [] }]) {
+  for (const attempt of [{ ...input, target: 'vercel', customPages }, { ...input, target: 'vercel', customPages: [] }]) {
     try { return normalizeConfig(attempt); } catch (_) { /* try the next fallback */ }
   }
   return normalizeConfig({ target: 'vercel', specialty, theme });

@@ -166,7 +166,9 @@ function brivonPreviewConfig() {
       gcashName: String(config.payments.gcashName || '').trim(), gcashNumber: String(config.payments.gcashNumber || '').trim(),
       mayaName: String(config.payments.mayaName || '').trim(), mayaNumber: String(config.payments.mayaNumber || '').trim()
     },
-    customPages: normalizeSavedPages(config.customPages)
+    // Only the menu label and route reach the preview, so page bodies never
+    // push the request past the endpoint's configuration limit.
+    customPages: normalizeSavedPages(config.customPages).map(({ menuName, url }) => ({ menuName, url }))
   };
 }
 function brivonPreviewStatus(message) {
