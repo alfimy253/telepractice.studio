@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { verifyPasswordHash } from '../public/_scaffold/templates/shared/lib/admin-security.js';
 import worker from '../src/index.js';
+import { requestGeneratedPackage } from '../public/download.js';
 
 const origin = 'https://builder.example';
 const adminInput = {
@@ -100,6 +101,86 @@ for (const secret of ['', 'test-only-secret']) {
     assert.equal((await generate(env, { token: invalid, cookie: `__Host-canopy_builder_csrf=${invalid}` })).status, 403);
   });
 }
+test('server-issued CSRF tokens return Vercel and Cloudflare ZIP downloads', async () => {
+  for (const secret of ['', 'fresh-signing-secret']) {
+    const env = { ASSETS: assets, CSRF_SECRET: secret };
+    for (const target of ['vercel', 'cloudflare']) {
+      const auth = await session(env);
+      const response = await generate(env, auth, { 'Sec-Fetch-Site': 'same-origin' }, target);
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.equal(response.headers.get('Content-Type'), 'application/zip');
+      assert.match(response.headers.get('Content-Disposition'), new RegExp(`${target}\\.zip`));
+    }
+  }
+});
+test('browser Generate client downloads both targets through the Worker CSRF routes', async () => {
+  for (const target of ['vercel', 'cloudflare']) {
+    const env = { ASSETS: assets };
+    let cookie = '';
+    const fetcher = async (path, options) => {
+      const headers = new Headers(options.headers);
+      headers.set('Origin', origin);
+      headers.set('Sec-Fetch-Site', 'same-origin');
+      if (cookie) headers.set('Cookie', cookie);
+      const response = await worker.fetch(new Request(new URL(path, origin), {
+        method: options.method, headers, body: options.body
+      }), env);
+      const setCookie = response.headers.get('Set-Cookie');
+      if (setCookie) cookie = setCookie.split(';')[0];
+      return response;
+    };
+    const response = await requestGeneratedPackage(target, {
+      ...adminInput, businessName: 'Browser Flow Practice', theme: 'air'
+    }, target === 'cloudflare' ? 'Cloudflare' : 'Vercel', fetcher);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('Content-Type'), 'application/zip');
+    assert.match(response.headers.get('Content-Disposition'), new RegExp(`${target}\\.zip`));
+    assert.deepEqual(Array.from(new Uint8Array(await response.arrayBuffer()).slice(0, 4)), [0x50, 0x4b, 0x03, 0x04]);
+  }
+});
+test('browser Generate flow retries one 403 with a fresh CSRF token', async () => {
+  const calls = [];
+  let tokenIndex = 0;
+  let generateIndex = 0;
+  const fetcher = async (url, options) => {
+    calls.push({ url, options });
+    if (url === '/api/csrf') {
+      tokenIndex += 1;
+      return new Response(JSON.stringify({ token: `csrf-${tokenIndex}` }), { status: 200 });
+    }
+    generateIndex += 1;
+    if (generateIndex === 1) return new Response('expired token', { status: 403 });
+    return new Response(Uint8Array.from([0x50, 0x4b, 0x03, 0x04]), { status: 200, headers: { 'Content-Type': 'application/zip' } });
+  };
+
+  const response = await requestGeneratedPackage('cloudflare', { theme: 'air' }, 'Cloudflare', fetcher);
+  assert.equal(response.status, 200);
+  const csrfCalls = calls.filter(({ url }) => url === '/api/csrf');
+  const generateCalls = calls.filter(({ url }) => url === '/api/generate');
+  assert.equal(csrfCalls.length, 2);
+  assert.equal(generateCalls.length, 2);
+  assert.deepEqual(generateCalls.map(({ options }) => options.headers['X-CSRF-Token']), ['csrf-1', 'csrf-2']);
+  for (const { options } of calls) {
+    assert.equal(options.credentials, 'same-origin');
+    assert.equal(options.cache, 'no-store');
+  }
+  for (const { options } of generateCalls) {
+    assert.deepEqual(JSON.parse(options.body), { theme: 'air', target: 'cloudflare' });
+  }
+});
+test('browser Generate flow surfaces a final CSRF refusal without looping', async () => {
+  let requests = 0;
+  const fetcher = async (url) => {
+    requests += 1;
+    if (url === '/api/csrf') return new Response(JSON.stringify({ token: `csrf-${requests}` }), { status: 200 });
+    return new Response('forbidden', { status: 403 });
+  };
+  await assert.rejects(
+    requestGeneratedPackage('vercel', {}, 'Vercel', fetcher),
+    /secure build session was refused twice.*\/api\/generate → 403/
+  );
+  assert.equal(requests, 4);
+});
 test('generated Vercel and Cloudflare packages include private admin login settings and no admin API key', async () => {
   for (const target of ['vercel', 'cloudflare']) {
     const env = { ASSETS: assets };
@@ -245,20 +326,29 @@ test('builder rejects oversized streamed JSON bodies without buffering them in f
   assert.match((await response.json()).error, /too large/i);
 });
 
-test('builder exposes Brivon in the layout section and guided modal and updates the preview', async () => {
-  const [html, app, styles] = await Promise.all([
+test('builder exposes the design-system controls and previews the selected generated homepage', async () => {
+  const [html, app, styles, download] = await Promise.all([
     readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
     readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
-    readFile(new URL('../public/styles.css', import.meta.url), 'utf8')
+    readFile(new URL('../public/styles.css', import.meta.url), 'utf8'),
+    readFile(new URL('../public/download.js', import.meta.url), 'utf8')
   ]);
   assert.match(html, /<select id="designSystemSelect">[\s\S]*Brivon · Dark[\s\S]*Brivon · Light/);
   assert.match(app, /id="wizardDesignSystem"[\s\S]*Brivon · Dark[\s\S]*Brivon · Light/);
   assert.match(app, /designSystemSelect'\)\.addEventListener\('change',[\s\S]*setDesignSystem/);
   assert.match(app, /wizardDesignSystem'\)\.addEventListener\('change',[\s\S]*setDesignSystem/);
-  assert.match(app, /screen\.classList\.add\(`theme-\$\{config\.theme\}`\)/);
-  assert.match(styles, /\.preview-screen\.theme-brivon-dark/);
-  assert.match(styles, /\.preview-screen\.theme-brivon-light/);
-  assert.match(styles, /theme-brivon-dark \.site-hero-preview/);
+  assert.match(html, /id="previewScreenLive"/);
+  assert.match(html, /<iframe class="site-preview-frame" id="livePreviewFrame"[^>]*sandbox="" scrolling="yes"/);
+  assert.match(html, /scroll inside to explore every section/i);
+  assert.match(app, /function livePreviewConfig\(\)/);
+  assert.match(app, /\/api\/preview\?config=/);
+  assert.match(app, /frame\.srcdoc = html/);
+  assert.match(app, /import \{ requestGeneratedPackage \} from '\.\/download\.js'/);
+  assert.match(html, /<script type="module" src="\/app\.js"><\/script>/);
+  assert.match(download, /if \(response\.status === 403\)/);
+  assert.match(download, /credentials: 'same-origin', cache: 'no-store'/);
+  assert.match(styles, /\.site-preview-screen/);
+  assert.match(styles, /\.site-preview-frame/);
 });
 
 test('Brivon light and dark generate a separate design-system homepage', async () => {
@@ -317,6 +407,64 @@ async function previewDocument(input) {
   assert.match(response.headers.get('Content-Type'), /^text\/html/);
   return response.text();
 }
+
+test('all nine theme previews render their complete matching homepage with inline styles', async () => {
+  const themes = ['canopy', 'clay', 'coastal', 'editorial', 'neat', 'launcher', 'air', 'brivon-dark', 'brivon-light'];
+  for (const theme of themes) {
+    const html = await previewDocument({
+      theme, businessName: 'Preview Practice', specialty: 'dental',
+      primaryColor: '#123456', accentColor: '#654321', paperColor: '#f0f0f0'
+    });
+    assert.match(html, new RegExp(`theme-${theme}`), `missing selected theme ${theme}`);
+    assert.match(html, /style="--primary:#123456;--accent:#654321;--paper:#f0f0f0"/);
+    assert.match(html, /id="home"/);
+    assert.match(html, /id="care"/);
+    assert.match(html, /id="galleryGrid"/);
+    assert.match(html, /id="postGrid"/);
+    assert.match(html, /id="paymentDetails"/);
+    assert.match(html, /class="site-footer"/);
+    assert.match(html, /<style>\n[\s\S]*<\/style>/);
+    assert.doesNotMatch(html, /<script\b/i);
+    assert.doesNotMatch(html, /src="\/images\//);
+    if (theme.startsWith('brivon-')) {
+      assert.match(html, new RegExp(`class="brivon-shell theme-${theme} dental-site"|class="brivon-shell theme-${theme}"`));
+      assert.match(html, /class="tier-grid"/);
+    } else {
+      assert.match(html, new RegExp(`<body class="theme-${theme} dental-site">`));
+      assert.match(html, /class="hero section-wrap"/);
+      assert.match(html, /class="benefit-strip"/);
+    }
+  }
+});
+
+test('Vercel and Cloudflare ZIP indexes use the same selected homepage as the preview', async () => {
+  for (const theme of ['air', 'brivon-light']) {
+    const preview = await previewDocument({ theme, businessName: 'Preview Practice' });
+    for (const target of ['vercel', 'cloudflare']) {
+      const env = { ASSETS: assets };
+      const auth = await session(env);
+      const response = await generate(env, auth, {}, target, { theme });
+      assert.equal(response.status, 200, await response.clone().text());
+      const files = zipEntries(new Uint8Array(await response.arrayBuffer()));
+      const index = files.get(target === 'cloudflare' ? 'public/index.html' : 'index.html');
+      assert.ok(index, `missing ${target} homepage`);
+      assert.match(index, new RegExp(`theme-${theme}`));
+      assert.match(index, /id="heroHeadline"/);
+      assert.match(preview, /id="heroHeadline"/);
+      if (theme.startsWith('brivon-')) {
+        assert.match(index, /class="brivon-shell theme-brivon-light"/);
+        assert.match(index, /class="tier-grid"/);
+        assert.match(files.get(target === 'cloudflare' ? 'public/brivon.css' : 'brivon.css'), /\.brivon-shell \.tier-grid/);
+        assert.match(preview, /class="tier-grid"/);
+      } else {
+        assert.match(index, /class="theme-air"/);
+        assert.match(index, /class="hero section-wrap"/);
+        assert.match(files.get(target === 'cloudflare' ? 'public/site.css' : 'site.css'), /body\.theme-air/);
+        assert.match(preview, /class="hero section-wrap"/);
+      }
+    }
+  }
+});
 
 test('builder live preview renders the real Brivon service-page layout', async () => {
   for (const theme of ['brivon-dark', 'brivon-light']) {
@@ -378,17 +526,18 @@ test('builder live preview rejects missing, invalid or oversized configurations'
   assert.equal((await call(`?config=${encodeURIComponent(JSON.stringify({ businessName: 'a'.repeat(17 * 1024) }))}`)).status, 413);
 });
 
-test('builder swaps the preview panel to the generated Brivon homepage', async () => {
+test('builder preview uses one scrollable iframe for the selected full homepage', async () => {
   const [html, app] = await Promise.all([
     readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
     readFile(new URL('../public/app.js', import.meta.url), 'utf8')
   ]);
-  assert.match(html, /id="previewScreenBrivon" hidden/);
-  assert.match(html, /<iframe class="brivon-preview-frame" id="brivonPreviewFrame"[^>]*sandbox=""/);
+  assert.match(html, /id="previewScreenLive"/);
+  assert.match(html, /<iframe class="site-preview-frame" id="livePreviewFrame"[^>]*sandbox="" scrolling="yes"/);
+  assert.doesNotMatch(html, /id="previewScreenBrivon"|id="brivonPreviewFrame"/);
   assert.match(app, /\/api\/preview\?config=/);
   assert.match(app, /frame\.srcdoc = html/);
-  assert.match(app, /syncPreviewSurface\(\);\n  saveConfig\(\);/);
-  assert.match(app, /BRIVON_PREVIEW_WIDTHS\[/);
+  assert.match(app, /LIVE_PREVIEW_WIDTHS\[device\]/);
+  assert.match(app, /frame\.style\.height = `\$\{Math\.ceil\(availableHeight \/ scale\)\}px`/);
 });
 
 test('Brivon continuity rules never restyle the Brivon homepage', async () => {

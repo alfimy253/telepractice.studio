@@ -86,9 +86,11 @@ Selecting Illustration shows the seven existing Illustration layout cards: Canop
 
 ### Builder preview
 
-`updatePreview()` removes every previous theme class and applies either `theme-brivon-dark` or `theme-brivon-light` to `#previewScreen`. Dedicated rules in `public/styles.css` then change the preview's background, navigation, typography, hero proportions, hero artwork treatment, buttons, service strip, contrast, and accent treatment. Dark uses a near-black background with an electric-lime accent; Light uses an off-white background with a dark olive accent. Switching back to Illustration removes the Brivon class and restores the selected Illustration preview rules.
+The preview uses one sandboxed iframe for every design system. `GET /api/preview?config=<json>` selects its source through `homeDesignFile(theme)`: Illustration uses `shared/public/index.html` + `shared/public/site.css`; Brivon Dark/Light use `shared/designs/brivon-index.html` + `shared/public/brivon.css`. ZIP generation uses the same homepage selector, so theme changes cannot preview one design while packaging another.
 
-The builder preview is intentionally a compact representation inside the existing preview frame. The downloaded Brivon package is not produced by merely applying those preview overrides.
+The preview inlines the selected stylesheet, removes scripts, and pre-renders the identity, theme class and color variables, services, menu (including partial custom pages), gallery, journal, contact/payment details, and feature visibility that the generated runtime otherwise fills. Sample SVGs are inlined so the iframe makes no local-asset requests. The page is laid out at 1440 CSS pixels on desktop or 390 on mobile and scaled to the panel while keeping the iframe at viewport height; the iframe scrolls internally to expose the full page. The ZIP intentionally retains linked CSS and scripts for a normal deployable runtime, so the preview is self-contained rather than byte-for-byte identical to the packaged `index.html`.
+
+Brivon Dark uses a near-black background and electric-lime accent; Brivon Light uses off-white and dark olive. Illustration previews now use the generated Illustration HTML/CSS as well, instead of the former compact mockup that only changed a few theme-specific colors.
 
 ### Generated Brivon package
 
@@ -102,9 +104,16 @@ When `theme` is `brivon-dark` or `brivon-light`, `src/generator.js` replaces the
 
 Brivon headings `h1` through `h5` default to `line-height: calc(1em + 5px)` to preserve at least five pixels of additional line-box space for wrapped titles; class-qualified display headings from the template (hero, section heads, closing CTA) keep the template's own rhythm. The generated owner appearance editor permits switching between Brivon Dark and Brivon Light on a Brivon package. It hides incompatible Illustration choices because changing from one HTML design-system family to another after generation would require replacing the static homepage structure. Illustration packages likewise keep Brivon choices unavailable in the owner editor.
 
+### Bug record: incomplete theme preview and ZIP generation checks
+
+- **Reported symptoms:** Brivon showed its real full homepage, while Illustration themes showed only a compact mockup; lower sections could not be explored in the preview. The downloaded `index.html` looked different because the preview and ZIP did not share a homepage source for Illustration. Vercel/Cloudflare generation was also suspected of failing at the CSRF step.
+- **Root cause:** the browser only called `/api/preview` for Brivon and retained a separate hand-built Illustration preview. The preview endpoint also defaulted non-Brivon input to Brivon Dark. Consequently, selecting an Illustration theme never rendered the actual generated page. The reported CSRF failure was **not reproducible** in local same-origin tests; Vercel and Cloudflare generation both returned ZIPs with newly issued tokens. The client did, however, stop on its first 403, so a defensive one-time fresh-token retry was added. A proxy/cookie race is only a possibility, not a verified production cause.
+- **Fix:** both preview and ZIP now call the same theme-to-homepage selector. All nine supported themes render their matching scaffold HTML/CSS in one sandboxed iframe, retain their desktop/mobile breakpoints, and explicitly allow scrolling through the full page. The preview is self-contained (inlined CSS/images, no scripts); ZIPs retain normal linked assets and runtime scripts. The Generate flow uses no-store, same-origin requests and a request-local token, retries once with a fresh token after a generate-route 403, then surfaces the actual failing route/status.
+- **QA coverage:** regression tests exercise all theme previews, generated homepage selection and theme classes for both Vercel and Cloudflare ZIPs, and the extracted browser Generate client against the real Worker CSRF/download routes for both targets. Client-level tests simulate a first-request 403 followed by a fresh-token success and verify a second 403 is surfaced without looping. A local Wrangler dev smoke also served the builder shell/assets and all nine previews and returned both ZIP targets through the client helper. Server tests cover optional HMAC signing, reverse-proxy origins, cookie/token mismatches, cross-site rejection, invalid credentials, and ZIP contents. This confirms local request-flow behavior, not a browser-rendered or production-host download.
+
 The implementation was adapted from the user-provided `axelmercer253/brivon` repository. That repository labels the template free in source comments and documents its bundled images as Pexels-licensed, but it does not contain a general code-license file. This implementation does not copy the repository's photo assets; the hero uses original CSS artwork and the gallery/journal use the generated site's existing content assets.
 
-**Status:** Code-derived documentation for the current repository state, reviewed 2026-10-09. This describes what the implementation does; it is not a deployment record or a claim that a live site/database has been tested. The repository has no separate implementation-plan Markdown file; the root `README.md` and the generated README text in `src/generator.js` were checked against the code.
+**Status:** Code-derived documentation for the current repository state, updated 2026-10-08. This describes what the implementation does; it is not a deployment record or a claim that a live site/database has been tested. The repository has no separate implementation-plan Markdown file; the root `README.md` and the generated README text in `src/generator.js` were checked against the code.
 
 ## 1. What this repository builds
 
@@ -114,6 +123,7 @@ Main implementation points:
 
 - `src/index.js` serves the builder assets, issues builder CSRF tokens, and handles `POST /api/generate`.
 - `src/generator.js` validates the setup, normalizes the site configuration, creates deployment secrets, reads the scaffold templates, and builds the ZIP.
+- `public/app.js` controls the builder and live preview; `public/download.js` implements the testable Generate-button CSRF and ZIP-fetch flow.
 - `public/_scaffold/templates/manifest.json` lists the files included in each generated target.
 - Shared site code lives under `public/_scaffold/templates/shared/`; runtime-specific code lives under `.../vercel/` and `.../cloudflare/`.
 
@@ -137,7 +147,7 @@ The raw password is used in memory to create a salted PBKDF2-SHA-256 hash (210,0
 
 ### Builder CSRF and request size
 
-The builder uses an HttpOnly, SameSite=Strict double-submit CSRF cookie and checks the request origin/fetch metadata. HMAC signing is optional for the builder deployment; it is not the same secret as a generated site's required `CSRF_SECRET`. There is no permissive CORS configuration. Builder JSON requests are capped at 256 KiB while being read, not only after buffering the full body.
+The builder uses an HttpOnly, SameSite=Strict double-submit CSRF cookie and checks the request origin/fetch metadata. Each Generate-button click requests a fresh token using same-origin credentials and no-store caching; the client retries once with a second fresh token if `/api/generate` returns 403, then reports the refusing endpoint and status. HMAC signing is optional for the builder deployment; it is not the same secret as a generated site's required `CSRF_SECRET`. There is no permissive CORS configuration. Builder JSON requests are capped at 256 KiB while being read, not only after buffering the full body.
 
 ## 3. Generated site owner access
 
@@ -211,6 +221,6 @@ A standalone `payment-reminder-worker.js` is included in both target packages. R
 
 ## 8. Verification status
 
-The repository test suite covers builder CSRF, package generation, admin credentials/session utilities, menu normalization, and payment-proof/reminder rules. The audited state passed 23 tests, `npm audit`, the root Wrangler dry run, generated-package syntax checks, and generated Cloudflare Wrangler dry run. Runtime login/session smoke checks passed for both generated targets, and a Postgres-compatible PGlite smoke test exercised the schema and reminder/proof SQL.
+The repository test suite covers builder CSRF, Vercel/Cloudflare ZIP generation, full-page previews for all nine themes, homepage/template parity, the browser Generate helper's successful and retry paths, admin credentials/session utilities, menu normalization, and payment-proof/reminder rules. The current suite passes 41 tests. `npm audit` reports zero vulnerabilities, `npm run check` passes the root builder's Wrangler dry run, and a local Wrangler dev smoke passed for the builder shell, all nine previews, and both generated ZIP targets. The earlier repository audit also recorded generated-package syntax checks, a generated Cloudflare Wrangler dry run, runtime login/session smoke checks for both generated targets, and a Postgres-compatible PGlite schema/reminder/proof SQL smoke test.
 
 No live Neon database, Vercel deployment, production Cloudflare deployment, or real hosted cron invocation has been tested. Those remain deployment checks, not verified behavior from this repository audit.
