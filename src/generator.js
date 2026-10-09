@@ -341,11 +341,42 @@ function generatedCustomPageHtml(config, page) {
 </html>
 `;
 }
+// Scaffold files ship with this deployment, so their text cannot change while an
+// isolate is alive. Each file is read from the ASSETS binding at most once per
+// isolate; repeated previews and downloads reuse the cached text.
+const scaffoldCache = new WeakMap();
+const MAX_SCAFFOLD_REDIRECTS = 3;
 async function readScaffold(env, origin, filename) {
-  const url = new URL(`/_scaffold/templates/${filename.split('/').map(encodeURIComponent).join('/')}`, origin);
-  const response = await env.ASSETS.fetch(new Request(url, { method: 'GET' }));
-  if (!response.ok) throw new Error(`Missing build scaffold file: ${filename}`);
-  return response.text();
+  const assets = env?.ASSETS;
+  if (!assets || typeof assets.fetch !== 'function') throw new Error('The ASSETS binding is not configured.');
+  let files = scaffoldCache.get(assets);
+  if (!files) { files = new Map(); scaffoldCache.set(assets, files); }
+  let pending = files.get(filename);
+  if (!pending) {
+    pending = fetchScaffold(assets, origin, filename);
+    files.set(filename, pending);
+    // A failed read is not kept, so the next request tries the asset again.
+    pending.catch(() => { if (files.get(filename) === pending) files.delete(filename); });
+  }
+  return pending;
+}
+async function fetchScaffold(assets, origin, filename) {
+  let url = new URL(`/_scaffold/templates/${filename.split('/').map(encodeURIComponent).join('/')}`, origin);
+  // Asset paths such as /…/index.html and /…/brivon-index.html can be answered
+  // with a 307 to their clean URL (html_handling). Follow it explicitly so a
+  // binding that does not follow redirects cannot turn into a missing file.
+  for (let hop = 0; hop <= MAX_SCAFFOLD_REDIRECTS; hop += 1) {
+    const response = await assets.fetch(new Request(url, { method: 'GET', redirect: 'manual' }));
+    const location = response.headers.get('Location');
+    if (response.status >= 300 && response.status < 400 && location) {
+      try { await response.body?.cancel(); } catch (_) { /* the redirect body is not needed */ }
+      url = new URL(location, url);
+      continue;
+    }
+    if (!response.ok) throw new Error(`Missing build scaffold file: ${filename}`);
+    return response.text();
+  }
+  throw new Error(`Missing build scaffold file: ${filename}`);
 }
 // --- Live builder preview -------------------------------------------------
 // Preview and package generation deliberately select the homepage from the
@@ -512,11 +543,12 @@ function previewPaymentsHtml(config) {
 // inline the few sample illustrations as data URIs to avoid broken images.
 async function inlinePreviewImages(html, env, origin) {
   const paths = [...new Set([...html.matchAll(/src="(\/images\/[^"]+\.svg)"/g)].map((match) => match[1]))].slice(0, MAX_PREVIEW_INLINE_IMAGES);
-  for (const path of paths) {
-    let image;
-    try { image = await readScaffold(env, origin, `shared/public${path}`); } catch (_) { continue; }
-    html = html.split(path).join(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(image)}`);
-  }
+  // The sample illustrations are read together; a missing one stays a plain link.
+  const images = await Promise.all(paths.map((path) => readScaffold(env, origin, `shared/public${path}`).catch(() => null)));
+  paths.forEach((path, index) => {
+    if (images[index] === null) return;
+    html = html.split(path).join(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(images[index])}`);
+  });
   return html;
 }
 async function buildPreviewDocument(input, env, origin) {
@@ -601,27 +633,31 @@ async function buildFiles(input, env, origin) {
   const publicPath = (relative) => target === 'vercel' ? relative.replace(/^public\//, '') : relative;
   files.set('.gitignore', `node_modules/\n${ENV_FILE_BY_TARGET[target]}\n`);
 
-  for (const relative of manifest.sharedPublic) {
-    let content = replaceTokens(await readScaffold(env, origin, `shared/${relative}`), config);
-    if (relative === 'public/index.html') {
-      const homepage = homeDesignFile(config.theme);
-      if (homepage !== `shared/${relative}`) content = replaceTokens(await readScaffold(env, origin, homepage), config);
-    }
-    files.set(publicPath(relative), content);
-  }
-  for (const relative of manifest.sharedDb) {
-    files.set(relative, await readScaffold(env, origin, `shared/${relative}`));
-  }
-  for (const relative of manifest.sharedRuntime || []) {
-    files.set(relative, await readScaffold(env, origin, `shared/${relative}`));
-  }
+  // Every scaffold file the package needs is requested together. Reads are cached
+  // per isolate, so the wait is about one asset round trip, not one per file.
+  const homepage = homeDesignFile(config.theme);
+  const readAll = (paths) => Promise.all(paths.map((path) => readScaffold(env, origin, path)));
+  const [publicSources, dbSources, runtimeSources, targetSources, homepageSource] = await Promise.all([
+    readAll(manifest.sharedPublic.map((relative) => `shared/${relative}`)),
+    readAll(manifest.sharedDb.map((relative) => `shared/${relative}`)),
+    readAll((manifest.sharedRuntime || []).map((relative) => `shared/${relative}`)),
+    readAll(manifest[target].map((relative) => `${target}/${relative}`)),
+    homepage === 'shared/public/index.html' ? null : readScaffold(env, origin, homepage)
+  ]);
+
+  manifest.sharedPublic.forEach((relative, index) => {
+    const source = relative === 'public/index.html' && homepageSource !== null ? homepageSource : publicSources[index];
+    files.set(publicPath(relative), replaceTokens(source, config));
+  });
+  manifest.sharedDb.forEach((relative, index) => files.set(relative, dbSources[index]));
+  (manifest.sharedRuntime || []).forEach((relative, index) => files.set(relative, runtimeSources[index]));
   files.set('db/seed.sql', createSeedSql(config));
 
-  for (const relative of manifest[target]) {
-    let content = replaceTokens(await readScaffold(env, origin, `${target}/${relative}`), config);
+  manifest[target].forEach((relative, index) => {
+    let content = replaceTokens(targetSources[index], config);
     if (relative === ENV_FILE_BY_TARGET[target]) content = replaceSecretTokens(content, secrets);
     files.set(relative, content);
-  }
+  });
   for (const page of config.customPages) {
     const pageFile = `${page.slug}.html`;
     files.set(target === 'vercel' ? pageFile : `public/${pageFile}`, generatedCustomPageHtml(config, page));

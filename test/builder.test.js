@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { verifyPasswordHash } from '../public/_scaffold/templates/shared/lib/admin-security.js';
 import worker from '../src/index.js';
 import { requestGeneratedPackage } from '../public/download.js';
+import { generateBundle } from '../src/generator.js';
 
 const origin = 'https://builder.example';
 const adminInput = {
@@ -17,6 +18,52 @@ const assets = {
     return new Response(await readFile(new URL(`../public${path}`, import.meta.url)));
   }
 };
+// The static-assets binding redirects a page path such as /…/index.html to its
+// clean URL with a 307 (html_handling, as seen in local wrangler). Ordinary fetches
+// follow it silently, so this fake returns the 307 for manual-redirect requests
+// and counts every asset request.
+function platformAssets({ missing = new Set() } = {}) {
+  const served = { count: 0, paths: [] };
+  return {
+    served,
+    async fetch(request) {
+      served.count += 1;
+      const { pathname } = new URL(request.url);
+      served.paths.push(pathname);
+      if (missing.has(pathname)) return new Response('Not found', { status: 404 });
+      if (request.redirect === 'manual') {
+        if (pathname.endsWith('/index.html')) return new Response(null, { status: 307, headers: { Location: pathname.slice(0, -'index.html'.length) } });
+        if (pathname.endsWith('.html')) return new Response(null, { status: 307, headers: { Location: pathname.slice(0, -'.html'.length) } });
+      }
+      const candidates = pathname.endsWith('/') ? [`${pathname}index.html`] : [pathname, `${pathname}.html`];
+      for (const candidate of candidates) {
+        const file = await readFile(new URL(`../public${candidate}`, import.meta.url)).catch(() => null);
+        if (file) return new Response(file);
+      }
+      return new Response('Not found', { status: 404 });
+    }
+  };
+}
+// Production Workers reject a single PBKDF2 call above 100,000 iterations with a
+// NotSupportedError (reported by several projects; not in Cloudflare's docs), while
+// local runtimes accept any count. Wrap deriveBits so the tests fail the same way.
+async function withWorkersPbkdf2Cap(run) {
+  const subtle = globalThis.crypto.subtle;
+  const hadOwn = Object.prototype.hasOwnProperty.call(subtle, 'deriveBits');
+  const original = subtle.deriveBits;
+  subtle.deriveBits = function deriveBits(algorithm, key, length) {
+    if (algorithm?.name === 'PBKDF2' && algorithm.iterations > 100000) {
+      return Promise.reject(new DOMException(`Pbkdf2 failed: iteration counts above 100000 are not supported (requested ${algorithm.iterations}).`, 'NotSupportedError'));
+    }
+    return original.call(this, algorithm, key, length);
+  };
+  try {
+    return await run();
+  } finally {
+    if (hadOwn) subtle.deriveBits = original;
+    else delete subtle.deriveBits;
+  }
+}
 async function session(env = {}, base = origin) {
   const response = await worker.fetch(new Request(`${base}/api/csrf`), env);
   assert.equal(response.status, 200);
@@ -587,4 +634,73 @@ test('builder live preview accepts menu-only custom pages and stays within its l
   // And the builder really does trim page bodies out of the preview request.
   const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.match(app, /customPages: normalizeSavedPages\(config\.customPages\)\.map\(\(\{ menuName, url \}\) => \(\{ menuName, url \}\)\)/);
+});
+
+for (const target of ['vercel', 'cloudflare']) {
+  test(`${target} download succeeds under the Workers PBKDF2 ceiling and stores a hash it can verify`, async () => {
+    const env = { ASSETS: platformAssets() };
+    const auth = await session(env);
+    await withWorkersPbkdf2Cap(async () => {
+      const response = await generate(env, auth, {}, target);
+      assert.equal(response.status, 200, await response.clone().text());
+      const files = zipEntries(new Uint8Array(await response.arrayBuffer()));
+      const variables = files.get(target === 'cloudflare' ? '.dev.vars' : '.env');
+      const passwordHash = variables.match(/^ADMIN_PASSWORD_HASH="?([^\r\n"]+)"?$/m)?.[1];
+      assert.match(passwordHash, /^pbkdf2\$100000\$/);
+      assert.equal(await verifyPasswordHash(adminInput.adminPassword, passwordHash), true);
+    });
+  });
+}
+
+test('generated Cloudflare runtime and shared admin hashing stay at the Workers PBKDF2 ceiling', async () => {
+  const [runtime, shared] = await Promise.all([
+    readFile(new URL('../public/_scaffold/templates/cloudflare/src/index.js', import.meta.url), 'utf8'),
+    readFile(new URL('../public/_scaffold/templates/shared/lib/admin-security.js', import.meta.url), 'utf8')
+  ]);
+  assert.equal(Number(runtime.match(/^const PASSWORD_ITERATIONS = (\d+);$/m)?.[1]), 100000);
+  assert.equal(Number(shared.match(/^const ADMIN_PASSWORD_ITERATIONS = (\d+);$/m)?.[1]), 100000);
+});
+
+test('scaffold reads follow asset redirects, are reused per isolate, and failed reads are retried', async () => {
+  const missing = new Set(['/_scaffold/templates/shared/public/index.html']);
+  const assetsFake = platformAssets({ missing });
+  const env = { ASSETS: assetsFake };
+  const input = { target: 'cloudflare', businessName: 'Cache Test Practice', ...adminInput };
+  await assert.rejects(generateBundle(input, env, origin), /Missing build scaffold file: shared\/public\/index\.html/);
+  missing.clear();
+  const { buffer } = await generateBundle(input, env, origin);
+  const files = zipEntries(buffer);
+  assert.match(files.get('public/index.html'), /<html/i);
+  assert.ok(assetsFake.served.paths.includes('/_scaffold/templates/shared/public/'), 'the 307 to the clean URL should be followed');
+  const reads = assetsFake.served.count;
+  await generateBundle(input, env, origin);
+  assert.equal(assetsFake.served.count, reads, 'a second package should reuse the cached scaffold files');
+});
+
+test('live preview renders through platform redirects for the default and Brivon homepages', async () => {
+  for (const theme of ['canopy', 'brivon-light']) {
+    const config = encodeURIComponent(JSON.stringify({ theme, businessName: 'Redirect Test Practice', specialty: 'veterinary' }));
+    const response = await worker.fetch(new Request(`${origin}/api/preview?config=${config}`), { ASSETS: platformAssets() });
+    assert.equal(response.status, 200, await response.clone().text());
+    const html = await response.text();
+    assert.match(html, /<style>/);
+    assert.match(html, /Redirect Test Practice/);
+  }
+});
+
+test('live preview cancels superseded renders, reports only slow updates, and skips renders for target switches', async () => {
+  const [app, styles] = await Promise.all([
+    readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../public/styles.css', import.meta.url), 'utf8')
+  ]);
+  for (const fragment of [
+    'livePreviewRequest?.abort();',
+    'signal: request.signal',
+    'const LIVE_PREVIEW_PENDING_MS = 400;',
+    "livePreviewStatus('Updating preview…', 'updating');",
+    'if (requestId !== livePreviewRequestId) return;\n    frame.srcdoc = html;',
+    'function saveConfig({ preview = true } = {})',
+    'saveConfig({ preview: false });'
+  ]) assert.ok(app.includes(fragment), `live preview is missing: ${fragment}`);
+  assert.match(styles, /\.site-preview-status\[data-state="updating"\]/);
 });

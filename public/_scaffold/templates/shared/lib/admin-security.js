@@ -1,4 +1,9 @@
-const ADMIN_PASSWORD_ITERATIONS = 210000;
+// Cloudflare Workers refuse any single PBKDF2 call above 100,000 iterations in
+// production (NotSupportedError). Several projects report this; Cloudflare's docs
+// do not state it. Local runtimes accept more, so local tests cannot show it.
+// Keep new hashes at or below that ceiling. verifyPasswordHash reads the count
+// stored in each hash, so hashes made with another count still verify.
+const ADMIN_PASSWORD_ITERATIONS = 100000;
 const ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

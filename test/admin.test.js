@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { adminDashboardPath, isAdminDashboardPath } from '../public/_scaffold/templates/shared/lib/admin-url.js';
 import {
+  ADMIN_PASSWORD_ITERATIONS,
   ADMIN_SESSION_TTL_SECONDS,
   createAdminSession,
   createPasswordHash,
@@ -93,7 +94,10 @@ test('builder validates administrator username, email, and all password requirem
 
 test('generated administrator password hash verifies and session expires or invalidates on credential change', async () => {
   const passwordHash = await createPasswordHash(validAccount.adminPassword);
-  assert.match(passwordHash, /^pbkdf2\$210000\$[A-Za-z0-9_-]+\$[A-Za-z0-9_-]+$/);
+  // Cloudflare Workers refuse PBKDF2 above 100,000 iterations in production.
+  assert.equal(ADMIN_PASSWORD_ITERATIONS, 100000);
+  assert.match(passwordHash, /^pbkdf2\$\d+\$[A-Za-z0-9_-]+\$[A-Za-z0-9_-]+$/);
+  assert.equal(passwordHash.split('$')[1], String(ADMIN_PASSWORD_ITERATIONS));
   assert.equal(await verifyPasswordHash(validAccount.adminPassword, passwordHash), true);
   assert.equal(await verifyPasswordHash('WrongPassword!8', passwordHash), false);
 

@@ -56,8 +56,13 @@ const MAX_CUSTOM_PAGES = 8;
 // Every theme previews the selected generated homepage in an isolated frame.
 const LIVE_PREVIEW_WIDTHS = { desktop: 1440, mobile: 390 };
 const LIVE_PREVIEW_DEBOUNCE_MS = 280;
+// Show a progress note only when a preview is still rendering after this long,
+// so quick updates do not flicker.
+const LIVE_PREVIEW_PENDING_MS = 400;
 let livePreviewTimer = 0;
 let livePreviewRequestId = 0;
+let livePreviewRequest = null;
+let livePreviewPendingTimer = 0;
 const ADMIN_PASSWORD_POLICY = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).{12,128}$/;
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -93,7 +98,7 @@ function loadConfig() {
     };
   } catch (_) { return structuredClone(DEFAULT_CONFIG); }
 }
-function saveConfig() {
+function saveConfig({ preview = true } = {}) {
   // Persist everything except the database connection string, which can
   // carry a real password and should not linger in localStorage.
   const { databaseUrl: _omit, ...persisted } = config;
@@ -101,7 +106,8 @@ function saveConfig() {
   const indicator = document.querySelector('.autosave');
   if (indicator) indicator.innerHTML = '<span class="status-dot"></span> All changes saved';
   // Contact, payment and design settings all refresh the generated-page preview.
-  scheduleLivePreview();
+  // The download target is not part of the preview, so switching it skips the render.
+  if (preview) scheduleLivePreview();
 }
 function slugify(value) {
   return String(value || '').normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 55) || 'my-practice';
@@ -159,20 +165,31 @@ function livePreviewConfig() {
     customPages: normalizeSavedPages(config.customPages).map(({ menuName, url }) => ({ menuName, url }))
   };
 }
-function livePreviewStatus(message) {
+// The default state is an error; 'updating' is a neutral progress note.
+function livePreviewStatus(message, state = 'error') {
   const status = $('livePreviewStatus');
   if (!status) return;
   status.hidden = !message;
-  if (message) status.textContent = message;
+  status.dataset.state = state;
+  status.textContent = message || '';
 }
 async function renderLivePreview() {
   const frame = $('livePreviewFrame');
   if (!frame) return;
   const requestId = (livePreviewRequestId += 1);
+  // A newer edit makes a render still in flight obsolete. Cancel it so the builder
+  // stops work nobody will see and the newest preview is not queued behind it.
+  livePreviewRequest?.abort();
+  const request = new AbortController();
+  livePreviewRequest = request;
+  window.clearTimeout(livePreviewPendingTimer);
+  livePreviewPendingTimer = window.setTimeout(() => {
+    if (requestId === livePreviewRequestId) livePreviewStatus('Updating preview…', 'updating');
+  }, LIVE_PREVIEW_PENDING_MS);
   try {
     const query = encodeURIComponent(JSON.stringify(livePreviewConfig()));
     const response = await fetch(`/api/preview?config=${query}`, {
-      credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'text/html' }
+      credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'text/html' }, signal: request.signal
     });
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
@@ -184,8 +201,12 @@ async function renderLivePreview() {
     livePreviewStatus('');
     layoutLivePreview();
   } catch (error) {
+    // Superseded renders, including aborted ones, end here without touching the frame.
     if (requestId !== livePreviewRequestId) return;
     livePreviewStatus(`Website preview unavailable — ${error.message || 'the builder could not render it.'}`);
+  } finally {
+    if (requestId === livePreviewRequestId) window.clearTimeout(livePreviewPendingTimer);
+    if (livePreviewRequest === request) livePreviewRequest = null;
   }
 }
 function scheduleLivePreview() {
@@ -297,7 +318,7 @@ function setDeploymentTarget(target) {
   if (!['vercel', 'cloudflare'].includes(target)) return;
   config.deploymentTarget = target;
   syncDownloadControls();
-  saveConfig();
+  saveConfig({ preview: false });
 }
 function toast(title, message, isError = false) {
   const region = $('toastRegion');

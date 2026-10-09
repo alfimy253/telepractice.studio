@@ -143,7 +143,7 @@ Before building a ZIP, the builder enforces these rules:
 - Email: valid email format, up to 254 characters.
 - Password: 12–128 characters with at least one lowercase letter, uppercase letter, number, and symbol.
 
-The raw password is used in memory to create a salted PBKDF2-SHA-256 hash (210,000 iterations). Generated packages put the hash—not the raw password—in `.env` (Vercel) or `.dev.vars` (Cloudflare). They also receive a fresh `CSRF_SECRET`; Vercel packages receive a separate `CRON_SECRET`. These values go into ignored environment files and are not written into public site configuration or `db/seed.sql`.
+The raw password is used in memory to create a salted PBKDF2-SHA-256 hash (100,000 iterations, the ceiling for one PBKDF2 call on Cloudflare Workers in production; the hash stores its own count, so existing hashes still verify). Generated packages put the hash—not the raw password—in `.env` (Vercel) or `.dev.vars` (Cloudflare). They also receive a fresh `CSRF_SECRET`; Vercel packages receive a separate `CRON_SECRET`. These values go into ignored environment files and are not written into public site configuration or `db/seed.sql`.
 
 ### Builder CSRF and request size
 

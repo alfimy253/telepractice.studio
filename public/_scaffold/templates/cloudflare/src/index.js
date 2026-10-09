@@ -10,7 +10,9 @@ const DEFAULT_CONFIG = __SITE_CONFIG_JSON__;
 const CSRF_COOKIE = 'practice_csrf';
 const CLIENT_SESSION_COOKIE = 'canopy_client';
 const CLIENT_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
-const PASSWORD_ITERATIONS = 210000;
+// Workers refuse PBKDF2 above 100,000 iterations in production (see
+// shared/lib/admin-security.js). Stored hashes keep their own count.
+const PASSWORD_ITERATIONS = 100000;
 const SITE_TIME_ZONE = DEFAULT_CONFIG.timeZone || 'Asia/Manila';
 const encoder = new TextEncoder();
 const MAX_JSON_BYTES = 256 * 1024;

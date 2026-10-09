@@ -40,6 +40,7 @@ const csrfSecret = () => process.env.CSRF_SECRET || (process.env.NODE_ENV === 'p
 const csrfCookie = 'practice_csrf';
 const clientSessionCookie = 'canopy_client';
 const clientSessionTtlSeconds = 30 * 24 * 60 * 60;
+// Node's WebCrypto has no 100,000-iteration ceiling; Cloudflare Workers do.
 const passwordIterations = 210000;
 const siteTimeZone = DEFAULT_CONFIG.timeZone || 'Asia/Manila';
 const b64url = (value) => Buffer.from(value).toString('base64url');
