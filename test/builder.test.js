@@ -266,11 +266,14 @@ test('generated Vercel and Cloudflare packages include private admin login setti
       assert.match(files.get('wrangler.jsonc'), /"run_worker_first": true/);
       assert.match(files.get('wrangler.jsonc'), /"crons": \["\* \* \* \* \*"\]/);
       assert.match(files.get('src/index.js'), /async scheduled\(_controller, env, ctx\)/);
+      assert.match(files.get('README.md'), /Cloudflare Workers cron runs the reminder checks every minute/);
     } else {
       assert.match(files.get('package.json'), /"node": ">=20\.6"/);
       assert.match(files.get('vercel.json'), /:adminSegment\/dashboard/);
       assert.match(files.get('vercel.json'), /"source": "\/admin\.html", "destination": "\/"/);
-      assert.match(files.get('vercel.json'), /payment-sweeps.*\* \* \* \* \*/);
+      assert.match(files.get('vercel.json'), /payment-sweeps.*0 0 \* \* \*/);
+      assert.match(files.get('README.md'), /Vercel cron runs once daily at 00:00 UTC so this package can deploy on Hobby/);
+      assert.match(files.get('README.md'), /reminder checks may arrive almost a day after they become due/);
       assert.match(files.get('api/index.js'), /CRON_SECRET/);
       assert.doesNotMatch(files.get('api/index.js'), /api\/admin\/entry/);
     }
