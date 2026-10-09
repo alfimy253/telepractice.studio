@@ -261,7 +261,7 @@ No live Neon database, Vercel deployment, production Cloudflare deployment, or r
 
 ## QA record — page editor, Brivon heading spacing, stress test (2026-10-09)
 
-QA'd on branch `arena/ec85247e-telepractice-studio` for the page-editor / heading-spacing / stress-test work:
+QA'd on branch `arena/ec85247e-telepractice-studio`, commit `83ab2e4` ("Fix Generate download guard, add page editor, Brivon h1-h8 spacing, 40-user stress test"), for the page-editor / heading-spacing / stress-test work:
 
 - `npm test`: **68/68 pass** — including the new page-edits, page-editor bridge, Brivon h1–h8, Generate-download regression and 40-user stress tests.
 - `npx wrangler deploy --dry-run`: passes with the new `PAGE_EDITOR` KV binding.
