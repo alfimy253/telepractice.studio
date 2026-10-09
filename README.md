@@ -1,6 +1,6 @@
 # Canopy Studio — Cloudflare admin builder
 
-This is a deployable Cloudflare Workers version of the Canopy Studio website builder. It serves the HTML/CSS/JavaScript admin interface and packages a selected Vercel or Cloudflare practice-site project into a ZIP. The builder needs no database for ZIP generation; when configured with Neon, it uses a small table to persist page-editor edits. Generated practice-site packages also include a Neon serverless connection helper and keep their database URL in deployment secrets.
+This is a deployable Cloudflare Workers version of the Canopy Studio website builder.........  It serves the HTML/CSS/JavaScript admin interface and packages a selected Vercel or Cloudflare practice-site project into a ZIP. The builder needs no database for ZIP generation; when configured with Neon, it uses a small table to persist page-editor edits. Generated practice-site packages also include a Neon serverless connection helper and keep their database URL in deployment secrets.
 
 ## Deploy the builder to Cloudflare
 
