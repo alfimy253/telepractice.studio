@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f4f5f0">
   <title>Canopy Studio — Practice website builder</title>
   <link rel="stylesheet" href="/styles.css">
-  <script src="/app.js" defer></script>
+  <script type="module" src="/app.js"></script>
 </head>
 <body>
   <svg class="svg-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
@@ -221,27 +221,14 @@
             <div class="preview-heading"><div><span class="eyebrow preview-eyebrow"><span class="live-pulse"></span> WEBSITE PREVIEW</span><h2>Front door, looking good.</h2></div><div class="device-switch" role="group" aria-label="Preview size"><button class="device-button active" data-device="desktop" aria-label="Desktop preview"><span class="desktop-glyph"></span></button><button class="device-button" data-device="mobile" aria-label="Mobile preview"><span class="mobile-glyph"></span></button></div></div>
             <div class="browser-window" id="browserWindow">
               <div class="browser-top"><div class="browser-dots"><i></i><i></i><i></i></div><div class="browser-address"><span class="address-lock">⌑</span><span id="previewUrl">harborlight-veterinary-care.yourpractice.site</span></div><span class="browser-more">•••</span></div>
-              <div class="preview-screen" id="previewScreen">
-                <div class="site-nav-preview">
-                  <div class="preview-brand"><span class="preview-logo"><svg><use href="#i-paw"/></svg></span><span><strong id="previewBrandName">Harborlight Veterinary Care</strong><small id="previewBrandLocation">QUEZON CITY, PH</small></span></div>
-                  <div class="preview-nav-links"><span>Our care</span><span>About</span><span>Journal</span></div>
-                  <button class="preview-book-button">Book a visit <svg><use href="#i-arrow"/></svg></button>
+              <div class="preview-screen site-preview-screen" id="previewScreenLive">
+                <div class="site-preview-viewport" id="livePreviewViewport">
+                  <iframe class="site-preview-frame" id="livePreviewFrame" title="Generated homepage preview" sandbox="" scrolling="yes" tabindex="0" referrerpolicy="no-referrer"></iframe>
                 </div>
-                <div class="site-hero-preview">
-                  <div class="hero-copy-preview"><div class="hero-eyebrow-preview"><span></span><span id="previewEyebrow">A LITTLE MORE CARE, EVERY DAY</span></div><h3 id="previewHeadline">Good care for<br><em>good companions.</em></h3><p id="previewSubhead">Thoughtful veterinary care, built around the lives you share.</p><button class="hero-cta-preview">Meet your care team <svg><use href="#i-arrow"/></svg></button><div class="social-proof"><span class="avatar-stack"><i>J</i><i>M</i><i>A</i></span><span>Kind words from <strong>500+ families</strong></span></div></div>
-                  <div class="hero-art-preview" aria-hidden="true"><div class="art-sun"></div><div class="art-blob"></div><div class="art-leaf art-leaf-one"></div><div class="art-leaf art-leaf-two"></div><div class="art-pet"><div class="pet-ear pet-ear-left"></div><div class="pet-ear pet-ear-right"></div><div class="pet-face"><i class="pet-eye pet-eye-left"></i><i class="pet-eye pet-eye-right"></i><i class="pet-nose"></i><i class="pet-mouth"></i></div></div><div class="art-caption"><span><svg><use href="#i-paw"/></svg></span><div><strong>Care that feels personal</strong><small>Every paw, every stage</small></div></div><div class="art-sparkle sparkle-one">✳</div><div class="art-sparkle sparkle-two">✦</div></div>
-                </div>
-                <div class="preview-services"><div><span class="service-index">01</span><strong id="serviceOne">Wellness & prevention</strong><small>Little check-ins, lifelong health.</small></div><div><span class="service-index">02</span><strong id="serviceTwo">Gentle diagnostics</strong><small>Clear answers and thoughtful care.</small></div><div><span class="service-index">03</span><strong id="serviceThree">Everyday support</strong><small>Here when you need a hand.</small></div></div>
-                <div class="preview-bottom-bar"><span><span class="bottom-dot"></span> Taking new clients</span><span>Mon–Sat · 9:00 am – 4:30 pm</span><span>Explore services ↗</span></div>
-              </div>
-              <div class="preview-screen brivon-preview-screen" id="previewScreenBrivon" hidden>
-                <div class="brivon-preview-viewport" id="brivonPreviewViewport">
-                  <iframe class="brivon-preview-frame" id="brivonPreviewFrame" title="Brivon homepage preview" sandbox="" referrerpolicy="no-referrer"></iframe>
-                </div>
-                <p class="brivon-preview-status" id="brivonPreviewStatus" hidden></p>
+                <p class="site-preview-status" id="livePreviewStatus" hidden></p>
               </div>
             </div>
-            <div class="preview-caption"><span class="caption-check"><svg><use href="#i-check"/></svg></span><span>Edits update this preview instantly.</span><button id="resetPreview">Reset sample copy</button></div>
+            <div class="preview-caption"><span class="caption-check"><svg><use href="#i-check"/></svg></span><span>Live generated homepage · scroll inside to explore every section.</span><button id="resetPreview">Reset sample copy</button></div>
 
             <article class="build-summary-card">
               <div class="build-summary-top"><div class="build-summary-icon"><svg><use href="#i-spark"/></svg></div><span class="build-summary-label">BUILD SUMMARY</span><span class="build-status"><i></i> SETUP READY</span></div>

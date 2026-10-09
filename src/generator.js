@@ -348,19 +348,24 @@ async function readScaffold(env, origin, filename) {
   return response.text();
 }
 // --- Live builder preview -------------------------------------------------
-// The builder's preview panel shows the *real* generated Brivon homepage
-// (shared/designs/brivon-index.html + public/brivon.css) instead of a
-// hand-drawn imitation, so what the owner sees is the layout they download.
-// The document is assembled here — CSS inlined, scripts removed, the
-// site.js-rendered regions (menu, gallery, journal, payments) pre-rendered —
-// so the browser can drop it straight into a sandboxed iframe with no
-// subresource requests.
-const PREVIEW_DESIGN_FILE = 'shared/designs/brivon-index.html';
-const PREVIEW_STYLE_FILE = 'shared/public/brivon.css';
+// Preview and package generation deliberately select the homepage from the
+// same scaffold path. The preview inlines that page's stylesheet and
+// pre-renders the regions site.js normally fills, producing a self-contained
+// full homepage for every supported design system.
+function homeDesignFile(theme) {
+  return String(theme || '').startsWith('brivon-')
+    ? 'shared/designs/brivon-index.html'
+    : 'shared/public/index.html';
+}
+function homeStylesheetFile(theme) {
+  return String(theme || '').startsWith('brivon-')
+    ? 'shared/public/brivon.css'
+    : 'shared/public/site.css';
+}
 const MAX_PREVIEW_INLINE_IMAGES = 6;
 const GALLERY_ORNAMENTS = ['✳', '⌂', '♡', '✦'];
 function previewConfig(input = {}) {
-  const theme = String(input?.theme || '').startsWith('brivon-') ? input.theme : 'brivon-dark';
+  const theme = Object.hasOwn(THEME_DEFAULTS, input?.theme) ? input.theme : 'canopy';
   const specialty = input?.specialty === 'dental' ? 'dental' : 'veterinary';
   // The preview only renders a page's menu label and route, so the builder
   // sends just those. Accept a page that is still missing its title or body
@@ -389,6 +394,29 @@ function findOpeningTag(html, elementId) {
   if (start < 0 || end < 0 || !/^<[a-zA-Z]/.test(html.slice(start, end + 1))) return null;
   return { start, end, tag: html.slice(start, end + 1) };
 }
+function findOpeningTagByName(html, tagName) {
+  const marker = `<${tagName.toLowerCase()}`;
+  const start = html.toLowerCase().indexOf(marker);
+  if (start < 0) return null;
+  const end = html.indexOf('>', start);
+  if (end < 0) return null;
+  return { start, end, tag: html.slice(start, end + 1) };
+}
+function replaceOpeningTag(html, found, tag) {
+  return `${html.slice(0, found.start)}${tag}${html.slice(found.end + 1)}`;
+}
+function setOpeningTagClass(html, found, className, enabled) {
+  if (!found) return html;
+  const classAttribute = found.tag.match(/class="([^"]*)"/);
+  const classes = (classAttribute?.[1] || '').split(' ').filter(Boolean);
+  const has = classes.includes(className);
+  if (enabled === has) return html;
+  const next = enabled ? [...classes, className] : classes.filter((name) => name !== className);
+  let tag = found.tag.replace(/class="[^"]*"/, '').replace(/ +>/, '>');
+  const attribute = next.length ? ` class="${next.join(' ')}"` : '';
+  tag = tag.replace(/>$/, `${attribute}>`);
+  return replaceOpeningTag(html, found, tag);
+}
 // Replaces the inner HTML of the element with that id, tracking nested tags of
 // the same name so nested wrappers (e.g. #footerPayments) stay intact.
 function replaceElementContent(html, elementId, content) {
@@ -408,6 +436,28 @@ function replaceElementContent(html, elementId, content) {
 }
 function setElementText(html, elementId, text) {
   return replaceElementContent(html, elementId, htmlEscape(String(text ?? '')));
+}
+function setElementAttribute(html, elementId, name, value) {
+  const found = findOpeningTag(html, elementId);
+  if (!found) return html;
+  const attribute = `${name}="${htmlEscape(String(value ?? ''))}"`;
+  const pattern = new RegExp(`${name}="[^"]*"`);
+  const tag = pattern.test(found.tag)
+    ? found.tag.replace(pattern, attribute)
+    : found.tag.replace(/>$/, ` ${attribute}>`);
+  return replaceOpeningTag(html, found, tag);
+}
+function setPreviewRootVariables(html, config) {
+  const found = findOpeningTagByName(html, 'html');
+  if (!found) return html;
+  const declarations = `--primary:${config.primaryColor};--accent:${config.accentColor};--paper:${config.paperColor}`;
+  const existing = found.tag.match(/style="([^"]*)"/);
+  const style = existing ? `${existing[1]};${declarations}` : declarations;
+  const pattern = /style="[^"]*"/;
+  const tag = pattern.test(found.tag)
+    ? found.tag.replace(pattern, `style="${style}"`)
+    : found.tag.replace(/>$/, ` style="${style}">`);
+  return replaceOpeningTag(html, found, tag);
 }
 function setElementClass(html, elementId, className, enabled) {
   const found = findOpeningTag(html, elementId);
@@ -472,37 +522,72 @@ async function inlinePreviewImages(html, env, origin) {
 async function buildPreviewDocument(input, env, origin) {
   const config = previewConfig(input);
   const [design, css] = await Promise.all([
-    readScaffold(env, origin, PREVIEW_DESIGN_FILE),
-    readScaffold(env, origin, PREVIEW_STYLE_FILE)
+    readScaffold(env, origin, homeDesignFile(config.theme)),
+    readScaffold(env, origin, homeStylesheetFile(config.theme))
   ]);
-  let html = replaceTokens(design, config);
+  const brivon = String(config.theme).startsWith('brivon-');
+  const stylesheetPath = brivon ? '/brivon\\.css' : '/site\\.css';
+  const stylesheetPattern = new RegExp(`<link rel="stylesheet" href="${stylesheetPath}">`);
+  let html = replaceTokens(design, config)
+    .replace(stylesheetPattern, () => `<style>\n${css}\n</style>`)
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '');
+
+  html = setPreviewRootVariables(html, config);
+  html = setOpeningTagClass(html, findOpeningTagByName(html, 'body'), `theme-${config.theme}`, true);
+  html = setOpeningTagClass(html, findOpeningTagByName(html, 'body'), 'font-sans', config.fontStyle === 'sans');
+  html = setOpeningTagClass(html, findOpeningTagByName(html, 'body'), 'dental-site', config.specialty === 'dental');
+
   const [firstLine, ...rest] = String(config.heroHeadline).split('\n');
   let serviceIndex = 0;
-  html = html
-    .replace(/\s*<script\b[^>]*><\/script>/g, '')
-    .replace(/<link rel="stylesheet" href="\/brivon\.css">/, () => `<style>\n${css}\n</style>`)
-    .replace(/<h3 class="service-title">[\s\S]*?<\/h3>/g, (match) => {
-      const service = config.services[serviceIndex];
-      serviceIndex += 1;
-      return service ? `<h3 class="service-title">${htmlEscape(service)}</h3>` : match;
-    });
+  html = html.replace(/<h3 class="service-title">[\s\S]*?<\/h3>/g, (match) => {
+    const service = config.services[serviceIndex];
+    serviceIndex += 1;
+    return service ? `<h3 class="service-title">${htmlEscape(service)}</h3>` : match;
+  });
   html = replaceElementContent(html, 'siteNav', previewMenuHtml(config));
   html = replaceElementContent(html, 'drawerNav', previewMenuHtml(config));
+  html = replaceElementContent(html, 'editorialSiteNav', previewMenuHtml(config));
   html = replaceElementContent(html, 'galleryGrid', previewGalleryHtml(config));
   html = replaceElementContent(html, 'postGrid', previewPostsHtml(config));
   html = replaceElementContent(html, 'paymentDetails', previewPaymentsHtml(config));
+
+  const brand = config.brandName;
+  const isDental = config.specialty === 'dental';
+  const verticalIcon = isDental ? '✦' : '✳';
+  const verticalSubline = isDental ? 'A BRIGHTER KIND OF CARE' : 'CARE THAT FEELS PERSONAL';
+  const actionLabel = featureEnabled(config, 'scheduling')
+    ? (isDental ? 'Request an appointment' : 'Request a visit')
+    : 'Contact our team';
+  const actionHref = featureEnabled(config, 'scheduling') ? '#book' : '#contact';
+  for (const id of ['brandName', 'footerBrandName', 'editorialBrandName']) html = setElementText(html, id, brand);
+  for (const id of ['brandSubline', 'footerBrandSubline']) html = setElementText(html, id, verticalSubline);
+  html = setElementText(html, 'editorialBrandLocation', config.location);
+  html = setElementText(html, 'footerLegalName', config.businessName);
+  html = setElementText(html, 'footerLocation', config.location);
+  html = setElementText(html, 'footerEmail', config.email);
+  html = setElementText(html, 'footerPhone', config.phone);
   html = setElementText(html, 'yearNow', new Date().getFullYear());
   html = setElementText(html, 'heroEyebrow', config.heroEyebrow);
   html = replaceElementContent(html, 'heroHeadline', `${htmlEscape(firstLine)}<br><em>${htmlEscape(rest.join(' ') || 'good care.')}</em>`);
   html = setElementText(html, 'heroText', config.heroText);
+  for (const id of ['brandSymbol', 'footerSymbol', 'labelIcon', 'editorialBrandSymbol']) html = setElementText(html, id, verticalIcon);
+  for (const id of ['headerCta', 'heroBook', 'articleBook', 'editorialSidebarCta']) {
+    html = replaceElementContent(html, id, `${htmlEscape(actionLabel)} <span>↗</span>`);
+    html = setElementAttribute(html, id, 'href', actionHref);
+  }
+  const telephone = String(config.phone || '').replace(/[^+\d]/g, '');
+  html = setElementAttribute(html, 'phoneLink', 'href', `tel:${telephone}`);
+  html = setElementAttribute(html, 'footerPhone', 'href', `tel:${telephone}`);
+  html = setElementAttribute(html, 'footerEmail', 'href', `mailto:${config.email}`);
   html = setElementClass(html, 'gallery', 'hidden', !featureEnabled(config, 'gallery'));
   html = setElementClass(html, 'journal', 'hidden', !featureEnabled(config, 'blog'));
   html = setElementClass(html, 'book', 'hidden', !featureEnabled(config, 'scheduling'));
   html = setElementClass(html, 'footerPayments', 'hidden', !config.payments.gcashNumber && !config.payments.mayaNumber);
-  // The builder serves no /appointments.html, so a page link would navigate the
-  // preview frame to a 404. Keep same-page anchors scrolling, and point page
-  // links back at the top of the preview.
-  html = html.replace(/href="\/(#?[^"]*)"/g, (match, target) => `href="${target.startsWith('#') ? target : '#home'}"`);
+
+  // Preview URLs resolve within the generated homepage. The builder does not
+  // serve a separate appointments or custom-page route inside the iframe.
+  html = html.replace(/href="\/(#[^"]*)"/g, (match, target) => `href="${target}"`);
+  html = html.replace(/href="\/([^"]*)"/g, 'href="#home"');
   html = await inlinePreviewImages(html, env, origin);
   return { html, theme: config.theme, siteId: config.siteId };
 }
@@ -518,8 +603,9 @@ async function buildFiles(input, env, origin) {
 
   for (const relative of manifest.sharedPublic) {
     let content = replaceTokens(await readScaffold(env, origin, `shared/${relative}`), config);
-    if (relative === 'public/index.html' && config.theme.startsWith('brivon-')) {
-      content = replaceTokens(await readScaffold(env, origin, 'shared/designs/brivon-index.html'), config);
+    if (relative === 'public/index.html') {
+      const homepage = homeDesignFile(config.theme);
+      if (homepage !== `shared/${relative}`) content = replaceTokens(await readScaffold(env, origin, homepage), config);
     }
     files.set(publicPath(relative), content);
   }

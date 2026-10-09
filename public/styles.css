@@ -327,17 +327,14 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .browser-window.mobile-preview .preview-services > div { min-height: 25px; }
 .browser-window.mobile-preview .preview-bottom-bar { padding: 8px 12px; }
 .browser-window.mobile-preview .preview-bottom-bar > span:nth-child(2) { display: none; }
-/* Brivon design system preview: the real generated homepage (built from
-   shared/designs/brivon-index.html + public/brivon.css) rendered inside a
-   sandboxed iframe, laid out at its own width and scaled into the panel so
-   the generated site's own breakpoints are preserved. */
-#previewScreen[hidden], #previewScreenBrivon[hidden] { display: none; }
-.brivon-preview-screen { position: relative; height: 429px; min-height: 429px; background: #0a0a0c; }
-.browser-window.mobile-preview .brivon-preview-screen { height: 480px; }
-.brivon-preview-viewport { position: absolute; inset: 0; overflow: hidden; }
-.brivon-preview-frame { position: absolute; top: 0; left: 0; width: 1440px; height: 900px; border: 0; background: transparent; transform-origin: top left; }
-.brivon-preview-status { position: absolute; right: 0; bottom: 0; left: 0; margin: 0; padding: 7px 11px; background: rgba(8,8,10,.94); color: #d4ff3d; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; line-height: 1.5; }
-.brivon-preview-status[hidden] { display: none; }
+/* Every selected generated homepage is shown in a scrollable, sandboxed frame.
+   The real desktop/mobile layout width is preserved and scaled only to fit. */
+.site-preview-screen { position: relative; height: 429px; min-height: 429px; background: #fff; }
+.browser-window.mobile-preview .site-preview-screen { height: 480px; min-height: 480px; }
+.site-preview-viewport { position: absolute; inset: 0; overflow: hidden; }
+.site-preview-frame { position: absolute; top: 0; left: 0; display: block; border: 0; background: #fff; transform-origin: top left; overflow: auto; }
+.site-preview-status { position: absolute; right: 0; bottom: 0; left: 0; margin: 0; padding: 7px 11px; background: rgba(8,8,10,.94); color: #d4ff3d; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; line-height: 1.5; }
+.site-preview-status[hidden] { display: none; }
 .preview-caption { display: flex; align-items: center; gap: 6px; margin: 10px 2px 20px; color: #8b968f; font-size: 8px; }
 .caption-check { display: grid; place-items: center; width: 13px; height: 13px; border-radius: 50%; background: #e4eee5; color: #62826b; }
 .caption-check svg { width: 8px; height: 8px; stroke-width: 2.6; }

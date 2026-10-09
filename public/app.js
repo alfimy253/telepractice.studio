@@ -1,3 +1,5 @@
+import { requestGeneratedPackage } from './download.js';
+
 const DEFAULT_CONFIG = {
   specialty: 'veterinary',
   businessName: 'Harborlight Veterinary Care',
@@ -49,16 +51,13 @@ let config = loadConfig();
 let nameTouched = Boolean(localStorage.getItem('canopy-name-touched'));
 let wizardStep = 0;
 let activePageId = '';
-let csrfToken = '';
 const WIZARD_STEP_COUNT = 5;
 const MAX_CUSTOM_PAGES = 8;
-// The Brivon design system is generated from its own HTML/CSS layout, so its
-// preview is the real generated homepage rendered in a sandboxed iframe.
-const BRIVON_THEMES = ['brivon-dark', 'brivon-light'];
-const BRIVON_PREVIEW_WIDTHS = { desktop: 1440, mobile: 390 };
-const BRIVON_PREVIEW_DEBOUNCE_MS = 280;
-let brivonPreviewTimer = 0;
-let brivonPreviewRequestId = 0;
+// Every theme previews the selected generated homepage in an isolated frame.
+const LIVE_PREVIEW_WIDTHS = { desktop: 1440, mobile: 390 };
+const LIVE_PREVIEW_DEBOUNCE_MS = 280;
+let livePreviewTimer = 0;
+let livePreviewRequestId = 0;
 const ADMIN_PASSWORD_POLICY = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).{12,128}$/;
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -101,9 +100,8 @@ function saveConfig() {
   localStorage.setItem('canopy-site-config', JSON.stringify(persisted));
   const indicator = document.querySelector('.autosave');
   if (indicator) indicator.innerHTML = '<span class="status-dot"></span> All changes saved';
-  // Fields such as the contact email, phone and payment details only persist
-  // here, so the Brivon preview refreshes from the same path.
-  scheduleBrivonPreview();
+  // Contact, payment and design settings all refresh the generated-page preview.
+  scheduleLivePreview();
 }
 function slugify(value) {
   return String(value || '').normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 55) || 'my-practice';
@@ -134,20 +132,10 @@ function syncInputs() {
   document.querySelectorAll('[data-editorial-accent]').forEach((button) => button.classList.toggle('active', button.dataset.editorialAccent.toLowerCase() === config.primaryColor.toLowerCase()));
   syncDownloadControls();
 }
-function renderPreviewMenuLinks() {
-  const links = document.querySelector('.preview-nav-links');
-  if (!links) return;
-  const labels = ['Our care', 'About', 'Journal', ...(config.customPages || []).map((page) => page.menuName).filter(Boolean)];
-  links.replaceChildren(...labels.map((label) => {
-    const item = document.createElement('span');
-    item.textContent = label;
-    return item;
-  }));
-}
-function isBrivonTheme() { return BRIVON_THEMES.includes(config.theme); }
 // Public site settings only — never the admin credentials or database URL.
-function brivonPreviewConfig() {
+function livePreviewConfig() {
   const kind = vertical();
+  const preset = THEMES[config.theme] || THEMES.canopy;
   const name = config.businessName.trim() || kind.defaultName;
   return {
     specialty: config.specialty,
@@ -157,112 +145,82 @@ function brivonPreviewConfig() {
     email: config.email.trim() || `hello@${slugify(name)}.example`,
     phone: config.phone.trim() || '+1 555 010 0000',
     theme: config.theme,
-    primaryColor: safeColor(config.primaryColor, '#d4ff3d'),
-    accentColor: safeColor(config.accentColor, '#d4ff3d'),
-    paperColor: safeColor(config.paperColor, '#0a0a0c'),
+    primaryColor: safeColor(config.primaryColor, preset.primaryColor),
+    accentColor: safeColor(config.accentColor, preset.accentColor),
+    paperColor: safeColor(config.paperColor, preset.paperColor),
     fontStyle: config.fontStyle === 'sans' ? 'sans' : 'serif',
     features: { blog: Boolean(config.features.blog), gallery: config.features.gallery !== false, scheduling: Boolean(config.features.scheduling) },
     payments: {
       gcashName: String(config.payments.gcashName || '').trim(), gcashNumber: String(config.payments.gcashNumber || '').trim(),
       mayaName: String(config.payments.mayaName || '').trim(), mayaNumber: String(config.payments.mayaNumber || '').trim()
     },
-    // Only the menu label and route reach the preview, so page bodies never
-    // push the request past the endpoint's configuration limit.
+    // Only menu labels/routes are needed to preview navigation; page bodies
+    // stay out of the request so it remains comfortably below the limit.
     customPages: normalizeSavedPages(config.customPages).map(({ menuName, url }) => ({ menuName, url }))
   };
 }
-function brivonPreviewStatus(message) {
-  const status = $('brivonPreviewStatus');
+function livePreviewStatus(message) {
+  const status = $('livePreviewStatus');
   if (!status) return;
   status.hidden = !message;
   if (message) status.textContent = message;
 }
-async function renderBrivonPreview() {
-  const frame = $('brivonPreviewFrame');
-  if (!frame || !isBrivonTheme()) return;
-  const requestId = (brivonPreviewRequestId += 1);
+async function renderLivePreview() {
+  const frame = $('livePreviewFrame');
+  if (!frame) return;
+  const requestId = (livePreviewRequestId += 1);
   try {
-    const query = encodeURIComponent(JSON.stringify(brivonPreviewConfig()));
-    const response = await fetch(`/api/preview?config=${query}`, { credentials: 'same-origin', headers: { Accept: 'text/html' } });
+    const query = encodeURIComponent(JSON.stringify(livePreviewConfig()));
+    const response = await fetch(`/api/preview?config=${query}`, {
+      credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'text/html' }
+    });
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       throw new Error(error.error || `the preview request failed (${response.status})`);
     }
     const html = await response.text();
-    if (requestId !== brivonPreviewRequestId) return; // a newer edit is already on its way
+    if (requestId !== livePreviewRequestId) return;
     frame.srcdoc = html;
-    brivonPreviewStatus('');
-    layoutBrivonPreview();
+    livePreviewStatus('');
+    layoutLivePreview();
   } catch (error) {
-    if (requestId !== brivonPreviewRequestId) return;
-    brivonPreviewStatus(`Brivon preview unavailable — ${error.message || 'the builder could not render it.'}`);
+    if (requestId !== livePreviewRequestId) return;
+    livePreviewStatus(`Website preview unavailable — ${error.message || 'the builder could not render it.'}`);
   }
 }
-function scheduleBrivonPreview() {
-  if (!isBrivonTheme()) return;
-  window.clearTimeout(brivonPreviewTimer);
-  brivonPreviewTimer = window.setTimeout(renderBrivonPreview, BRIVON_PREVIEW_DEBOUNCE_MS);
+function scheduleLivePreview() {
+  window.clearTimeout(livePreviewTimer);
+  livePreviewTimer = window.setTimeout(renderLivePreview, LIVE_PREVIEW_DEBOUNCE_MS);
 }
-function layoutBrivonPreview() {
-  const screen = $('previewScreenBrivon');
-  const frame = $('brivonPreviewFrame');
-  const viewport = $('brivonPreviewViewport');
-  if (!screen || !frame || !viewport || screen.hidden) return;
-  const width = BRIVON_PREVIEW_WIDTHS[$('browserWindow').classList.contains('mobile-preview') ? 'mobile' : 'desktop'];
-  const availableWidth = viewport.clientWidth || screen.clientWidth || 480;
-  const availableHeight = viewport.clientHeight || screen.clientHeight || 460;
-  // Lay the real page out at its own width, then scale it into the panel, so
-  // the preview keeps the generated site's desktop (or mobile) breakpoints.
+function layoutLivePreview() {
+  const screen = $('previewScreenLive');
+  const frame = $('livePreviewFrame');
+  const viewport = $('livePreviewViewport');
+  if (!screen || !frame || !viewport) return;
+  const device = $('browserWindow').classList.contains('mobile-preview') ? 'mobile' : 'desktop';
+  const width = LIVE_PREVIEW_WIDTHS[device];
+  const availableWidth = Math.max(1, viewport.clientWidth || screen.clientWidth || 480);
+  const availableHeight = Math.max(1, viewport.clientHeight || screen.clientHeight || 460);
+  // Keep the generated site's real breakpoint width and scale only to fit the
+  // preview panel. The iframe keeps a viewport-height document and scrolls
+  // internally, so the complete page is available without shrinking to a tile.
   const scale = Math.min(availableWidth / width, 1);
   frame.style.width = `${width}px`;
-  frame.style.height = `${Math.round(availableHeight / scale)}px`;
+  frame.style.height = `${Math.ceil(availableHeight / scale)}px`;
   frame.style.transform = `scale(${scale})`;
-}
-function syncPreviewSurface() {
-  const brivon = isBrivonTheme();
-  const illustration = $('previewScreen');
-  const brivonScreen = $('previewScreenBrivon');
-  if (illustration) illustration.hidden = brivon;
-  if (brivonScreen) brivonScreen.hidden = !brivon;
-  if (!brivon) { brivonPreviewStatus(''); return; }
-  layoutBrivonPreview();
-  scheduleBrivonPreview();
 }
 function updatePreview() {
   const kind = vertical();
   const business = config.businessName.trim() || kind.defaultName;
-  const loc = config.location.trim() || 'Your neighborhood';
   const slug = slugify(business);
   $('siteSlug').textContent = slug;
   $('previewUrl').textContent = `${slug}.yourpractice.site`;
-  $('previewBrandName').textContent = business;
-  $('previewBrandLocation').textContent = loc.toLocaleUpperCase().slice(0, 25);
-  $('previewEyebrow').textContent = kind.eyebrow;
-  const headline = kind.headline.split('|');
-  $('previewHeadline').innerHTML = `${esc(headline[0])}<br><em>${esc(headline[1])}</em>`;
-  $('previewSubhead').textContent = kind.subhead;
-  $('serviceOne').textContent = kind.services[0];
-  $('serviceTwo').textContent = kind.services[1];
-  $('serviceThree').textContent = kind.services[2];
-  renderPreviewMenuLinks();
-  const logoUse = document.querySelector('.preview-logo use');
-  if (logoUse) logoUse.setAttribute('href', `#${kind.icon}`);
-  const screen = $('previewScreen');
-  screen.style.setProperty('--site-primary', config.primaryColor);
-  screen.style.setProperty('--site-accent', config.accentColor);
-  screen.style.setProperty('--site-paper', config.paperColor);
-  screen.classList.toggle('editorial-sans', config.fontStyle === 'sans');
-  screen.classList.toggle('dental-preview', config.specialty === 'dental');
-  screen.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air','theme-brivon-dark','theme-brivon-light');
-  if (THEMES[config.theme]) screen.classList.add(`theme-${config.theme}`);
   $('colorPreview').style.background = config.primaryColor;
   $('brandColorLabel').textContent = config.primaryColor.toUpperCase();
   const shortTheme = THEMES[config.theme]?.label || 'Custom';
   $('summarySpecialty').textContent = kind.label;
   $('summaryTheme').textContent = `${shortTheme} · ${config.fontStyle === 'serif' ? 'editorial serif' : 'modern sans'}`;
   $('summaryModules').textContent = [config.features.blog && 'Blog', config.features.gallery !== false && 'Gallery', config.features.scheduling && 'Scheduling'].filter(Boolean).join(' + ') || 'Core pages only';
-  document.querySelectorAll('.preview-brand strong').forEach((node) => node.title = business);
-  syncPreviewSurface();
   saveConfig();
 }
 function setSpecialty(specialty) {
@@ -474,7 +432,6 @@ function bindCustomPageEditor() {
     const route = accordion.querySelector('[data-page-summary-url]');
     if (label) label.textContent = page.menuName.trim() || `Page ${config.customPages.indexOf(page) + 1}`;
     if (route) route.textContent = page.url.trim() || 'Set a page URL';
-    renderPreviewMenuLinks();
     saveConfig();
   });
   list.addEventListener('click', (event) => {
@@ -657,23 +614,7 @@ async function downloadPackage() {
   });
   document.querySelectorAll('[data-deployment-target]').forEach((button) => { button.disabled = true; });
   try {
-    const csrfResponse = await fetch('/api/csrf', { credentials: 'same-origin' });
-    if (!csrfResponse.ok) {
-      const error = await csrfResponse.json().catch(() => ({}));
-      throw new Error(`${error.error || 'Could not initialize the secure build session.'} (/api/csrf → ${csrfResponse.status})`);
-    }
-    const csrf = await csrfResponse.json();
-    csrfToken = csrf.token;
-    const response = await fetch('/api/generate', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-      body: JSON.stringify({ ...configForPackage(), target })
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(`${error.error || `The ${displayName} code package could not be generated.`} (/api/generate → ${response.status})`);
-    }
+    const response = await requestGeneratedPackage(target, configForPackage(), displayName);
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -768,10 +709,11 @@ function bindEvents() {
   document.querySelectorAll('.device-button').forEach((button) => button.addEventListener('click', () => {
     document.querySelectorAll('.device-button').forEach((node) => node.classList.toggle('active', node === button));
     $('browserWindow').classList.toggle('mobile-preview', button.dataset.device === 'mobile');
-    layoutBrivonPreview();
+    layoutLivePreview();
   }));
-  window.addEventListener('resize', layoutBrivonPreview);
-  if (window.ResizeObserver && $('brivonPreviewViewport')) new ResizeObserver(() => layoutBrivonPreview()).observe($('brivonPreviewViewport'));
+  $('livePreviewFrame').addEventListener('load', layoutLivePreview);
+  window.addEventListener('resize', layoutLivePreview);
+  if (window.ResizeObserver && $('livePreviewViewport')) new ResizeObserver(() => layoutLivePreview()).observe($('livePreviewViewport'));
   $('menuToggle').addEventListener('click', () => $('sidebar').classList.toggle('open'));
   document.querySelectorAll('.side-nav .nav-link').forEach((link) => link.addEventListener('click', () => {
     document.querySelectorAll('.side-nav .nav-link').forEach((node) => node.classList.toggle('active', node === link));
