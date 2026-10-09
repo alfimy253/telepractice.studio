@@ -164,13 +164,21 @@ async function preview(request, env, origin) {
     return new Response(html, { status: 200, headers });
   } catch (cause) {
     console.error('Builder preview generation failed', cause);
-    return failure('The live preview could not be prepared.', 500);
+    return failure(`The live preview could not be prepared. ${cause?.message || ''}`.trim(), 500);
   }
 }
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname.startsWith('/_scaffold/')) return failure('Not found.', 404);
+    // Scaffold templates are public build inputs — they carry only placeholder
+    // tokens and the same files ship inside every generated ZIP. The builder
+    // tab reads them directly when it has to assemble a package in the browser
+    // (e.g. on Workers Free, where per-request CPU cannot absorb the server
+    // build). Everything else under /_scaffold/ stays hidden.
+    if (url.pathname.startsWith('/_scaffold/')) {
+      const templateRead = url.pathname.startsWith('/_scaffold/templates/') && (request.method === 'GET' || request.method === 'HEAD');
+      if (!templateRead) return failure('Not found.', 404);
+    }
     if (url.pathname === '/api/health' && request.method === 'GET') return json({ ok: true, runtime: 'cloudflare-workers-builder' });
     if (url.pathname === '/api/csrf' && request.method === 'GET') return issueCsrf(request, env);
     if (url.pathname === '/api/preview' && request.method === 'GET') return preview(request, env, url.origin);
@@ -192,7 +200,9 @@ export default {
       } catch (cause) {
         if (/valid practice email|administrator username|administrator email|administrator password|custom page|custom pages|HTTPS URL|Choose either the Vercel or Cloudflare|valid Neon database connection string/i.test(cause.message || '')) return failure(cause.message, 400);
         console.error('Cloudflare builder ZIP generation failed', cause);
-        return failure('The selected code package could not be prepared. Please try again.', 500);
+        // Surface the actual error string so a deployment failure (missing
+        // scaffold file, runtime error) is reportable instead of a generic 500.
+        return failure(`The selected code package could not be prepared. ${cause?.message || 'Please try again.'}`, 500);
       }
     }
     if (url.pathname.startsWith('/api/')) return failure('API route not found.', 404);
