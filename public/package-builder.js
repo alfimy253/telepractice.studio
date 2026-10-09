@@ -18,7 +18,7 @@ async function fetchTemplate(filename) {
   // to the same string the first read returned.
   const request = (async () => {
     const response = await fetch(url, {
-      method: 'GET', credentials: 'same-origin', cache: 'force-cache', headers: { Accept: 'text/plain' }
+      method: 'GET', credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'text/plain' }
     });
     if (!response.ok) throw new Error(`Missing build scaffold file: ${filename}`);
     return response.text();

@@ -68,12 +68,14 @@ test('worker serves scaffold templates for the browser build but hides the rest 
   const env = { ASSETS: assets };
   const manifest = await worker.fetch(new Request(`${origin}/_scaffold/templates/manifest.json`), env);
   assert.equal(manifest.status, 200);
+  assert.equal(manifest.headers.get('Cache-Control'), 'no-store');
   assert.ok(Array.isArray(JSON.parse(await manifest.text()).sharedPublic));
   for (const file of ['shared/lib/admin-security.js', 'shared/public/site.js', 'cloudflare/src/index.js']) {
     const response = await worker.fetch(new Request(`${origin}/_scaffold/templates/${file}`), env);
     assert.equal(response.status, 200, `expected ${file} to be readable by the browser build`);
     assert.ok((await response.text()).length > 0);
     assert.equal(response.headers.get('X-Content-Type-Options'), 'nosniff');
+    assert.equal(response.headers.get('Cache-Control'), 'no-store');
   }
   assert.equal((await worker.fetch(new Request(`${origin}/_scaffold/other.txt`), env)).status, 404);
   assert.equal((await worker.fetch(new Request(`${origin}/_scaffold/templates/manifest.json`, { method: 'POST' }), env)).status, 404);
@@ -194,6 +196,7 @@ test('package-builder template cache serves warm builds without re-fetching', as
   globalThis.location = new URL(origin + '/');
   globalThis.fetch = async (url, options) => {
     const path = new URL(url, origin).pathname;
+    assert.equal(options.cache, 'no-store', `${path} must not reuse templates from an older deployment`);
     calls.set(path, (calls.get(path) || 0) + 1);
     return worker.fetch(new Request(new URL(path, origin), options), { ASSETS: assets });
   };

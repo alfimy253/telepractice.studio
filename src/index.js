@@ -254,7 +254,9 @@ export default {
     try {
       const response = await env.ASSETS.fetch(request);
       const headers = secureHeaders(response.headers);
-      if (url.pathname === '/' || url.pathname.endsWith('.html') || url.pathname.endsWith('.js')) headers.set('Cache-Control', 'no-store');
+      if (url.pathname === '/' || url.pathname.endsWith('.html') || url.pathname.endsWith('.js') || url.pathname.startsWith('/_scaffold/templates/')) {
+        headers.set('Cache-Control', 'no-store');
+      }
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
     } catch (cause) {
       console.error('builder asset read failed', cause);
