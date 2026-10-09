@@ -1,4 +1,5 @@
 import { requestGeneratedPackage } from './download.js';
+import { buildPackageLocally, buildPreviewLocally } from './package-builder.js';
 
 const DEFAULT_CONFIG = {
   specialty: 'veterinary',
@@ -58,6 +59,7 @@ const LIVE_PREVIEW_WIDTHS = { desktop: 1440, mobile: 390 };
 const LIVE_PREVIEW_DEBOUNCE_MS = 280;
 let livePreviewTimer = 0;
 let livePreviewRequestId = 0;
+let livePreviewController = null;
 const ADMIN_PASSWORD_POLICY = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).{12,128}$/;
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -93,7 +95,7 @@ function loadConfig() {
     };
   } catch (_) { return structuredClone(DEFAULT_CONFIG); }
 }
-function saveConfig() {
+function saveConfig(immediate = false) {
   // Persist everything except the database connection string, which can
   // carry a real password and should not linger in localStorage.
   const { databaseUrl: _omit, ...persisted } = config;
@@ -101,7 +103,9 @@ function saveConfig() {
   const indicator = document.querySelector('.autosave');
   if (indicator) indicator.innerHTML = '<span class="status-dot"></span> All changes saved';
   // Contact, payment and design settings all refresh the generated-page preview.
-  scheduleLivePreview();
+  // Discrete choices (toggles, themes, selects) refresh immediately; typing
+  // stays debounced so the preview does not rebuild on every keystroke.
+  scheduleLivePreview(immediate);
 }
 function slugify(value) {
   return String(value || '').normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 55) || 'my-practice';
@@ -165,31 +169,47 @@ function livePreviewStatus(message) {
   status.hidden = !message;
   if (message) status.textContent = message;
 }
+function showLivePreview(html, requestId, frame) {
+  if (requestId !== livePreviewRequestId) return;
+  frame.srcdoc = html;
+  livePreviewStatus('');
+  layoutLivePreview();
+}
 async function renderLivePreview() {
   const frame = $('livePreviewFrame');
   if (!frame) return;
   const requestId = (livePreviewRequestId += 1);
+  livePreviewController?.abort();
+  livePreviewController = new AbortController();
+  const config = livePreviewConfig();
+  // Built in the browser first so design and functionality edits show up
+  // immediately, without a round trip and without the deployed Worker needing
+  // CPU budget (Workers Free kills requests above 10ms of CPU).
   try {
-    const query = encodeURIComponent(JSON.stringify(livePreviewConfig()));
+    const { html } = await buildPreviewLocally(config);
+    showLivePreview(html, requestId, frame);
+    return;
+  } catch (error) {
+    if (requestId !== livePreviewRequestId) return;
+  }
+  try {
+    const query = encodeURIComponent(JSON.stringify(config));
     const response = await fetch(`/api/preview?config=${query}`, {
-      credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'text/html' }
+      credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'text/html' }, signal: livePreviewController.signal
     });
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       throw new Error(error.error || `the preview request failed (${response.status})`);
     }
-    const html = await response.text();
-    if (requestId !== livePreviewRequestId) return;
-    frame.srcdoc = html;
-    livePreviewStatus('');
-    layoutLivePreview();
+    showLivePreview(await response.text(), requestId, frame);
   } catch (error) {
-    if (requestId !== livePreviewRequestId) return;
+    if (requestId !== livePreviewRequestId || error?.name === 'AbortError') return;
     livePreviewStatus(`Website preview unavailable — ${error.message || 'the builder could not render it.'}`);
   }
 }
-function scheduleLivePreview() {
+function scheduleLivePreview(immediate = false) {
   window.clearTimeout(livePreviewTimer);
+  if (immediate) { renderLivePreview(); return; }
   livePreviewTimer = window.setTimeout(renderLivePreview, LIVE_PREVIEW_DEBOUNCE_MS);
 }
 function layoutLivePreview() {
@@ -209,7 +229,7 @@ function layoutLivePreview() {
   frame.style.height = `${Math.ceil(availableHeight / scale)}px`;
   frame.style.transform = `scale(${scale})`;
 }
-function updatePreview() {
+function updatePreview(immediate = false) {
   const kind = vertical();
   const business = config.businessName.trim() || kind.defaultName;
   const slug = slugify(business);
@@ -221,7 +241,7 @@ function updatePreview() {
   $('summarySpecialty').textContent = kind.label;
   $('summaryTheme').textContent = `${shortTheme} · ${config.fontStyle === 'serif' ? 'editorial serif' : 'modern sans'}`;
   $('summaryModules').textContent = [config.features.blog && 'Blog', config.features.gallery !== false && 'Gallery', config.features.scheduling && 'Scheduling'].filter(Boolean).join(' + ') || 'Core pages only';
-  saveConfig();
+  saveConfig(immediate);
 }
 function setSpecialty(specialty) {
   if (!VERTICALS[specialty]) return;
@@ -237,7 +257,7 @@ function setSpecialty(specialty) {
   if (config.payments.gcashName === VERTICALS[previous].defaultName) config.payments.gcashName = VERTICALS[specialty].defaultName;
   if (config.payments.mayaName === VERTICALS[previous].defaultName) config.payments.mayaName = VERTICALS[specialty].defaultName;
   syncInputs();
-  updatePreview();
+  updatePreview(true);
   renderWizard();
 }
 function setTheme(theme) {
@@ -249,7 +269,7 @@ function setTheme(theme) {
   config.accentColor = preset.accentColor;
   config.paperColor = preset.paperColor;
   syncInputs();
-  updatePreview();
+  updatePreview(true);
   renderWizard();
 }
 function setDesignSystem(value) {
@@ -260,14 +280,20 @@ function setDesignSystem(value) {
   if (value === 'brivon-dark' || value === 'brivon-light') setTheme(value);
 }
 function setEditorialAccent(accent) {
-  if (!EDITORIAL_ACCENTS[accent]) return;
+  // The accent buttons carry their swatch color in data-editorial-accent while
+  // the stored setting uses the accent's key name. Accept both so a click on
+  // Black/Teal/Dark green actually reaches the config and the preview.
+  const key = Object.hasOwn(EDITORIAL_ACCENTS, accent)
+    ? accent
+    : Object.keys(EDITORIAL_ACCENTS).find((name) => EDITORIAL_ACCENTS[name].toLowerCase() === String(accent || '').toLowerCase());
+  if (!key) return;
   config.theme = 'editorial';
-  config.editorialAccent = accent;
-  config.primaryColor = EDITORIAL_ACCENTS[accent];
+  config.editorialAccent = key;
+  config.primaryColor = EDITORIAL_ACCENTS[key];
   config.accentColor = THEMES.editorial.accentColor;
   config.paperColor = THEMES.editorial.paperColor;
   syncInputs();
-  updatePreview();
+  updatePreview(true);
   renderWizard();
 }
 function safeColor(value, fallback) {
@@ -453,7 +479,7 @@ function bindCustomPageEditor() {
     } else return;
     saveConfig();
     renderCustomPageList();
-    updatePreview();
+    updatePreview(true);
   });
 }
 function validateCustomPages() {
@@ -492,7 +518,7 @@ function validateCustomPages() {
     page.imageUrl = page.imageUrl.trim();
   }
   saveConfig();
-  updatePreview();
+  updatePreview(true);
   return true;
 }
 function renderWizard() {
@@ -518,7 +544,7 @@ function renderWizard() {
   } else if (wizardStep === 2) {
     const selectedSystem = config.theme.startsWith('brivon-') ? config.theme : 'illustration';
     content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Choose a complete design system.</h1><p class="wizard-lede">Illustration uses the current friendly visual system. Brivon generates a separate editorial HTML, CSS and JavaScript experience.</p><label class="wizard-system-picker"><span>Design system</span><select id="wizardDesignSystem"><option value="illustration" ${selectedSystem === 'illustration' ? 'selected' : ''}>Illustration theme (current)</option><option value="brivon-dark" ${selectedSystem === 'brivon-dark' ? 'selected' : ''}>Brivon · Dark</option><option value="brivon-light" ${selectedSystem === 'brivon-light' ? 'selected' : ''}>Brivon · Light</option></select></label><div class="wizard-theme-grid" id="wizardIllustrationThemes" ${selectedSystem !== 'illustration' ? 'hidden' : ''}>${ILLUSTRATION_THEMES.map((key) => [key, THEMES[key]]).map(([key, theme]) => `<button class="wizard-theme-card ${config.theme === key ? 'selected' : ''}" data-wizard-theme="${key}"><span class="wizard-theme-art" style="--swatch-bg:${theme.paperColor};--swatch-primary:${theme.primaryColor};--swatch-accent:${theme.accentColor}"><span></span><i></i></span><span class="wizard-radio"></span><strong>${theme.label}</strong><small>${theme.mood}</small></button>`).join('')}</div><div class="wizard-preview-tip"><span><svg><use href="#i-palette"/></svg></span><span>Brivon includes light and dark variants and corrected heading line spacing.</span></div>`;
-    $('wizardDesignSystem').addEventListener('change', (event) => { setDesignSystem(event.target.value); renderWizard(); });
+    $('wizardDesignSystem').addEventListener('change', (event) => { setDesignSystem(event.target.value); });
     content.querySelectorAll('[data-wizard-theme]').forEach((button) => button.addEventListener('click', () => setTheme(button.dataset.wizardTheme)));
   } else if (wizardStep === 3) {
     content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Build your menu links.</h1><p class="wizard-lede">Add custom pages to your site. Each page gets a menu link and its own URL, title, content and optional banner image.</p><div class="wizard-page-manager"><div class="wizard-page-list" id="wizardPageList"></div><button class="wizard-add-page" type="button" id="addWizardPage"><svg><use href="#i-plus"/></svg> Add a page</button><p class="wizard-page-limit">Up to ${MAX_CUSTOM_PAGES} custom pages. Menu order follows the list; use the controls on each page to rearrange or remove it.</p></div>`;
@@ -535,9 +561,9 @@ function renderWizard() {
     });
   } else {
     content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Keep the essentials close.</h1><p class="wizard-lede">Choose the practical features most local practices need. No custom CMS blocks or plugin maze.</p><div class="wizard-feature-list"><div class="wizard-feature-card"><span class="feature-icon"><svg><use href="#i-file"/></svg></span><span class="feature-copy"><strong>Blog & updates</strong><small>Fixed post fields for helpful articles and clinic news.</small></span><label class="switch"><input id="wizardBlog" type="checkbox" ${config.features.blog ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable blog</span></label></div><div class="wizard-feature-card"><span class="feature-icon feature-icon-gallery"><svg><use href="#i-image"/></svg></span><span class="feature-copy"><strong>Work & gallery</strong><small>Fixed image, caption, category and visibility fields.</small></span><label class="switch"><input id="wizardGallery" type="checkbox" ${config.features.gallery !== false ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable gallery</span></label></div><div class="wizard-feature-card"><span class="feature-icon feature-icon-book"><svg><use href="#i-calendar"/></svg></span><span class="feature-copy"><strong>Appointment requests</strong><small>Request a real time slot and collect contact details.</small></span><label class="switch"><input id="wizardBooking" type="checkbox" ${config.features.scheduling ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable appointment requests</span></label></div></div><div class="wizard-finish-card"><span><svg><use href="#i-check"/></svg></span><span><strong>Your package is ready to download.</strong><small>Choose Vercel or Cloudflare on the builder and download that code package. No deployment happens automatically.</small></span></div>`;
-    $('wizardBlog').addEventListener('change', (event) => { config.features.blog = event.target.checked; syncInputs(); updatePreview(); });
-    $('wizardGallery').addEventListener('change', (event) => { config.features.gallery = event.target.checked; syncInputs(); updatePreview(); });
-    $('wizardBooking').addEventListener('change', (event) => { config.features.scheduling = event.target.checked; syncInputs(); updatePreview(); });
+    $('wizardBlog').addEventListener('change', (event) => { config.features.blog = event.target.checked; syncInputs(); updatePreview(true); });
+    $('wizardGallery').addEventListener('change', (event) => { config.features.gallery = event.target.checked; syncInputs(); updatePreview(true); });
+    $('wizardBooking').addEventListener('change', (event) => { config.features.scheduling = event.target.checked; syncInputs(); updatePreview(true); });
   }
   content.classList.remove('wizard-enter');
   void content.offsetWidth;
@@ -598,6 +624,49 @@ function retreatWizard() {
     renderWizard();
   }
 }
+// While a package is being prepared every builder control is locked so the
+// selections shown on screen cannot drift from the snapshot the ZIP is built
+// from. Exact disabled states are restored afterwards.
+let lockedControls = null;
+function setBuilderLocked(locked) {
+  const chip = $('generatingChip');
+  if (locked) {
+    if (lockedControls) return;
+    const entries = [];
+    document.querySelectorAll('.app-shell button, .app-shell input, .app-shell select, .app-shell textarea, .app-shell a').forEach((control) => {
+      if (control.matches('a')) {
+        if (control.getAttribute('aria-disabled') === 'true') return;
+        control.setAttribute('aria-disabled', 'true');
+        entries.push([control, 'link']);
+      } else {
+        if (control.disabled) return;
+        control.disabled = true;
+        entries.push([control, 'control']);
+      }
+    });
+    lockedControls = entries;
+    document.body.classList.add('builder-locked');
+    if (chip) chip.hidden = false;
+  } else if (lockedControls) {
+    for (const [control, kind] of lockedControls) {
+      if (kind === 'link') control.removeAttribute('aria-disabled');
+      else control.disabled = false;
+    }
+    lockedControls = null;
+    document.body.classList.remove('builder-locked');
+    if (chip) chip.hidden = true;
+  }
+}
+function saveBlobDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 async function downloadPackage() {
   if (!validateAdminAccount()) {
     toast('Complete the admin account', 'Add a valid username, email and strong matching password before generating a site.', true);
@@ -605,6 +674,10 @@ async function downloadPackage() {
   }
   const target = config.deploymentTarget === 'cloudflare' ? 'cloudflare' : 'vercel';
   const displayName = target === 'cloudflare' ? 'Cloudflare' : 'Vercel';
+  // Snapshot every selection at click time. The lockout below keeps the screen
+  // identical until the ZIP is saved, so the package always reflects exactly
+  // what the builder showed when Generate was pressed.
+  const payload = configForPackage();
   const buttons = [$('generateButton'), $('topGenerate')];
   buttons.forEach((button) => {
     button.dataset.original = button.innerHTML;
@@ -612,30 +685,40 @@ async function downloadPackage() {
     button.classList.add('loading-button');
     button.innerHTML = '<svg><use href="#i-spark"/></svg> Preparing ZIP…';
   });
-  document.querySelectorAll('[data-deployment-target]').forEach((button) => { button.disabled = true; });
+  setBuilderLocked(true);
+  let builtInBrowser = false;
   try {
-    const response = await requestGeneratedPackage(target, configForPackage(), displayName);
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `${slugify(config.businessName)}-${target}.zip`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    let blob;
+    let filename;
+    try {
+      const response = await requestGeneratedPackage(target, payload, displayName);
+      blob = await response.blob();
+      filename = `${slugify(config.businessName)}-${target}.zip`;
+    } catch (serverError) {
+      // The deployed Worker may be on a plan whose per-request CPU budget is
+      // too small for the build (Workers Free is capped at 10ms, and the
+      // server-side ZIP build needs far more). Assemble the identical package
+      // in the browser from the same snapshot instead of failing the download.
+      const built = await buildPackageLocally({ ...payload, target });
+      blob = new Blob([built.buffer], { type: 'application/zip' });
+      filename = built.filename;
+      builtInBrowser = true;
+    }
+    saveBlobDownload(blob, filename);
     $('adminPassword').value = '';
     $('adminPasswordConfirm').value = '';
-    toast(`${displayName} package downloaded`, 'Your password was hashed into the environment file. Keep your login details safe; deploy the package yourself.');
+    toast(`${displayName} package downloaded`, builtInBrowser
+      ? 'Built in your browser because the server build was unavailable. Your password was hashed into the environment file; deploy the package yourself.'
+      : 'Your password was hashed into the environment file. Keep your login details safe; deploy the package yourself.');
   } catch (error) {
     toast('Could not download the ZIP', error.message || 'Check the server and try again.', true);
   } finally {
+    setBuilderLocked(false);
     buttons.forEach((button) => {
       button.classList.remove('loading-button');
       button.disabled = false;
       if (button.dataset.original) button.innerHTML = button.dataset.original;
     });
-    document.querySelectorAll('[data-deployment-target]').forEach((button) => { button.disabled = false; });
     syncDownloadControls();
   }
 }
@@ -646,7 +729,7 @@ function resetTheme() {
   config.accentColor = THEMES.canopy.accentColor;
   config.paperColor = THEMES.canopy.paperColor;
   config.fontStyle = 'serif';
-  syncInputs(); updatePreview(); toast('Theme reset', 'Canopy green and editorial serif are back.');
+  syncInputs(); updatePreview(true); toast('Theme reset', 'Canopy green and editorial serif are back.');
 }
 function resetCopy() {
   const defaults = VERTICALS[config.specialty];
@@ -656,7 +739,7 @@ function resetCopy() {
   if (config.payments.mayaName === VERTICALS[config.specialty].defaultName || config.payments.mayaName === 'Harborlight Veterinary Care') config.payments.mayaName = defaults.defaultName;
   nameTouched = false;
   localStorage.removeItem('canopy-name-touched');
-  syncInputs(); updatePreview();
+  syncInputs(); updatePreview(true);
   toast('Sample copy restored', 'Practice name and location are back to the original preview.');
 }
 function bindEvents() {
@@ -675,10 +758,10 @@ function bindEvents() {
   $('practicePhone').addEventListener('input', (event) => { config.phone = event.target.value; saveConfig(); });
   [['gcashName','gcashName'],['gcashNumber','gcashNumber'],['mayaName','mayaName'],['mayaNumber','mayaNumber']].forEach(([id, field]) => $(id).addEventListener('input', (event) => { config.payments[field] = event.target.value; saveConfig(); }));
   $('brandColor').addEventListener('input', (event) => { config.primaryColor = event.target.value; syncInputs(); updatePreview(); });
-  $('fontStyle').addEventListener('change', (event) => { config.fontStyle = event.target.value; updatePreview(); });
-  $('blogToggle').addEventListener('change', (event) => { config.features.blog = event.target.checked; updatePreview(); });
-  $('galleryToggle').addEventListener('change', (event) => { config.features.gallery = event.target.checked; updatePreview(); });
-  $('bookingToggle').addEventListener('change', (event) => { config.features.scheduling = event.target.checked; updatePreview(); });
+  $('fontStyle').addEventListener('change', (event) => { config.fontStyle = event.target.value; updatePreview(true); });
+  $('blogToggle').addEventListener('change', (event) => { config.features.blog = event.target.checked; updatePreview(true); });
+  $('galleryToggle').addEventListener('change', (event) => { config.features.gallery = event.target.checked; updatePreview(true); });
+  $('bookingToggle').addEventListener('change', (event) => { config.features.scheduling = event.target.checked; updatePreview(true); });
   document.querySelectorAll('.theme-template-card[data-theme]').forEach((button) => button.addEventListener('click', () => setTheme(button.dataset.theme)));
   $('designSystemSelect').addEventListener('change', (event) => setDesignSystem(event.target.value));
   document.querySelectorAll('[data-editorial-accent]').forEach((button) => button.addEventListener('click', () => setEditorialAccent(button.dataset.editorialAccent)));
@@ -719,6 +802,15 @@ function bindEvents() {
     document.querySelectorAll('.side-nav .nav-link').forEach((node) => node.classList.toggle('active', node === link));
     if (window.innerWidth <= 860) $('sidebar').classList.remove('open');
   }));
+  // While a package is being prepared the lockout also swallows link
+  // activation (clicks and Enter on focused links) so no navigation can race
+  // the download.
+  document.addEventListener('click', (event) => {
+    if (lockedControls && event.target instanceof Element && event.target.closest('a')) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
 }
 
 syncInputs();
