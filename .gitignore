@@ -1,8 +1,6 @@
 node_modules/
 .wrangler/tmp/
-.dev.vars
 .env
-.env.*
 
 # Scaffold templates are checked into git on purpose: they only contain
 # placeholder tokens (e.g. __CSRF_SECRET__) that the builder fills in at

@@ -1,4 +1,6 @@
 import { buildPreviewDocument, generateBundle, normalizePageEdits } from './generator.js';
+import { createNeonClient } from './database.js';
+import { loadPageEditsFromDatabase, savePageEditsToDatabase } from './page-edits-store.js';
 
 const encoder = new TextEncoder();
 // The HTTPS prefix prevents sibling domains from injecting the CSRF cookie.
@@ -168,13 +170,12 @@ async function preview(request, env, origin) {
   }
 }
 // The page editor's "Export to builder" submit persists the current page
-// edits server-side (KV) so they survive the editor tab closing. The builder
+// edits server-side (Neon) so they survive the editor tab closing. The builder
 // tab applies the same edits to its config and preview at the same time; the
 // next prepared ZIP carries them in the homepage source.
 const PAGE_EDIT_SITE_ID = /^[a-z0-9][a-z0-9-]{0,54}$/;
 async function savePageEdits(request, env) {
   if (!await csrfValid(request, env)) return failure('Cross-site request rejected or security token expired.', 403);
-  if (!env.PAGE_EDITOR) return failure('Page editor storage is not configured on this deployment.', 503);
   const body = await readBoundedText(request, MAX_CONFIG_BYTES);
   if (body.tooLarge) return failure('The page edits are too large.', 413);
   if (body.text === null) return failure('Send the page edits as JSON.');
@@ -186,17 +187,27 @@ async function savePageEdits(request, env) {
   let edits;
   try { edits = normalizePageEdits(input.edits); }
   catch (cause) { return failure(cause.message, 400); }
-  const record = { siteId, edits, updatedAt: new Date().toISOString() };
-  await env.PAGE_EDITOR.put(`page-edits:${siteId}`, JSON.stringify(record), { metadata: { edits: edits.length } });
+  if (!env.DATABASE_URL) return failure('Page editor database is not configured on this deployment.', 503);
+  try {
+    await savePageEditsToDatabase(createNeonClient(env.DATABASE_URL), siteId, edits);
+  } catch (cause) {
+    console.error('Page editor database save failed', cause);
+    return failure('Page edits could not be saved to the database.', 500);
+  }
   return json({ ok: true, siteId, saved: edits.length });
 }
 async function loadPageEdits(url, env) {
-  if (!env.PAGE_EDITOR) return failure('Page editor storage is not configured on this deployment.', 503);
   const siteId = String(url.searchParams.get('siteId') || '').trim().toLowerCase();
   if (!PAGE_EDIT_SITE_ID.test(siteId)) return failure('Send a valid site id.');
-  const raw = await env.PAGE_EDITOR.get(`page-edits:${siteId}`, 'text');
-  if (!raw) return failure('No saved page edits for this site.', 404);
-  return new Response(raw, { status: 200, headers: secureHeaders({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }) });
+  if (!env.DATABASE_URL) return failure('Page editor database is not configured on this deployment.', 503);
+  try {
+    const record = await loadPageEditsFromDatabase(createNeonClient(env.DATABASE_URL), siteId);
+    if (!record) return failure('No saved page edits for this site.', 404);
+    return json(record);
+  } catch (cause) {
+    console.error('Page editor database load failed', cause);
+    return failure('Page edits could not be loaded from the database.', 500);
+  }
 }
 export default {
   async fetch(request, env) {

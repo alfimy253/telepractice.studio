@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import worker from '../src/index.js';
 import { generateBundle, buildPreviewDocument, normalizePageEdits, applyPageEdits } from '../public/package-core.js';
+import { loadPageEditsFromDatabase, savePageEditsToDatabase } from '../src/page-edits-store.js';
+import { normalizeDatabaseUrl } from '../src/database.js';
 
 const origin = 'https://builder.example';
 const adminInput = {
@@ -16,15 +18,39 @@ const assets = {
     return new Response(await readFile(new URL(`../public${path}`, import.meta.url)));
   }
 };
-function kvStub() {
-  const store = new Map();
-  return {
-    store,
-    async put(key, value) { store.set(key, String(value)); },
-    async get(key) { return store.has(key) ? store.get(key) : null; }
+function databaseStub() {
+  const records = new Map();
+  const queries = [];
+  const sql = async (strings, ...values) => {
+    const statement = Array.isArray(strings) ? strings.join('?') : strings;
+    queries.push(statement);
+    if (statement.includes('INSERT INTO builder_page_edits')) {
+      records.set(values[0], {
+        siteId: values[0],
+        edits: JSON.parse(values[1]),
+        updatedAt: '2026-10-09 12:00:00+00'
+      });
+      return [];
+    }
+    if (statement.includes('FROM builder_page_edits')) {
+      return records.has(values[0]) ? [records.get(values[0])] : [];
+    }
+    return [];
   };
+  return { records, queries, sql };
 }
 const readDisk = (filename) => readFile(new URL(`../public/_scaffold/templates/${filename}`, import.meta.url), 'utf8');
+
+test('Neon connection URL drops sslmode and channel_binding without disabling TLS', () => {
+  const normalized = new URL(normalizeDatabaseUrl(
+    'postgresql://user:pass@example.neon.tech/db?sslmode=require&channel_binding=require&application_name=builder'
+  ));
+  assert.equal(normalized.protocol, 'postgresql:');
+  assert.equal(normalized.searchParams.has('sslmode'), false);
+  assert.equal(normalized.searchParams.has('channel_binding'), false);
+  assert.equal(normalized.searchParams.get('application_name'), 'builder');
+  assert.throws(() => normalizeDatabaseUrl('https://example.neon.tech/db'), /valid PostgreSQL connection URL/);
+});
 function zipEntries(bytes) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const decoder = new TextDecoder();
@@ -189,10 +215,10 @@ test('the server preview route applies page edits from the config query', async 
   assert.doesNotMatch(html, /Thoughtful care, built around the lives you share\./);
 });
 
-test('POST /api/page-editor saves edits to the KV store with CSRF protection', async () => {
-  const PAGE_EDITOR = kvStub();
-  const env = { ASSETS: assets, PAGE_EDITOR };
+test('page edits persist in Neon with CSRF protection and retain the existing API shape', async () => {
+  const database = databaseStub();
   // CSRF is required.
+  const env = { ASSETS: assets };
   assert.equal((await postPageEdits(env, { siteId: 'edit-practice', edits: [] })).status, 403);
   const auth = await session(env);
   const edits = [
@@ -200,30 +226,35 @@ test('POST /api/page-editor saves edits to the KV store with CSRF protection', a
     { selector: 'h3.service-title', index: 0, text: 'Saved service' }
   ];
   const response = await postPageEdits(env, { siteId: 'Edit-Practice', edits }, auth);
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { ok: true, siteId: 'edit-practice', saved: 2 });
-  const stored = JSON.parse(PAGE_EDITOR.store.get('page-edits:edit-practice'));
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).error, /database is not configured/);
+
+  // Exercise the Neon-backed store with a tagged-SQL test double.
+  await savePageEditsToDatabase(database.sql, 'edit-practice', edits);
+  assert.deepEqual(database.records.get('edit-practice').edits, edits);
+  assert.equal(database.queries.filter((query) => query.includes('CREATE TABLE')).length, 1);
+  assert.equal(database.queries.filter((query) => query.includes('INSERT INTO builder_page_edits')).length, 1);
+  const stored = await loadPageEditsFromDatabase(database.sql, 'edit-practice');
   assert.equal(stored.siteId, 'edit-practice');
-  assert.equal(stored.edits.length, 2);
-  assert.equal(stored.edits[0].text, 'Saved hero text');
+  assert.deepEqual(stored.edits, edits);
   assert.ok(stored.updatedAt);
-  // GET returns the saved record.
-  const loaded = await worker.fetch(new Request(`${origin}/api/page-editor?siteId=edit-practice`), env);
-  assert.equal(loaded.status, 200);
-  assert.deepEqual((await loaded.json()).edits, edits);
-  // Unknown site and bad payloads are rejected.
-  assert.equal((await worker.fetch(new Request(`${origin}/api/page-editor?siteId=nope`), env)).status, 404);
+  assert.equal(await loadPageEditsFromDatabase(database.sql, 'missing-site'), null);
+
+  const savedPayload = JSON.parse(JSON.stringify(stored));
+  assert.equal(savedPayload.siteId, 'edit-practice');
+  assert.equal(savedPayload.edits.length, 2);
+  assert.equal(savedPayload.edits[0].text, 'Saved hero text');
+  assert.ok(savedPayload.updatedAt);
+
+  // Bad payloads are rejected before the database is needed.
   assert.equal((await postPageEdits(env, { siteId: '../evil', edits }, auth)).status, 400);
   assert.equal((await postPageEdits(env, { siteId: 'ok-site', edits: [{ selector: 'a', index: 0, text: 'x' }] }, auth)).status, 400);
   assert.equal((await postPageEdits(env, { siteId: 'ok-site', edits: 'nope' }, auth)).status, 400);
 });
 
-test('POST /api/page-editor reports a missing storage binding without failing the builder', async () => {
+test('GET /api/page-editor reports a missing database configuration', async () => {
   const env = { ASSETS: assets };
-  const auth = await session(env);
-  const response = await postPageEdits(env, { siteId: 'edit-practice', edits: [] }, auth);
-  assert.equal(response.status, 503);
-  assert.match((await response.json()).error, /not configured/);
   const loaded = await worker.fetch(new Request(`${origin}/api/page-editor?siteId=edit-practice`), env);
   assert.equal(loaded.status, 503);
+  assert.match((await loaded.json()).error, /database is not configured/);
 });

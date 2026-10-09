@@ -9,8 +9,8 @@ import { normalizePageEdits } from './package-core.js';
 
 export const PAGE_EDITOR_CHANNEL = 'canopy-page-editor';
 
-// Persists page edits through the Worker (KV-backed). Never throws: a missing
-// storage binding or a network failure must not lose the edits the builder
+// Persists page edits through the Worker (Neon-backed). Never throws: a missing
+// database configuration or a network failure must not lose the edits the builder
 // already applied locally.
 export async function savePageEditsToServer(siteId, edits, fetcher = globalThis.fetch) {
   try {
@@ -25,7 +25,7 @@ export async function savePageEditsToServer(siteId, edits, fetcher = globalThis.
       headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': token },
       body: JSON.stringify({ siteId, edits })
     });
-    if (response.status === 503) return { saved: false, message: 'page editor storage is not configured on this deployment' };
+    if (response.status === 503) return { saved: false, message: 'page editor database is not configured on this deployment' };
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       return { saved: false, message: error.error || `the save request failed (${response.status})` };

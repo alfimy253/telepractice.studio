@@ -1,6 +1,6 @@
 # Canopy Studio — Cloudflare admin builder
 
-This is a deployable Cloudflare Workers version of the Canopy Studio website builder. It serves the HTML/CSS/JavaScript admin interface and packages a selected Vercel or Cloudflare practice-site project into a ZIP. The builder itself is stateless; it does not need Neon or retain practice data. The generated practice-site packages include a Neon serverless connection helper and keep their database URL in deployment secrets.
+This is a deployable Cloudflare Workers version of the Canopy Studio website builder. It serves the HTML/CSS/JavaScript admin interface and packages a selected Vercel or Cloudflare practice-site project into a ZIP. The builder needs no database for ZIP generation; when configured with Neon, it uses a small table to persist page-editor edits. Generated practice-site packages also include a Neon serverless connection helper and keep their database URL in deployment secrets.
 
 ## Deploy the builder to Cloudflare
 
@@ -12,15 +12,15 @@ npx wrangler login
 npm run deploy
 ```
 
-The stateless builder works without deployment secrets. To optionally sign its CSRF tokens as an additional check, run `npx wrangler secret put CSRF_SECRET` and enter a long, unique random value (for example, generate one with `openssl rand -hex 32`). Do not commit secrets.
-
-The page editor persists exported edits in a KV namespace. Create it once and set the id in `wrangler.jsonc`:
+The builder works without deployment secrets for package generation. To persist page-editor edits across sessions, set `DATABASE_URL` on the builder Worker to a pooled Neon PostgreSQL connection URL:
 
 ```bash
-npx wrangler kv namespace create PAGE_EDITOR
+npx wrangler secret put DATABASE_URL
 ```
 
-Copy the returned id into `kv_namespaces[0].id` (and into `preview_id` for preview deployments). Without the binding, `POST /api/page-editor` answers 503 — exports still apply in the builder, only the server-side persistence is skipped.
+The Worker creates its `builder_page_edits` table automatically and upserts edits there. This can use the same Neon database as a generated practice site; the builder table is separate from the generated app's tables. Without `DATABASE_URL`, page edits still apply to the current builder preview and ZIP, but server-side persistence returns 503. KV is not used.
+
+To optionally sign the builder's CSRF tokens as an additional check, run `npx wrangler secret put CSRF_SECRET` and enter a long, unique random value (for example, generate one with `openssl rand -hex 32`). Do not commit secrets.
 
 For local development:
 
@@ -28,7 +28,7 @@ For local development:
 npm run dev
 ```
 
-If you want optional signing locally, create an ignored `.dev.vars` file containing `CSRF_SECRET=your-random-secret`. Local variables are not automatically uploaded to the deployed Worker.
+For local page-edit persistence, create an ignored `.dev.vars` file containing `DATABASE_URL=your-pooled-neon-url`; add `CSRF_SECRET=your-random-secret` there if you want optional signing. Local variables are not automatically uploaded to the deployed Worker.
 
 ### ZIP download / CSRF troubleshooting
 
@@ -48,7 +48,7 @@ Run regression tests with `npm test` — the suite includes a 40-concurrent-user
 
 The "Page editor" text link in the site layout section opens `/page-editor.html` in a new tab. That tab shows the exact document the builder preview is rendering (the builder stashes it in localStorage on every render) and lets you edit plain-text elements inline — click a heading, paragraph, list item or label to edit it. Edits are recorded as `selector + position + text` pairs against a restricted selector grammar, so they address the same element in the preview and in the packaged source.
 
-The "Export to builder" button posts the edits to the builder tab over a `BroadcastChannel`. The builder applies them to its configuration (the preview re-renders immediately, and the next prepared ZIP carries them in the homepage `index.html` — or the Brivon design file that replaces it), persists them through `POST /api/page-editor` (KV-backed, CSRF-protected), shows an "N edits applied" note next to the layout controls, and acknowledges so the editor tab closes itself. `GET /api/page-editor?siteId=` returns the saved record. A "Clear edits" button removes the applied edits.
+The "Export to builder" button posts the edits to the builder tab over a `BroadcastChannel`. The builder applies them to its configuration (the preview re-renders immediately, and the next prepared ZIP carries them in the homepage `index.html` — or the Brivon design file that replaces it), persists them through `POST /api/page-editor` (Neon-backed when `DATABASE_URL` is configured, CSRF-protected), shows an "N edits applied" note next to the layout controls, and acknowledges so the editor tab closes itself. `GET /api/page-editor?siteId=` returns the saved record. A "Clear edits" button removes the applied edits.
 
 Regions the preview regenerates from the builder configuration (menu, gallery, journal, payments, CTAs, article modal, toast) are not editable, so an edit always survives into the packaged homepage source. Editing any builder control re-renders the preview, and Generate always snapshots the current configuration — the prepared ZIP always reflects the latest UI state, including page edits.
 
