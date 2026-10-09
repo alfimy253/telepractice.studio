@@ -7,7 +7,8 @@ import {
   buildPreviewDocument as buildPreviewDocumentCore,
   generateBundle as generateBundleCore,
   normalizeAdminAccount,
-  normalizeConfig
+  normalizeConfig,
+  normalizePageEdits
 } from '../public/package-core.js';
 
 async function readScaffold(env, origin, filename) {
@@ -25,4 +26,4 @@ async function generateBundle(input, env, origin) {
   return generateBundleCore(input, (filename) => readScaffold(env, origin, filename));
 }
 
-export { buildPreviewDocument, generateBundle, normalizeAdminAccount, normalizeConfig };
+export { buildPreviewDocument, generateBundle, normalizeAdminAccount, normalizeConfig, normalizePageEdits };

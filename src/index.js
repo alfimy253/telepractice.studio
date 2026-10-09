@@ -1,4 +1,4 @@
-import { buildPreviewDocument, generateBundle } from './generator.js';
+import { buildPreviewDocument, generateBundle, normalizePageEdits } from './generator.js';
 
 const encoder = new TextEncoder();
 // The HTTPS prefix prevents sibling domains from injecting the CSRF cookie.
@@ -167,6 +167,37 @@ async function preview(request, env, origin) {
     return failure(`The live preview could not be prepared. ${cause?.message || ''}`.trim(), 500);
   }
 }
+// The page editor's "Export to builder" submit persists the current page
+// edits server-side (KV) so they survive the editor tab closing. The builder
+// tab applies the same edits to its config and preview at the same time; the
+// next prepared ZIP carries them in the homepage source.
+const PAGE_EDIT_SITE_ID = /^[a-z0-9][a-z0-9-]{0,54}$/;
+async function savePageEdits(request, env) {
+  if (!await csrfValid(request, env)) return failure('Cross-site request rejected or security token expired.', 403);
+  if (!env.PAGE_EDITOR) return failure('Page editor storage is not configured on this deployment.', 503);
+  const body = await readBoundedText(request, MAX_CONFIG_BYTES);
+  if (body.tooLarge) return failure('The page edits are too large.', 413);
+  if (body.text === null) return failure('Send the page edits as JSON.');
+  let input;
+  try { input = JSON.parse(body.text); }
+  catch (_) { return failure('Send the page edits as JSON.'); }
+  const siteId = String(input?.siteId || '').trim().toLowerCase();
+  if (!PAGE_EDIT_SITE_ID.test(siteId)) return failure('Send a valid site id.');
+  let edits;
+  try { edits = normalizePageEdits(input.edits); }
+  catch (cause) { return failure(cause.message, 400); }
+  const record = { siteId, edits, updatedAt: new Date().toISOString() };
+  await env.PAGE_EDITOR.put(`page-edits:${siteId}`, JSON.stringify(record), { metadata: { edits: edits.length } });
+  return json({ ok: true, siteId, saved: edits.length });
+}
+async function loadPageEdits(url, env) {
+  if (!env.PAGE_EDITOR) return failure('Page editor storage is not configured on this deployment.', 503);
+  const siteId = String(url.searchParams.get('siteId') || '').trim().toLowerCase();
+  if (!PAGE_EDIT_SITE_ID.test(siteId)) return failure('Send a valid site id.');
+  const raw = await env.PAGE_EDITOR.get(`page-edits:${siteId}`, 'text');
+  if (!raw) return failure('No saved page edits for this site.', 404);
+  return new Response(raw, { status: 200, headers: secureHeaders({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }) });
+}
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -182,6 +213,8 @@ export default {
     if (url.pathname === '/api/health' && request.method === 'GET') return json({ ok: true, runtime: 'cloudflare-workers-builder' });
     if (url.pathname === '/api/csrf' && request.method === 'GET') return issueCsrf(request, env);
     if (url.pathname === '/api/preview' && request.method === 'GET') return preview(request, env, url.origin);
+    if (url.pathname === '/api/page-editor' && request.method === 'POST') return savePageEdits(request, env);
+    if (url.pathname === '/api/page-editor' && request.method === 'GET') return loadPageEdits(url, env);
     if (url.pathname === '/api/generate' && request.method === 'POST') {
       if (!await csrfValid(request, env)) return failure('Cross-site request rejected or security token expired.', 403);
       const body = await readBoundedText(request, MAX_CONFIG_BYTES);

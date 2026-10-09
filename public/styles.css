@@ -132,6 +132,8 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .section-head-space { margin-top: 23px; }
 .theme-panel { padding: 15px 17px 14px; }
 .theme-panel-row { display: flex; align-items: flex-start; justify-content: space-between; }
+.theme-panel-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; justify-content: flex-end; }
+.page-editor-status { color: #909b94; font-size: 9px; }
 .panel-description { margin: 4px 0 10px; font-size: 9px; color: #8a968e; }
 .reset-link { color: #909b94; font-size: 9px; }
 .reset-link:hover { color: var(--green); }

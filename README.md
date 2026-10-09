@@ -14,6 +14,14 @@ npm run deploy
 
 The stateless builder works without deployment secrets. To optionally sign its CSRF tokens as an additional check, run `npx wrangler secret put CSRF_SECRET` and enter a long, unique random value (for example, generate one with `openssl rand -hex 32`). Do not commit secrets.
 
+The page editor persists exported edits in a KV namespace. Create it once and set the id in `wrangler.jsonc`:
+
+```bash
+npx wrangler kv namespace create PAGE_EDITOR
+```
+
+Copy the returned id into `kv_namespaces[0].id` (and into `preview_id` for preview deployments). Without the binding, `POST /api/page-editor` answers 503 — exports still apply in the builder, only the server-side persistence is skipped.
+
 For local development:
 
 ```bash
@@ -34,7 +42,15 @@ The builder uses random double-submit tokens, an HttpOnly SameSite=Strict cookie
 
 Downloads are validated by host, not by a byte-for-byte URL match, so the builder keeps working behind a reverse proxy (a preview host, a load balancer or a custom domain) that terminates TLS or rewrites the `Host` header. A request is accepted when the `Origin` host is one the Worker sees, is announced through `X-Forwarded-Host`, or the browser's own unforgeable `Sec-Fetch-Site: same-origin` header confirms the call came from a builder tab. `Sec-Fetch-Site: same-site` and `cross-site` requests, and any `Origin` from another host without that assertion, are still rejected with 403. Deployments behind a proxy that also strips `Sec-Fetch-*` can list their public hosts explicitly with an `ALLOWED_ORIGINS` variable (comma separated, wildcards allowed, for example `https://builder.example,*.preview.example`). The builder UI reports which endpoint refused the request, so a 403 on `/api/csrf` points at proxy/host configuration rather than at the ZIP build.
 
-Run regression tests with `npm test`.
+Run regression tests with `npm test` — the suite includes a 40-concurrent-user stress test of `/api/generate` (every user gets their own CSRF session and a distinct, valid ZIP with their own freshly generated secrets).
+
+### Page editor
+
+The "Page editor" text link in the site layout section opens `/page-editor.html` in a new tab. That tab shows the exact document the builder preview is rendering (the builder stashes it in localStorage on every render) and lets you edit plain-text elements inline — click a heading, paragraph, list item or label to edit it. Edits are recorded as `selector + position + text` pairs against a restricted selector grammar, so they address the same element in the preview and in the packaged source.
+
+The "Export to builder" button posts the edits to the builder tab over a `BroadcastChannel`. The builder applies them to its configuration (the preview re-renders immediately, and the next prepared ZIP carries them in the homepage `index.html` — or the Brivon design file that replaces it), persists them through `POST /api/page-editor` (KV-backed, CSRF-protected), shows an "N edits applied" note next to the layout controls, and acknowledges so the editor tab closes itself. `GET /api/page-editor?siteId=` returns the saved record. A "Clear edits" button removes the applied edits.
+
+Regions the preview regenerates from the builder configuration (menu, gallery, journal, payments, CTAs, article modal, toast) are not editable, so an edit always survives into the packaged homepage source. Editing any builder control re-renders the preview, and Generate always snapshots the current configuration — the prepared ZIP always reflects the latest UI state, including page edits.
 
 The Worker serves the static builder interface and handles `/api/csrf`, `/api/preview` plus `/api/generate`. Choose Vercel or Cloudflare in the builder to download only that runtime's source-code package; generation does not deploy or publish a site. ZIP builds use the versioned scaffold in `public/_scaffold/templates/`, origin validation, a bounded JSON body, security headers, and an in-Worker ZIP writer. The builder does not store the admin credentials supplied for a generated site, a customer database, or practice data.
 

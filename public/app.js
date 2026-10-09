@@ -1,5 +1,7 @@
 import { requestGeneratedPackage } from './download.js';
 import { buildPackageLocally, buildPreviewLocally } from './package-builder.js';
+import { normalizePageEdits } from './package-core.js';
+import { initPageEditorBridge, openPageEditor, savePageEditsToServer } from './editor-bridge.js';
 
 const DEFAULT_CONFIG = {
   specialty: 'veterinary',
@@ -17,7 +19,8 @@ const DEFAULT_CONFIG = {
   databaseUrl: '',
   payments: { gcashName: 'Harborlight Veterinary Care', gcashNumber: '+63 917 555 0134', mayaName: 'Harborlight Veterinary Care', mayaNumber: '+63 918 555 0142' },
   customPages: [],
-  features: { blog: true, gallery: true, scheduling: true }
+  features: { blog: true, gallery: true, scheduling: true },
+  pageEdits: []
 };
 const THEMES = {
   canopy: { primaryColor: '#376f62', accentColor: '#e9b36e', paperColor: '#fbf8f1', label: 'Canopy', mood: 'calm & grounded' },
@@ -78,6 +81,12 @@ function normalizeSavedPages(value) {
     imageUrl: String(page?.imageUrl || '').slice(0, 2048)
   }));
 }
+// Page-editor edits are public page text. They are validated on load so a
+// tampered or outdated saved value can never break the preview or the ZIP.
+function pageEditsFrom(value) {
+  try { return normalizePageEdits(value); } catch (_) { return []; }
+}
+function currentPageEdits() { return pageEditsFrom(config.pageEdits); }
 function loadConfig() {
   try {
     const saved = JSON.parse(localStorage.getItem('canopy-site-config') || 'null');
@@ -91,7 +100,8 @@ function loadConfig() {
       payments: { ...DEFAULT_CONFIG.payments, ...(saved.payments || {}) },
       customPages: normalizeSavedPages(saved.customPages),
       deploymentTarget: saved.deploymentTarget === 'cloudflare' ? 'cloudflare' : 'vercel',
-      features: { ...DEFAULT_CONFIG.features, ...(saved.features || {}) }
+      features: { ...DEFAULT_CONFIG.features, ...(saved.features || {}) },
+      pageEdits: pageEditsFrom(saved.pageEdits)
     };
   } catch (_) { return structuredClone(DEFAULT_CONFIG); }
 }
@@ -135,6 +145,19 @@ function syncInputs() {
   $('airPaletteNote').hidden = config.theme !== 'air';
   document.querySelectorAll('[data-editorial-accent]').forEach((button) => button.classList.toggle('active', button.dataset.editorialAccent.toLowerCase() === config.primaryColor.toLowerCase()));
   syncDownloadControls();
+  syncPageEditorStatus();
+}
+// Surfaces the page editor's applied edits next to the site layout controls so
+// it is always clear that the preview (and the next ZIP) carries custom text.
+function syncPageEditorStatus() {
+  const edits = currentPageEdits();
+  const status = $('pageEditorStatus');
+  const clear = $('clearPageEdits');
+  if (status) {
+    status.hidden = edits.length === 0;
+    status.textContent = edits.length ? `Page editor: ${edits.length} edit${edits.length === 1 ? '' : 's'} applied` : '';
+  }
+  if (clear) clear.hidden = edits.length === 0;
 }
 // Public site settings only — never the admin credentials or database URL.
 function livePreviewConfig() {
@@ -160,7 +183,10 @@ function livePreviewConfig() {
     },
     // Only menu labels/routes are needed to preview navigation; page bodies
     // stay out of the request so it remains comfortably below the limit.
-    customPages: normalizeSavedPages(config.customPages).map(({ menuName, url }) => ({ menuName, url }))
+    customPages: normalizeSavedPages(config.customPages).map(({ menuName, url }) => ({ menuName, url })),
+    // Page-editor edits ride along so the preview shows exactly what the
+    // editor exported (the server preview route applies the same edits).
+    pageEdits: currentPageEdits()
   };
 }
 function livePreviewStatus(message) {
@@ -172,6 +198,14 @@ function livePreviewStatus(message) {
 function showLivePreview(html, requestId, frame) {
   if (requestId !== livePreviewRequestId) return;
   frame.srcdoc = html;
+  // The page editor tab loads this exact document, so it edits precisely what
+  // the builder preview shows; the meta carries the edit list already applied.
+  try {
+    localStorage.setItem('canopy-preview-html', html);
+    localStorage.setItem('canopy-preview-meta', JSON.stringify({
+      siteId: slugify(config.businessName), pageEdits: currentPageEdits(), updatedAt: Date.now()
+    }));
+  } catch (_) { /* storage full or unavailable: the editor falls back to building locally */ }
   livePreviewStatus('');
   layoutLivePreview();
 }
@@ -396,6 +430,9 @@ function configForPackage() {
     heroHeadline: kind.headline.replace('|', '\n'),
     heroText: kind.subhead,
     services: kind.services,
+    // The ZIP's homepage source carries the page-editor edits, so the
+    // downloaded code always matches what the preview showed at click time.
+    pageEdits: currentPageEdits(),
     createdAt: new Date().toISOString()
   };
 }
@@ -662,6 +699,12 @@ function saveBlobDownload(blob, filename) {
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = filename;
+  // The lockout's link guard (bindEvents) swallows every anchor click while a
+  // package is being prepared, and this anchor is clicked programmatically
+  // while the lock is still held. Mark it so the guard lets it through —
+  // without the mark its preventDefault() cancels the click and the browser
+  // never saves the ZIP.
+  anchor.setAttribute('data-package-download', '');
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
@@ -767,6 +810,24 @@ function bindEvents() {
   document.querySelectorAll('[data-editorial-accent]').forEach((button) => button.addEventListener('click', () => setEditorialAccent(button.dataset.editorialAccent)));
   $('resetTheme').addEventListener('click', resetTheme);
   $('resetPreview').addEventListener('click', resetCopy);
+  $('openPageEditor').addEventListener('click', openPageEditor);
+  $('clearPageEdits').addEventListener('click', () => {
+    config.pageEdits = [];
+    syncInputs();
+    updatePreview(true);
+    toast('Page edits cleared', 'The preview and the next ZIP use the generated copy again.');
+  });
+  // The page editor tab posts its edits here on "Export to builder". They are
+  // applied to the config (preview + next ZIP) and persisted server-side.
+  initPageEditorBridge({
+    applyEdits: async (edits) => {
+      config.pageEdits = edits;
+      saveConfig(true);
+      syncInputs();
+      const siteId = slugify(config.businessName);
+      return savePageEditsToServer(siteId, edits);
+    }
+  });
   $('generateButton').addEventListener('click', downloadPackage);
   $('topGenerate').addEventListener('click', downloadPackage);
   document.querySelectorAll('[data-deployment-target]').forEach((button) => button.addEventListener('click', () => setDeploymentTarget(button.dataset.deploymentTarget)));
@@ -804,12 +865,15 @@ function bindEvents() {
   }));
   // While a package is being prepared the lockout also swallows link
   // activation (clicks and Enter on focused links) so no navigation can race
-  // the download.
+  // the download. The ZIP download anchor is exempt: saveBlobDownload() marks
+  // it and clicks it programmatically while the lock is still held, and
+  // blocking it would cancel the file save.
   document.addEventListener('click', (event) => {
-    if (lockedControls && event.target instanceof Element && event.target.closest('a')) {
-      event.preventDefault();
-      event.stopPropagation();
-    }
+    if (!lockedControls || !(event.target instanceof Element)) return;
+    const link = event.target.closest('a');
+    if (!link || link.hasAttribute('data-package-download')) return;
+    event.preventDefault();
+    event.stopPropagation();
   }, true);
 }
 

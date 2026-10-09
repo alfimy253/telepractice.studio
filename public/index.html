@@ -121,7 +121,12 @@
             <article class="panel theme-panel">
               <div class="theme-panel-row">
                 <div><span class="panel-kicker">CHOOSE A SITE LAYOUT</span><p class="panel-description">Choose a complete design system. Brivon uses its own generated HTML, CSS and JavaScript—not an Illustration color variation.</p></div>
-                <button class="reset-link" id="resetTheme">Reset</button>
+                <div class="theme-panel-actions">
+                  <span class="page-editor-status" id="pageEditorStatus" hidden></span>
+                  <button class="reset-link" id="clearPageEdits" hidden>Clear edits</button>
+                  <button class="reset-link" id="resetTheme">Reset</button>
+                  <button class="small-link" id="openPageEditor">Page editor<svg><use href="#i-external"/></svg></button>
+                </div>
               </div>
               <label class="design-system-picker"><span>Design system</span><select id="designSystemSelect"><option value="illustration">Illustration theme (current)</option><option value="brivon-dark">Brivon · Dark</option><option value="brivon-light">Brivon · Light</option></select><small id="designSystemHelp">Choose an Illustration layout below, or switch to a separate Brivon UI system.</small></label>
               <div class="theme-template-grid" id="illustrationThemeGrid" role="group" aria-label="Illustration layout themes">
