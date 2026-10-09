@@ -473,6 +473,129 @@ function setElementClass(html, elementId, className, enabled) {
   const tag = found.tag.replace(/\s*class="[^"]*"/, '').replace(/>$/, `${attribute}>`);
   return `${html.slice(0, found.start)}${tag}${html.slice(found.end + 1)}`;
 }
+
+// --- Page editor edits -----------------------------------------------------
+// The builder's page editor (public/page-editor.html) edits plain-text
+// elements of the generated homepage. Each edit addresses one element with a
+// restricted simple selector (`tag`, `.class`, `tag.class`, `#id`) plus the
+// element's position among that selector's matches, so the very same edit
+// applies to the live preview document and to the homepage file written into
+// the ZIP — both are built from the same scaffold source, and the preview's
+// own transformations never add or remove elements outside the live-data
+// regions (menu, gallery, journal, payments), which the editor excludes.
+const PAGE_EDIT_TAGS = new Set(['h1','h2','h3','h4','h5','h6','h7','h8','p','span','li','strong','em','small','blockquote','figcaption','label','div']);
+// Regions the preview regenerates from the builder config and the generated
+// site re-renders at runtime (menu, gallery, journal, payments, CTAs, modal,
+// toast). Their content differs between the preview document and the packaged
+// homepage source, so page edits never target them — in the editor, in the
+// index computation, and in applyPageEdits alike. Keeping one shared list is
+// what makes a selector+index pair mean the same element in both documents.
+const PAGE_EDIT_EXCLUDED_IDS = new Set(['siteNav','drawerNav','editorialSiteNav','galleryGrid','postGrid','paymentDetails','footerPayments','headerCta','heroBook','articleBook','editorialSidebarCta','articleModal','siteToast']);
+const MAX_PAGE_EDITS = 64;
+const MAX_PAGE_EDIT_TEXT = 2000;
+const PAGE_EDIT_SELECTOR = /^([a-z][a-z0-9]*)?((?:\.[a-zA-Z0-9_-]+){0,3})?(#[a-zA-Z0-9_-]+)?$/;
+function parsePageEditSelector(selector) {
+  const match = PAGE_EDIT_SELECTOR.exec(String(selector || '').trim());
+  if (!match || (!match[1] && !match[2] && !match[3])) return null;
+  return {
+    tag: match[1] ? match[1].toLowerCase() : null,
+    classes: match[2] ? match[2].split('.').filter(Boolean) : [],
+    id: match[3] ? match[3].slice(1) : null
+  };
+}
+// Validates and deduplicates the editor's edit list. Throws on anything the
+// editor would never produce, so a bad payload fails loudly instead of
+// silently dropping edits.
+function normalizePageEdits(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error('Page edits must be a list of target/text pairs.');
+  if (value.length > MAX_PAGE_EDITS) throw new Error(`Apply no more than ${MAX_PAGE_EDITS} page edits.`);
+  const byTarget = new Map();
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Each page edit must be a target/text object.');
+    const selector = String(item.selector || '').trim();
+    const parsed = parsePageEditSelector(selector);
+    if (!parsed) throw new Error(`Unsupported page-edit target: ${selector || '(empty)'}`);
+    if (parsed.tag && !PAGE_EDIT_TAGS.has(parsed.tag)) throw new Error(`Page edits cannot target <${parsed.tag}> elements.`);
+    const index = Number(item.index);
+    if (!Number.isInteger(index) || index < 0 || index > 999) throw new Error('Each page edit needs a target position between 0 and 999.');
+    byTarget.set(`${selector}::${index}`, { selector, index, text: String(item.text ?? '').slice(0, MAX_PAGE_EDIT_TEXT) });
+  }
+  return [...byTarget.values()];
+}
+// Ranges of a document whose text must never be scanned for tags: style and
+// script bodies can contain characters that look like markup, and comments
+// can contain example tags.
+function inertRanges(html) {
+  const ranges = [];
+  const pattern = /<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>|<!--[\s\S]*?-->/gi;
+  let match;
+  while ((match = pattern.exec(html)) !== null) ranges.push([match.index, match.index + match[0].length]);
+  return ranges;
+}
+// Every opening tag matching the parsed selector, in document order, skipping
+// the excluded live-data regions (by ancestor-or-self id) and inert ranges.
+// Mirrors the browser editor's index computation: querySelectorAll(selector)
+// filtered to elements outside the same excluded regions.
+const PAGE_EDIT_VOID_TAGS = new Set(['area','base','br','col','embed','hr','img','input','link','meta','source','track','wbr']);
+function findMatchingTags(html, parsed) {
+  const inert = inertRanges(html);
+  const insideInert = (index) => inert.some(([start, end]) => index >= start && index < end);
+  const matches = [];
+  const openIds = []; // ids of currently open ancestors
+  const tagPattern = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
+  let match;
+  while ((match = tagPattern.exec(html)) !== null) {
+    if (insideInert(match.index)) continue;
+    const closing = match[1] === '/';
+    const tag = match[2].toLowerCase();
+    const attrs = match[3];
+    const idAttr = (/\bid\s*=\s*"([^"]*)"/.exec(attrs) || /\bid\s*=\s*'([^']*)'/.exec(attrs) || [])[1] || '';
+    if (closing) {
+      for (let i = openIds.length - 1; i >= 0; i--) {
+        if (openIds[i].tag === tag) { openIds.length = i; break; }
+      }
+      continue;
+    }
+    const selfClosing = /\/\s*>$/.test(match[0]) || PAGE_EDIT_VOID_TAGS.has(tag);
+    const excluded = PAGE_EDIT_EXCLUDED_IDS.has(idAttr) || openIds.some((entry) => PAGE_EDIT_EXCLUDED_IDS.has(entry.id));
+    if (!selfClosing) openIds.push({ tag, id: idAttr });
+    if (excluded) continue;
+    if (parsed.tag && tag !== parsed.tag) continue;
+    const classAttr = (/\bclass\s*=\s*"([^"]*)"/.exec(attrs) || /\bclass\s*=\s*'([^']*)'/.exec(attrs) || [])[1] || '';
+    const classes = classAttr.split(/\s+/).filter(Boolean);
+    if (parsed.classes.some((name) => !classes.includes(name))) continue;
+    if (parsed.id && idAttr !== parsed.id) continue;
+    matches.push({ start: match.index, end: match.index + match[0].length, tag: match[0] });
+  }
+  return matches;
+}
+// Replaces the inner HTML of the element whose opening tag is `openTag`,
+// tracking nested tags of the same name so nested wrappers stay intact.
+function replaceElementContentAt(html, openTag, content) {
+  const tagName = /^<\s*([a-zA-Z][a-zA-Z0-9-]*)/.exec(openTag.tag)[1].toLowerCase();
+  const scanner = new RegExp(`<\\/?${tagName}(?=[\\s/>])`, 'gi');
+  scanner.lastIndex = openTag.end;
+  let depth = 1;
+  let match;
+  while ((match = scanner.exec(html)) !== null) {
+    depth += match[0].startsWith('</') ? -1 : 1;
+    if (depth === 0) return `${html.slice(0, openTag.end)}${content}${html.slice(match.index)}`;
+  }
+  return html;
+}
+// Applies page-editor text edits to an HTML document. New text is escaped and
+// newlines become <br>, so edited elements keep their line structure.
+function applyPageEdits(html, edits) {
+  for (const edit of edits) {
+    const parsed = parsePageEditSelector(edit.selector);
+    if (!parsed) continue;
+    const target = findMatchingTags(html, parsed)[edit.index];
+    if (!target) continue;
+    html = replaceElementContentAt(html, target, htmlEscape(edit.text).replace(/\n/g, '<br>'));
+  }
+  return html;
+}
 function previewMenuHtml(config) {
   const links = config.menuLinks.filter((link) => featureEnabled(config, link.feature));
   return links.map((link) => `<a href="${htmlEscape(link.href)}">${htmlEscape(link.label)}</a>`).join('\n          ');
@@ -592,12 +715,19 @@ async function buildPreviewDocument(input, readTemplate) {
   html = html.replace(/href="\/(#[^"]*)"/g, (match, target) => `href="${target}"`);
   html = html.replace(/href="\/([^"]*)"/g, 'href="#home"');
   html = await inlinePreviewImages(html, readTemplate);
+  // Page-editor edits apply last, so an edited element wins over the
+  // config-derived text the preview just filled in.
+  html = applyPageEdits(html, normalizePageEdits(input?.pageEdits));
   return { html, theme: config.theme, siteId: config.siteId };
 }
 const ENV_FILE_BY_TARGET = { cloudflare: '.dev.vars', vercel: '.env' };
 async function buildFiles(input, readTemplate) {
   const config = normalizeConfig(input);
   const secrets = await buildSecrets(input);
+  // Page-editor edits land in the packaged homepage (index.html, or the Brivon
+  // design file that replaces it), so the downloaded source code carries the
+  // same text the builder preview shows.
+  const pageEdits = normalizePageEdits(input.pageEdits);
   const target = config.target;
   const manifest = JSON.parse(await readTemplate('manifest.json'));
   const files = new Map();
@@ -609,6 +739,7 @@ async function buildFiles(input, readTemplate) {
     if (relative === 'public/index.html') {
       const homepage = homeDesignFile(config.theme);
       if (homepage !== `shared/${relative}`) content = replaceTokens(await readTemplate(homepage), config);
+      content = applyPageEdits(content, pageEdits);
     }
     files.set(publicPath(relative), content);
   }
@@ -645,4 +776,4 @@ async function generateBundle(input, readTemplate) {
   const buffer = createZip([...files.entries()]);
   return { config, buffer, filename: `${config.siteId}-${config.target}.zip` };
 }
-export { buildPreviewDocument, generateBundle, normalizeAdminAccount, normalizeConfig };
+export { buildPreviewDocument, generateBundle, normalizeAdminAccount, normalizeConfig, normalizePageEdits, applyPageEdits, PAGE_EDIT_EXCLUDED_IDS };

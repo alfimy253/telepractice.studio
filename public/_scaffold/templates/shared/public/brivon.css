@@ -1170,15 +1170,20 @@
    journal, article modal, toast) and the light-theme token remap.
    ============================================================================ */
 
-/* Repository heading convention: Brivon h1–h5 keep at least five pixels of
-   additional line-box space for wrapped titles. Class-qualified display
-   headings from the template (hero, section heads, closing CTA) keep the
-   template's own rhythm. */
+/* Repository heading convention: Brivon h1–h8 keep five pixels of additional
+   line-box space for wrapped titles, so wrapped heading lines keep 4–8px of
+   breathing room between them. Class-qualified display headings from the
+   template (hero, section heads, closing CTA) keep the template's own
+   rhythm. Applies to both Brivon Dark and Brivon Light (one shared
+   stylesheet; the light theme is a token remap). */
 .brivon-shell h1,
 .brivon-shell h2,
 .brivon-shell h3,
 .brivon-shell h4,
-.brivon-shell h5 { line-height: calc(1em + 5px); }
+.brivon-shell h5,
+.brivon-shell h6,
+.brivon-shell h7,
+.brivon-shell h8 { line-height: calc(1em + 5px); }
 html:has(> body.brivon-shell) { scroll-behavior: smooth; }
 
 /* Brand lockup ---------------------------------------------------------- */
@@ -1345,7 +1350,7 @@ html:has(> body.brivon-shell) { scroll-behavior: smooth; }
    ============================================================================ */
 body.theme-brivon-dark:not(.brivon-shell),body.theme-brivon-light:not(.brivon-shell){--bv-bg:#0a0a0c;--bv-card:#18181c;--bv-elev:#232328;--bv-fg:#f4f4f0;--bv-soft:#c9c9c2;--bv-muted:#80807a;--bv-rule:rgba(244,244,240,.12);--bv-accent:#d4ff3d;--bv-on-accent:#08080a;--primary:var(--bv-accent);--paper:var(--bv-bg);--ink:var(--bv-fg);background:var(--bv-bg);color:var(--bv-fg);font-family:'Inter Tight',Inter,system-ui,sans-serif}
 body.theme-brivon-light:not(.brivon-shell){--bv-bg:#f5f5ef;--bv-card:#fff;--bv-elev:#e9e9e1;--bv-fg:#111114;--bv-soft:#4f4f4a;--bv-muted:#73736c;--bv-rule:rgba(10,10,12,.14);--bv-accent:#506f00;--bv-on-accent:#fff}
-body.theme-brivon-dark:not(.brivon-shell) h1,body.theme-brivon-dark:not(.brivon-shell) h2,body.theme-brivon-dark:not(.brivon-shell) h3,body.theme-brivon-dark:not(.brivon-shell) h4,body.theme-brivon-dark:not(.brivon-shell) h5,body.theme-brivon-light:not(.brivon-shell) h1,body.theme-brivon-light:not(.brivon-shell) h2,body.theme-brivon-light:not(.brivon-shell) h3,body.theme-brivon-light:not(.brivon-shell) h4,body.theme-brivon-light:not(.brivon-shell) h5{font-family:'Boldonse','Archivo Black',sans-serif!important;line-height:calc(1em + 5px)!important;text-transform:uppercase;letter-spacing:-.025em}
+body.theme-brivon-dark:not(.brivon-shell) h1,body.theme-brivon-dark:not(.brivon-shell) h2,body.theme-brivon-dark:not(.brivon-shell) h3,body.theme-brivon-dark:not(.brivon-shell) h4,body.theme-brivon-dark:not(.brivon-shell) h5,body.theme-brivon-dark:not(.brivon-shell) h6,body.theme-brivon-dark:not(.brivon-shell) h7,body.theme-brivon-dark:not(.brivon-shell) h8,body.theme-brivon-light:not(.brivon-shell) h1,body.theme-brivon-light:not(.brivon-shell) h2,body.theme-brivon-light:not(.brivon-shell) h3,body.theme-brivon-light:not(.brivon-shell) h4,body.theme-brivon-light:not(.brivon-shell) h5,body.theme-brivon-light:not(.brivon-shell) h6,body.theme-brivon-light:not(.brivon-shell) h7,body.theme-brivon-light:not(.brivon-shell) h8{font-family:'Boldonse','Archivo Black',sans-serif!important;line-height:calc(1em + 5px)!important;text-transform:uppercase;letter-spacing:-.025em}
 body.theme-brivon-dark:not(.brivon-shell) .announcement,body.theme-brivon-light:not(.brivon-shell) .announcement{background:var(--bv-accent);color:var(--bv-on-accent)}
 body.theme-brivon-dark:not(.brivon-shell) .site-header,body.theme-brivon-light:not(.brivon-shell) .site-header{background:var(--bv-bg);border-color:var(--bv-rule)}
 body.theme-brivon-dark:not(.brivon-shell) .site-brand strong,body.theme-brivon-light:not(.brivon-shell) .site-brand strong,body.theme-brivon-dark:not(.brivon-shell) .site-nav a,body.theme-brivon-light:not(.brivon-shell) .site-nav a{color:var(--bv-fg)}
