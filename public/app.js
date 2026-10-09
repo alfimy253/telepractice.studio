@@ -7,6 +7,7 @@ const DEFAULT_CONFIG = {
   specialty: 'veterinary',
   businessName: 'Harborlight Veterinary Care',
   location: 'Quezon City, Philippines',
+  timeZone: 'Asia/Manila',
   email: 'hello@harborlight.example',
   phone: '+63 2 8123 4567',
   theme: 'canopy',
@@ -124,6 +125,7 @@ function vertical() { return VERTICALS[config.specialty] || VERTICALS.veterinary
 function syncInputs() {
   $('practiceName').value = config.businessName;
   $('practiceLocation').value = config.location;
+  $('practiceTimeZone').value = config.timeZone || 'Asia/Manila';
   $('practiceEmail').value = config.email;
   $('practicePhone').value = config.phone;
   $('gcashName').value = config.payments.gcashName || '';
@@ -169,6 +171,7 @@ function livePreviewConfig() {
     businessName: name,
     brandName: name.replace(/\s+(care|clinic|studio|practice|dental)$/i, '').trim() || name,
     location: config.location.trim() || 'Your neighborhood',
+    timeZone: String(config.timeZone || 'Asia/Manila').trim() || 'Asia/Manila',
     email: config.email.trim() || `hello@${slugify(name)}.example`,
     phone: config.phone.trim() || '+1 555 010 0000',
     theme: config.theme,
@@ -407,6 +410,7 @@ function configForPackage() {
     businessName: name,
     brandName: pretty,
     location: config.location.trim() || 'Your neighborhood',
+    timeZone: String(config.timeZone || 'Asia/Manila').trim() || 'Asia/Manila',
     email: config.email.trim() || `hello@${slug}.example`,
     phone: config.phone.trim() || '+1 555 010 0000',
     theme: THEMES[config.theme] ? config.theme : 'canopy',
@@ -711,6 +715,10 @@ function saveBlobDownload(blob, filename) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 async function downloadPackage() {
+  if (!validatePracticeTimeZone()) {
+    toast('Check the practice time zone', 'Enter a valid IANA time zone, such as Asia/Manila.', true);
+    return;
+  }
   if (!validateAdminAccount()) {
     toast('Complete the admin account', 'Add a valid username, email and strong matching password before generating a site.', true);
     return;
@@ -765,6 +773,19 @@ async function downloadPackage() {
     syncDownloadControls();
   }
 }
+function validatePracticeTimeZone() {
+  const field = $('practiceTimeZone');
+  const timeZone = field.value.trim() || 'Asia/Manila';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone });
+    field.setCustomValidity('');
+    return true;
+  } catch {
+    field.setCustomValidity('Enter a valid IANA time zone, such as Asia/Manila.');
+    field.reportValidity();
+    return false;
+  }
+}
 function resetTheme() {
   config.theme = 'canopy';
   config.editorialAccent = 'black';
@@ -797,6 +818,7 @@ function bindEvents() {
     nameTouched = true; localStorage.setItem('canopy-name-touched', 'true'); updatePreview();
   });
   $('practiceLocation').addEventListener('input', (event) => { config.location = event.target.value; updatePreview(); });
+  $('practiceTimeZone').addEventListener('input', (event) => { config.timeZone = event.target.value; event.target.setCustomValidity(''); saveConfig(); });
   $('practiceEmail').addEventListener('input', (event) => { config.email = event.target.value; saveConfig(); });
   $('practicePhone').addEventListener('input', (event) => { config.phone = event.target.value; saveConfig(); });
   [['gcashName','gcashName'],['gcashNumber','gcashNumber'],['mayaName','mayaName'],['mayaNumber','mayaNumber']].forEach(([id, field]) => $(id).addEventListener('input', (event) => { config.payments[field] = event.target.value; saveConfig(); }));

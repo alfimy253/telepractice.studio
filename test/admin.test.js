@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { adminDashboardPath, isAdminDashboardPath } from '../public/_scaffold/templates/shared/lib/admin-url.js';
 import {
   ADMIN_SESSION_TTL_SECONDS,
@@ -16,6 +17,7 @@ const validAccount = {
   adminEmail: 'owner@example.test',
   adminPassword: 'CanopyOwner!8'
 };
+const templateRoot = new URL('../public/_scaffold/templates/', import.meta.url);
 
 test('admin dashboard path uses the Monday-first animal sequence and calendar date', () => {
   const mondayFirstDates = Array.from({ length: 7 }, (_unused, index) => new Date(Date.UTC(2026, 4, 4 + index, 12)));
@@ -38,6 +40,25 @@ test('admin dashboard path recognizer accepts only a valid day number and dashbo
   for (const path of ['/admin.html', '/tadmin0/dashboard', '/tadmin32/dashboard', '/tadmin8', '/tadmin8/posts']) {
     assert.equal(isAdminDashboardPath(path), false);
   }
+});
+
+test('generated owner path is absent from public entry points and only returned to authenticated sessions', async () => {
+  const [appointmentsHtml, vercelRuntime, cloudflareRuntime, vercelConfig, cloudflareAdminUi] = await Promise.all([
+    readFile(new URL('shared/public/appointments.html', templateRoot), 'utf8'),
+    readFile(new URL('vercel/api/index.js', templateRoot), 'utf8'),
+    readFile(new URL('cloudflare/src/index.js', templateRoot), 'utf8'),
+    readFile(new URL('vercel/vercel.json', templateRoot), 'utf8'),
+    readFile(new URL('shared/public/admin.js', templateRoot), 'utf8')
+  ]);
+  assert.doesNotMatch(appointmentsHtml, /Owner area|api\/admin\/entry|admin\.html/);
+  assert.doesNotMatch(vercelRuntime, /app\.get\(['"]\/api\/admin\/entry/);
+  assert.doesNotMatch(cloudflareRuntime, /path === ['"]\/api\/admin\/entry/);
+  assert.match(vercelRuntime, /\.\.\.\(authenticated \? \{ dashboardPath: adminDashboardPath/);
+  assert.match(cloudflareRuntime, /\.\.\.\(authenticated \? \{ dashboardPath: adminDashboardPath/);
+  assert.match(cloudflareRuntime, /if \(!await adminOk\(request, env\)\) return error\('Not found\.', 404\)/);
+  assert.match(vercelConfig, /"source": "\/admin\.html", "destination": "\/"/);
+  assert.match(cloudflareAdminUi, /if \(!session\.authenticated \|\| !session\.dashboardPath/);
+  assert.match(cloudflareAdminUi, /followDashboardPath\(session\)/);
 });
 
 test('menu-link normalization keeps safe destinations, caps list size and skips unsafe or duplicate links', () => {
@@ -64,6 +85,7 @@ test('new site configs include default and generated custom-page menu links', ()
     target: 'vercel', businessName: 'Canopy Care',
     customPages: [{ id: 'privacy', menuName: 'Privacy', url: '/privacy', pageTitle: 'Privacy policy', pageContent: 'Our privacy policy.' }]
   });
+  assert.equal(config.timeZone, 'Asia/Manila');
   assert.equal(config.menuLinks.length, 8);
   assert.deepEqual(config.menuLinks.at(-1), { id: 'custom-privacy', label: 'Privacy', href: '/privacy.html' });
   assert.deepEqual(menuLinksForPages([{ id: 'terms', menuName: 'Terms', url: '/terms.html' }]).at(-1), {

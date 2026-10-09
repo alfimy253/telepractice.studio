@@ -206,6 +206,13 @@
     }, 60_000);
     else if (!signedIn && paymentsRefreshTimer) { window.clearInterval(paymentsRefreshTimer); paymentsRefreshTimer = null; }
   }
+  function followDashboardPath(session) {
+    if (!session.authenticated || !session.dashboardPath || window.location.pathname === session.dashboardPath) return false;
+    const dashboardUrl = new URL(session.dashboardPath, window.location.href);
+    dashboardUrl.hash = window.location.hash;
+    window.location.replace(dashboardUrl);
+    return true;
+  }
   async function loadAdminWorkspace() {
     await loadSite();
     await loadPosts();
@@ -217,12 +224,7 @@
   async function initializeAdmin() {
     try {
       const session = await api('/api/admin/session');
-      if (window.location.pathname !== session.dashboardPath) {
-        const dashboardUrl = new URL(session.dashboardPath, window.location.href);
-        dashboardUrl.hash = window.location.hash;
-        window.location.replace(dashboardUrl);
-        return;
-      }
+      if (followDashboardPath(session)) return;
       syncAdminPageFromHash();
       setSignedIn(session.authenticated, session.email || '');
       if (session.authenticated) await loadAdminWorkspace();
@@ -687,6 +689,7 @@
         const session = await api('/api/admin/login', { method: 'POST', body: { username, password } });
         $('adminPassword').value = '';
         setSignedIn(true, session.email || '');
+        if (followDashboardPath(session)) return;
         toast('Owner signed in', 'Your session is protected and will expire automatically.');
         await loadAdminWorkspace();
       } catch (error) {

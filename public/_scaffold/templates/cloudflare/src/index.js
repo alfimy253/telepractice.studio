@@ -2,6 +2,7 @@ import { createNeonClient } from '../db/connection.js';
 import { createAdminSession, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
 import { adminDashboardPath, isAdminDashboardPath } from '../lib/admin-url.js';
 import { cleanMenuLinks } from '../lib/menu-links.js';
+import { normalizeSiteTheme } from '../lib/site-theme.js';
 import { detectPaymentProofMime, MAX_PAYMENT_PROOF_BYTES, PAYMENT_PROOF_MIME_TYPES, paymentProofFromBase64, paymentProofToBase64 } from '../lib/payment-proof.js';
 import { runPaymentReminderChecks } from '../lib/payment-reminders.js';
 
@@ -87,7 +88,7 @@ function cleanSiteConfig(input = {}) {
     accentColor: validColor(merged.accentColor, DEFAULT_CONFIG.accentColor),
     paperColor: validColor(merged.paperColor, DEFAULT_CONFIG.paperColor),
     fontStyle: merged.fontStyle === 'sans' ? 'sans' : 'serif',
-    theme: ['canopy','clay','coastal','editorial','neat','launcher','air','brivon-dark','brivon-light'].includes(merged.theme) ? merged.theme : DEFAULT_CONFIG.theme,
+    theme: normalizeSiteTheme(merged.theme, DEFAULT_CONFIG.theme),
     editorialAccent: ['black','teal','forest'].includes(merged.editorialAccent) ? merged.editorialAccent : 'black',
     features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false },
     payments: cleanPaymentDetails(merged.payments),
@@ -362,7 +363,7 @@ async function siteConfig(env) {
   if (!env.DATABASE_URL) return { config: DEFAULT_CONFIG, source: 'generated-fallback' };
   try {
     const rows = await sql(env)`SELECT config FROM sites WHERE site_id = ${SITE_ID} LIMIT 1`;
-    return { config: rows[0]?.config || DEFAULT_CONFIG, source: rows[0] ? 'neon' : 'generated-fallback' };
+    return { config: cleanSiteConfig(rows[0]?.config || DEFAULT_CONFIG), source: rows[0] ? 'neon' : 'generated-fallback' };
   } catch (cause) { console.error('site config read failed', cause); return { config: DEFAULT_CONFIG, source: 'generated-fallback' }; }
 }
 async function availabilityForMonth(env, month, filterDate = '') {
@@ -386,14 +387,15 @@ async function routeApi(request, env) {
   const url = new URL(request.url); const path = url.pathname; const method = request.method.toUpperCase();
   if (path === '/api/health' && method === 'GET') return json({ ok: true, runtime: 'cloudflare-workers', siteId: SITE_ID });
   if (path === '/api/csrf' && method === 'GET') return issueCsrf(request, env);
-  if (path === '/api/admin/entry' && method === 'GET') {
-    const headers = headersWithSecurity({ Location: adminDashboardPath(new Date(), SITE_TIME_ZONE), 'Cache-Control': 'no-store' });
-    return new Response(null, { status: 302, headers });
-  }
   if (path === '/api/admin/session' && method === 'GET') {
     const configured = adminConfigured(env);
     const authenticated = configured && await adminOk(request, env);
-    return json({ configured, authenticated, dashboardPath: adminDashboardPath(new Date(), SITE_TIME_ZONE), email: authenticated ? env.ADMIN_EMAIL : '' });
+    return json({
+      configured,
+      authenticated,
+      ...(authenticated ? { dashboardPath: adminDashboardPath(new Date(), SITE_TIME_ZONE) } : {}),
+      email: authenticated ? env.ADMIN_EMAIL : ''
+    });
   }
   if (path === '/api/admin/login' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
@@ -408,7 +410,7 @@ async function routeApi(request, env) {
     const token = await createAdminSession(env.ADMIN_USERNAME, env.ADMIN_PASSWORD_HASH, env.CSRF_SECRET);
     const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
     const cookie = `${adminSessionCookieName(request)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`;
-    return json({ ok: true, email: env.ADMIN_EMAIL }, 200, { 'Set-Cookie': cookie });
+    return json({ ok: true, email: env.ADMIN_EMAIL, dashboardPath: adminDashboardPath(new Date(), SITE_TIME_ZONE) }, 200, { 'Set-Cookie': cookie });
   }
   if (path === '/api/admin/logout' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
@@ -861,6 +863,7 @@ export default {
     if (isAdminDashboardPath(url.pathname)) {
       const expectedPath = adminDashboardPath(new Date(), SITE_TIME_ZONE);
       if (url.pathname !== expectedPath) {
+        if (!await adminOk(request, env)) return error('Not found.', 404);
         const headers = headersWithSecurity({ Location: expectedPath, 'Cache-Control': 'no-store' });
         return new Response(null, { status: 302, headers });
       }

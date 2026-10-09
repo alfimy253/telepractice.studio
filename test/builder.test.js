@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { verifyPasswordHash } from '../public/_scaffold/templates/shared/lib/admin-security.js';
+import { normalizeSiteTheme } from '../public/_scaffold/templates/shared/lib/site-theme.js';
 import worker from '../src/index.js';
 import { requestGeneratedPackage } from '../public/download.js';
 
 const origin = 'https://builder.example';
+const siteThemes = ['canopy', 'clay', 'coastal', 'editorial', 'neat', 'launcher', 'air', 'brivon-dark', 'brivon-light'];
 const adminInput = {
   adminUsername: 'practiceowner',
   adminEmail: 'owner@example.test',
@@ -58,14 +60,19 @@ function zipEntries(bytes) {
   return files;
 }
 test('builder and owner UI contain edit-page navigation but no admin-key connection flow', async () => {
-  const [builderHtml, ownerHtml, ownerJs] = await Promise.all([
+  const [builderHtml, builderApp, ownerHtml, ownerJs] = await Promise.all([
     readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
     readFile(new URL('../public/_scaffold/templates/shared/public/admin.html', import.meta.url), 'utf8'),
     readFile(new URL('../public/_scaffold/templates/shared/public/admin.js', import.meta.url), 'utf8')
   ]);
   assert.match(builderHtml, /id="adminUsername"/);
   assert.match(builderHtml, /id="adminEmail"/);
   assert.match(builderHtml, /id="adminPassword"/);
+  assert.match(builderHtml, /id="practiceTimeZone"[^>]*value="Asia\/Manila"/);
+  assert.match(builderHtml, /rotating owner dashboard path/);
+  assert.match(builderApp, /timeZone: String\(config\.timeZone \|\| 'Asia\/Manila'\)\.trim\(\) \|\| 'Asia\/Manila'/);
+  assert.match(builderApp, /function validatePracticeTimeZone\(\)/);
   for (const pageId of ['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments']) {
     assert.match(ownerHtml, new RegExp(`data-admin-page-link="${pageId}"`));
     assert.match(ownerHtml, new RegExp(`data-admin-page="${pageId}"`));
@@ -217,11 +224,15 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     }
     const adminJsPath = target === 'cloudflare' ? 'public/admin.js' : 'admin.js';
     const adminJs = files.get(adminJsPath);
+    const appointmentsHtmlPath = target === 'cloudflare' ? 'public/appointments.html' : 'appointments.html';
     assert.match(adminJs, /showAdminPage/);
     assert.match(adminJs, /pushState/);
     assert.match(adminJs, /safeMenuDestination/);
     assert.match(adminJs, /menuLinks: links/);
     assert.doesNotMatch(`${adminHtml}\n${adminJs}\n${files.get(target === 'cloudflare' ? 'public/admin.css' : 'admin.css')}`, /ADMIN_API_KEY|adminKey|keyForm|sessionStorage|Bearer/i);
+    assert.match(adminJs, /followDashboardPath/);
+    assert.doesNotMatch(files.get(target === 'cloudflare' ? 'public/index.html' : 'index.html'), /admin\.html|\/[a-z]admin(?:[1-9]|[12][0-9]|3[01])\/dashboard/);
+    assert.doesNotMatch(files.get(appointmentsHtmlPath), /Owner area|api\/admin\/entry/);
 
     const publicConfigPath = target === 'cloudflare' ? 'public/site-config.js' : 'site-config.js';
     const publicConfig = files.get(publicConfigPath);
@@ -258,8 +269,10 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     } else {
       assert.match(files.get('package.json'), /"node": ">=20\.6"/);
       assert.match(files.get('vercel.json'), /:adminSegment\/dashboard/);
+      assert.match(files.get('vercel.json'), /"source": "\/admin\.html", "destination": "\/"/);
       assert.match(files.get('vercel.json'), /payment-sweeps.*\* \* \* \* \*/);
       assert.match(files.get('api/index.js'), /CRON_SECRET/);
+      assert.doesNotMatch(files.get('api/index.js'), /api\/admin\/entry/);
     }
     assert.match(files.get('README.md'), /Bookings remain scheduled after 15 minutes/);
     assert.match(files.get('README.md'), /even if the owner has independently marked the payment received/);
@@ -267,7 +280,48 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     assert.match(files.get('README.md'), /90-second client-reminder checks and 3-minute owner-follow-up checks/);
   }
 });
+test('configured practice settings are preserved in both generated ZIP targets', async () => {
+  const settings = {
+    specialty: 'dental',
+    timeZone: 'America/Los_Angeles',
+    theme: 'brivon-light',
+    primaryColor: '#123456',
+    accentColor: '#234567',
+    paperColor: '#f5f5ef',
+    fontStyle: 'sans',
+    features: { blog: false, gallery: true, scheduling: false },
+    payments: {
+      gcashName: 'Bright Dental',
+      gcashNumber: '+63 900 111 2222',
+      mayaName: 'Bright Dental',
+      mayaNumber: '+63 900 333 4444'
+    }
+  };
+  for (const target of ['vercel', 'cloudflare']) {
+    const env = { ASSETS: assets };
+    const auth = await session(env);
+    const response = await generate(env, auth, {}, target, settings);
+    assert.equal(response.status, 200, await response.clone().text());
+    const files = zipEntries(new Uint8Array(await response.arrayBuffer()));
+    const siteConfigPath = target === 'cloudflare' ? 'public/site-config.js' : 'site-config.js';
+    const siteConfig = files.get(siteConfigPath);
+    assert.ok(siteConfig, `${target}: public site configuration missing`);
+    const generatedConfig = JSON.parse(siteConfig.slice(siteConfig.indexOf('=') + 1).trim().replace(/;$/, ''));
+    assert.equal(generatedConfig.specialty, settings.specialty);
+    assert.equal(generatedConfig.timeZone, settings.timeZone);
+    assert.equal(generatedConfig.theme, settings.theme);
+    assert.equal(generatedConfig.primaryColor, settings.primaryColor);
+    assert.equal(generatedConfig.accentColor, settings.accentColor);
+    assert.equal(generatedConfig.paperColor, settings.paperColor);
+    assert.equal(generatedConfig.fontStyle, settings.fontStyle);
+    assert.deepEqual(generatedConfig.features, settings.features);
+    assert.deepEqual(generatedConfig.payments, settings.payments);
+    assert.match(files.get('README.md'), /default `America\/Los_Angeles`/);
 
+    const runtime = files.get(target === 'cloudflare' ? 'src/index.js' : 'api/index.js');
+    assert.match(runtime, /DEFAULT_CONFIG\.timeZone \|\| 'Asia\/Manila'/);
+  }
+});
 test('builder rejects weak or incomplete administrator credentials before creating a ZIP', async () => {
   const env = { ASSETS: assets };
   const auth = await session(env);
@@ -353,18 +407,44 @@ test('builder exposes the design-system controls and previews the selected gener
 
 test('Brivon light and dark generate a separate design-system homepage', async () => {
   for (const theme of ['brivon-dark', 'brivon-light']) {
-    const env = { ASSETS: assets };
-    const auth = await session(env);
-    const response = await generate(env, auth, {}, 'vercel', { theme });
-    assert.equal(response.status, 200, await response.clone().text());
-    const files = zipEntries(new Uint8Array(await response.arrayBuffer()));
-    assert.match(files.get('index.html'), new RegExp(`class="brivon-shell theme-${theme}"`));
-    assert.match(files.get('index.html'), /href="\/brivon\.css"/);
-    assert.match(files.get('index.html'), /src="\/brivon\.js"/);
-    assert.match(files.get('brivon.css'), /line-height:calc\(1em \+ 5px\)/);
-    assert.match(files.get('appointments.html'), /href="\/brivon\.css"/);
-    const config = JSON.parse(files.get('site-config.js').split('=').slice(1).join('=').trim().replace(/;$/, ''));
-    assert.equal(config.theme, theme);
+    for (const target of ['vercel', 'cloudflare']) {
+      const env = { ASSETS: assets };
+      const auth = await session(env);
+      const response = await generate(env, auth, {}, target, { theme });
+      assert.equal(response.status, 200, await response.clone().text());
+      const files = zipEntries(new Uint8Array(await response.arrayBuffer()));
+      const publicPath = target === 'cloudflare' ? 'public/' : '';
+      const index = files.get(`${publicPath}index.html`);
+      assert.match(index, new RegExp(`class="brivon-shell theme-${theme}"`));
+      assert.match(index, /href="\/brivon\.css"/);
+      assert.match(index, /src="\/brivon\.js"/);
+      assert.match(files.get(`${publicPath}brivon.css`), /line-height:calc\(1em \+ 5px\)/);
+      assert.match(files.get(`${publicPath}appointments.html`), /href="\/brivon\.css"/);
+      const configSource = files.get(`${publicPath}site-config.js`);
+      const config = JSON.parse(configSource.slice(configSource.indexOf('=') + 1).trim().replace(/;$/, ''));
+      assert.equal(config.theme, theme);
+      assert.match(files.get('db/seed.sql'), new RegExp(`"theme":"${theme}"`));
+
+      const runtimePath = target === 'cloudflare' ? 'src/index.js' : 'api/index.js';
+      const runtime = files.get(runtimePath);
+      assert.match(runtime, /theme: normalizeSiteTheme\(merged\.theme, DEFAULT_CONFIG\.theme\)/);
+      assert.match(runtime, /cleanSiteConfig\(rows\[0\]\?\.config \|\| DEFAULT_CONFIG\)/);
+      assert.ok(files.has('lib/site-theme.js'));
+    }
+  }
+});
+test('stored site themes cannot switch a generated package to another design system', () => {
+  for (const packageTheme of siteThemes) {
+    assert.equal(normalizeSiteTheme(packageTheme, packageTheme), packageTheme);
+    for (const savedTheme of siteThemes) {
+      const sharesDesignSystem = packageTheme.startsWith('brivon-') === savedTheme.startsWith('brivon-');
+      assert.equal(
+        normalizeSiteTheme(savedTheme, packageTheme),
+        sharesDesignSystem ? savedTheme : packageTheme,
+        `${packageTheme} package should ${sharesDesignSystem ? 'allow' : 'reject'} saved theme ${savedTheme}`
+      );
+    }
+    assert.equal(normalizeSiteTheme('unknown-theme', packageTheme), packageTheme);
   }
 });
 
@@ -409,8 +489,7 @@ async function previewDocument(input) {
 }
 
 test('all nine theme previews render their complete matching homepage with inline styles', async () => {
-  const themes = ['canopy', 'clay', 'coastal', 'editorial', 'neat', 'launcher', 'air', 'brivon-dark', 'brivon-light'];
-  for (const theme of themes) {
+  for (const theme of siteThemes) {
     const html = await previewDocument({
       theme, businessName: 'Preview Practice', specialty: 'dental',
       primaryColor: '#123456', accentColor: '#654321', paperColor: '#f0f0f0'
@@ -438,7 +517,7 @@ test('all nine theme previews render their complete matching homepage with inlin
 });
 
 test('Vercel and Cloudflare ZIP indexes use the same selected homepage as the preview', async () => {
-  for (const theme of ['air', 'brivon-light']) {
+  for (const theme of siteThemes) {
     const preview = await previewDocument({ theme, businessName: 'Preview Practice' });
     for (const target of ['vercel', 'cloudflare']) {
       const env = { ASSETS: assets };
@@ -446,20 +525,26 @@ test('Vercel and Cloudflare ZIP indexes use the same selected homepage as the pr
       const response = await generate(env, auth, {}, target, { theme });
       assert.equal(response.status, 200, await response.clone().text());
       const files = zipEntries(new Uint8Array(await response.arrayBuffer()));
-      const index = files.get(target === 'cloudflare' ? 'public/index.html' : 'index.html');
+      const publicPath = target === 'cloudflare' ? 'public/' : '';
+      const index = files.get(`${publicPath}index.html`);
       assert.ok(index, `missing ${target} homepage`);
       assert.match(index, new RegExp(`theme-${theme}`));
       assert.match(index, /id="heroHeadline"/);
       assert.match(preview, /id="heroHeadline"/);
+      const configSource = files.get(`${publicPath}site-config.js`);
+      assert.ok(configSource, `${target}: missing public site config for ${theme}`);
+      const generatedConfig = JSON.parse(configSource.slice(configSource.indexOf('=') + 1).trim().replace(/;$/, ''));
+      assert.equal(generatedConfig.theme, theme, `${target}: package theme does not match selected ${theme}`);
+      assert.match(files.get('db/seed.sql'), new RegExp(`"theme":"${theme}"`));
       if (theme.startsWith('brivon-')) {
-        assert.match(index, /class="brivon-shell theme-brivon-light"/);
+        assert.match(index, new RegExp(`class="brivon-shell theme-${theme}"`));
         assert.match(index, /class="tier-grid"/);
-        assert.match(files.get(target === 'cloudflare' ? 'public/brivon.css' : 'brivon.css'), /\.brivon-shell \.tier-grid/);
+        assert.match(files.get(`${publicPath}brivon.css`), /\.brivon-shell \.tier-grid/);
         assert.match(preview, /class="tier-grid"/);
       } else {
-        assert.match(index, /class="theme-air"/);
+        assert.match(index, new RegExp(`<body class="theme-${theme}`));
         assert.match(index, /class="hero section-wrap"/);
-        assert.match(files.get(target === 'cloudflare' ? 'public/site.css' : 'site.css'), /body\.theme-air/);
+        assert.ok(files.has(`${publicPath}site.css`), `${target}: missing Illustration stylesheet for ${theme}`);
         assert.match(preview, /class="hero section-wrap"/);
       }
     }

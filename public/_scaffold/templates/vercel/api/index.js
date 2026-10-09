@@ -5,6 +5,7 @@ import { createNeonClient } from '../db/connection.js';
 import { createAdminSession, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
 import { adminDashboardPath } from '../lib/admin-url.js';
 import { cleanMenuLinks } from '../lib/menu-links.js';
+import { normalizeSiteTheme } from '../lib/site-theme.js';
 import { detectPaymentProofMime, MAX_PAYMENT_PROOF_BYTES, PAYMENT_PROOF_MIME_TYPES, paymentProofFromBase64, paymentProofToBase64 } from '../lib/payment-proof.js';
 import { runPaymentReminderChecks } from '../lib/payment-reminders.js';
 import { createHmac, randomBytes, timingSafeEqual, webcrypto } from 'node:crypto';
@@ -197,7 +198,7 @@ function cleanSiteConfig(input = {}) {
     accentColor: color(merged.accentColor, DEFAULT_CONFIG.accentColor),
       paperColor: color(merged.paperColor, DEFAULT_CONFIG.paperColor),
     fontStyle: merged.fontStyle === 'sans' ? 'sans' : 'serif',
-    theme: ['canopy','clay','coastal','editorial','neat','launcher','air','brivon-dark','brivon-light'].includes(merged.theme) ? merged.theme : DEFAULT_CONFIG.theme,
+    theme: normalizeSiteTheme(merged.theme, DEFAULT_CONFIG.theme),
     editorialAccent: ['black','teal','forest'].includes(merged.editorialAccent) ? merged.editorialAccent : 'black',
     features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false },
     payments: cleanPaymentDetails(merged.payments),
@@ -355,13 +356,15 @@ app.get('/api/csrf', (req, res) => {
     res.json({ token });
   } catch (error) { res.status(503).json({ error: error.message }); }
 });
-app.get('/api/admin/entry', (req, res) => {
-  res.redirect(302, adminDashboardPath(new Date(), siteTimeZone));
-});
 app.get('/api/admin/session', asyncRoute(async (req, res) => {
   const configured = adminConfigured();
   const authenticated = configured && await adminOk(req);
-  res.json({ configured, authenticated, dashboardPath: adminDashboardPath(new Date(), siteTimeZone), email: authenticated ? process.env.ADMIN_EMAIL : '' });
+  res.json({
+    configured,
+    authenticated,
+    ...(authenticated ? { dashboardPath: adminDashboardPath(new Date(), siteTimeZone) } : {}),
+    email: authenticated ? process.env.ADMIN_EMAIL : ''
+  });
 }));
 app.post('/api/admin/login', csrfGuard, asyncRoute(async (req, res) => {
   if (!adminConfigured()) return res.status(503).json({ error: 'Owner sign-in is not configured. Check the environment variables.' });
@@ -376,7 +379,7 @@ app.post('/api/admin/login', csrfGuard, asyncRoute(async (req, res) => {
   const token = await createAdminSession(process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD_HASH, csrfSecret());
   const secure = req.secure ? '; Secure' : '';
   res.setHeader('Set-Cookie', `${adminSessionCookieName(req)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`);
-  res.json({ ok: true, email: process.env.ADMIN_EMAIL });
+  res.json({ ok: true, email: process.env.ADMIN_EMAIL, dashboardPath: adminDashboardPath(new Date(), siteTimeZone) });
 }));
 app.post('/api/admin/logout', csrfGuard, (req, res) => {
   const secure = req.secure ? '; Secure' : '';
@@ -388,7 +391,7 @@ app.get('/api/site', asyncRoute(async (_req, res) => {
   try {
     const sql = getDb();
     const rows = await sql`SELECT config FROM sites WHERE site_id = ${SITE_ID} LIMIT 1`;
-    res.json({ config: rows[0]?.config || DEFAULT_CONFIG, source: rows[0] ? 'neon' : 'generated-fallback' });
+    res.json({ config: cleanSiteConfig(rows[0]?.config || DEFAULT_CONFIG), source: rows[0] ? 'neon' : 'generated-fallback' });
   } catch (error) { console.error('site config read failed', error); res.json({ config: DEFAULT_CONFIG, source: 'generated-fallback' }); }
 }));
 app.post('/api/auth/register', csrfGuard, asyncRoute(async (req, res) => {

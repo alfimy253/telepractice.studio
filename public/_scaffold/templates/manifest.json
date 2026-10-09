@@ -24,7 +24,8 @@
     "lib/admin-url.js",
     "lib/menu-links.js",
     "lib/payment-proof.js",
-    "lib/payment-reminders.js"
+    "lib/payment-reminders.js",
+    "lib/site-theme.js"
   ],
   "vercel": [
     ".env",
