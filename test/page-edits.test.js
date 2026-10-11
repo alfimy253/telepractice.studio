@@ -24,7 +24,7 @@ function databaseStub() {
   const sql = async (strings, ...values) => {
     const statement = Array.isArray(strings) ? strings.join('?') : strings;
     queries.push(statement);
-    if (statement.includes('INSERT INTO builder_page_edits')) {
+    if (statement.includes('INSERT INTO tele_builder_page_edits')) {
       records.set(values[0], {
         siteId: values[0],
         edits: JSON.parse(values[1]),
@@ -32,7 +32,7 @@ function databaseStub() {
       });
       return [];
     }
-    if (statement.includes('FROM builder_page_edits')) {
+    if (statement.includes('FROM tele_builder_page_edits')) {
       return records.has(values[0]) ? [records.get(values[0])] : [];
     }
     return [];
@@ -233,7 +233,7 @@ test('page edits persist in Neon with CSRF protection and retain the existing AP
   await savePageEditsToDatabase(database.sql, 'edit-practice', edits);
   assert.deepEqual(database.records.get('edit-practice').edits, edits);
   assert.equal(database.queries.filter((query) => query.includes('CREATE TABLE')).length, 1);
-  assert.equal(database.queries.filter((query) => query.includes('INSERT INTO builder_page_edits')).length, 1);
+  assert.equal(database.queries.filter((query) => query.includes('INSERT INTO tele_builder_page_edits')).length, 1);
   const stored = await loadPageEditsFromDatabase(database.sql, 'edit-practice');
   assert.equal(stored.siteId, 'edit-practice');
   assert.deepEqual(stored.edits, edits);

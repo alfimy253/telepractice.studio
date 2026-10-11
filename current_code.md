@@ -24,10 +24,10 @@ On a deployed generated site, a visitor can:
 
 - browse the public home page, enabled navigation links, generated custom pages, published blog posts, and published gallery items;
 - view practice contact and payment-account information;
-- view the public monthly appointment calendar, open 30-minute slots, schedule capacity, and available consultation services; and
+- view the public monthly appointment calendar, open 30-minute slots, and available consultation services (how many slots are published or reserved is owner-only); and
 - create a client account or sign in from the appointments page.
 
-A visitor may inspect availability without signing in, but must use a client account to reserve a slot or view private consultation information.
+A visitor may inspect availability without signing in, but must use a client account to reserve a slot or view private consultation information. The public availability response carries the month, whether any times exist, per-day open counts and the open slots themselves; it exposes no published/reserved totals and no fill percentage.
 
 ### 3. Client account
 
@@ -47,6 +47,7 @@ The UI does not provide client profile editing, password reset/change, email ver
 From the date-rotating owner dashboard, an authenticated owner can:
 
 - sign in with the builder-created username and password, view the configured owner email, view the public site, and sign out;
+- change the owner username, email or password from the Sign-in panel (requires the current password; the new hash is written to `tele_admin_users` and the session is re-issued);
 - edit practice name, location, contact email, and phone;
 - add, rename, reorder, retarget, or remove public menu links, up to 16 links;
 - change appearance settings within the generated design-system family (Illustration layouts, or Brivon light/dark), including supported brand/accent/background colors and typography;
@@ -58,7 +59,7 @@ From the date-rotating owner dashboard, an authenticated owner can:
 - privately preview uploaded payment screenshots, approve proof, or reject proof and release the slot; and
 - manually refresh appointment and payment lists.
 
-The owner UI does not manage owner credentials, create additional staff/owner roles, edit client profiles, issue refunds, process money directly, upload local CMS images, configure domains/hosting, or deploy code. CMS images are entered as HTTPS or same-site URLs; payment proofs are the separate private image-upload flow.
+The owner UI manages the single owner account only; it does not create additional staff/owner roles, edit client profiles, issue refunds, process money directly, upload local CMS images, configure domains/hosting, or deploy code. CMS images are entered as HTTPS or same-site URLs; payment proofs are the separate private image-upload flow.
 
 ### UI/account implementation cross-check
 
@@ -69,7 +70,7 @@ The capability list above was checked against the rendered controls and their co
 - generated owner UI: `public/_scaffold/templates/shared/public/admin.html` and `admin.js`; and
 - both generated backends: `public/_scaffold/templates/vercel/api/index.js` and `public/_scaffold/templates/cloudflare/src/index.js`.
 
-Feature toggles can hide blog, gallery, or scheduling UI in a generated site, and account/scheduling/CMS persistence requires a configured Neon database with the schema installed.
+Feature toggles can hide blog, gallery, or scheduling UI in a generated site, and account/scheduling/CMS persistence requires a configured Neon database — the runtime applies its own `tele_`-prefixed schema on first use, so no manual SQL is required.
 
 ## Design-system selection and Brivon behavior
 
@@ -187,7 +188,7 @@ The builder uses an HttpOnly, SameSite=Strict double-submit CSRF cookie and chec
 
 Owner access is implemented in both generated targets; it is not a link in the public site's navigation. Each generated package includes the owner dashboard HTML, CSS and JavaScript, plus backend login/session routes. The generated package's `README.md` prints the dashboard path for the date it was built, and explains how to calculate the new path after local midnight. Vercel redirects `/admin.html` to the public home page, and Cloudflare returns 404 for it. Unauthenticated session checks and stale Cloudflare dashboard paths do not disclose the current path; the session route returns the current path only after authentication, so a signed-in owner can follow it when the date changes.
 
-The owner signs in with the username and password entered in the builder. The runtime verifies the salted password hash from the deployment environment; it does not prefill credentials into the dashboard. A signed owner session is stored in an HttpOnly, SameSite=Strict cookie. The session lasts 12 hours and is bound to the normalized username, password hash, and `CSRF_SECRET`; changing any of those values invalidates existing sessions. HTTPS uses a Secure host-prefixed owner cookie. Sign-in requires the generated `ADMIN_USERNAME`, `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, and `CSRF_SECRET` environment values to be configured. Owner changes to site settings and CMS data also require a working `DATABASE_URL` and the generated database schema to be installed; without these, database-backed editing is unavailable.
+The owner signs in with the username and password entered in the builder. The runtime resolves the account from the `tele_admin_users` row for the site, which the first database request seeds from the deployment's `ADMIN_USERNAME`/`ADMIN_EMAIL`/`ADMIN_PASSWORD_HASH` values; after the row exists the database is authoritative, so the owner can change the username, email or password from the dashboard's Sign-in panel and a redeploy never overwrites a changed account. Password checks use the stored salted PBKDF2 hash; credentials are never prefilled into the login form. A signed owner session is stored in an HttpOnly, SameSite=Strict cookie. The session lasts 12 hours and is bound to the normalized username, password hash, and `CSRF_SECRET`; changing any of those values invalidates existing sessions. HTTPS uses a Secure host-prefixed owner cookie. Sign-in requires a seeded `tele_admin_users` row, so a deployment needs either the generated `ADMIN_USERNAME`/`ADMIN_EMAIL`/`ADMIN_PASSWORD_HASH` values (the seed) or an account already saved in the database. `CSRF_SECRET` is optional: when it is unset the runtime derives a stable private secret from `DATABASE_URL`, and forms report a configuration error only when neither value exists. Owner changes to site settings and CMS data require a working `DATABASE_URL`; the schema is applied by the runtime itself on first use, so an empty database is enough.
 
 The dashboard path rotates by local date in the practice site's configured time zone (default `Asia/Manila`). The Monday-first sequence is:
 
@@ -240,10 +241,10 @@ The schema contains the payment columns, private proof table, indexes, and idemp
 
 ## 6. Schedulers and deployment behavior
 
-The two hosted runtimes use native minute-level schedules:
+The two hosted runtimes use their native scheduled triggers. Their cadence differs by target and plan:
 
-- **Vercel:** `vercel.json` schedules `GET /api/internal/payment-sweeps` every minute. The endpoint requires `Authorization: Bearer <CRON_SECRET>`.
-- **Cloudflare Workers:** `wrangler.jsonc` registers a `* * * * *` cron trigger; the export's `scheduled()` handler runs the reminder checks.
+- **Vercel:** `vercel.json` schedules `GET /api/internal/payment-sweeps` **once daily at `0 0 * * *` (00:00 UTC)** — not every minute — so the package can deploy on the Vercel Hobby plan, which only allows daily cron jobs. The endpoint requires `Authorization: Bearer <CRON_SECRET>`. With that cadence the persisted 12-minute client-reminder and 15-minute owner-follow-up markers are written up to about a day late; the client and owner UIs still show those states on time because both compute them from `payment_due_at` as well as from the markers. On Vercel Pro/Enterprise, change the schedule to `* * * * *` for minute-level checks (the generated package README says the same).
+- **Cloudflare Workers:** `wrangler.jsonc` registers a `* * * * *` cron trigger; the export's `scheduled()` handler runs the reminder checks every minute.
 
 A standalone `payment-reminder-worker.js` is included in both target packages. Run `npm run payments:worker` under a process manager on an always-on Node.js host for 90-second client-reminder checks and 180-second owner-follow-up checks. This script is not automatically started by Vercel serverless functions or Cloudflare Workers. Native scheduler frequency and availability still depend on the hosting plan. The Vercel worker script uses Node's `--env-file` flag (package engine `>=20.6`); the Cloudflare package specifies Node `>=22` for Wrangler.
 
@@ -257,7 +258,7 @@ A standalone `payment-reminder-worker.js` is included in both target packages. R
 
 ## 8. Verification status
 
-The repository test suite covers builder CSRF, Vercel/Cloudflare ZIP generation, full-page previews for all nine themes, homepage/template parity, the browser Generate helper's successful and retry paths, the Generate buttons' download click flow under a DOM stub (lockout guard versus the programmatic download anchor, for both build paths and targets), page-edit normalization/application (preview and packaged-homepage parity for every target and theme), the `/api/page-editor` save/load routes (CSRF enforcement, Neon-store round-trip through a tagged-SQL test double, error paths, and missing-`DATABASE_URL` 503), the page editor bridge (link, export apply + server save + acknowledgement, invalid payloads, clear edits), the Brivon h1–h8 heading rule in both the package and the preview, a 40-concurrent-user stress test of `/api/generate`, admin credentials/session utilities, menu normalization, and payment-proof/reminder rules. The current suite passes 69 tests. `npm audit` reports zero vulnerabilities, and `npm run check` passes the root builder's Wrangler dry run; that config reports the `ASSETS` binding only. Local Wrangler smoke coverage is recorded for the builder shell, all nine previews, both generated ZIP targets, and the page editor assets. No live Neon page-edit persistence round-trip is claimed here. The earlier repository audit also recorded generated-package syntax checks, a generated Cloudflare Wrangler dry run, runtime login/session smoke checks for both generated targets, and a Postgres-compatible PGlite schema/reminder/proof SQL smoke test.
+The repository test suite covers builder CSRF, Vercel/Cloudflare ZIP generation, full-page previews for all nine themes, homepage/template parity, the browser Generate helper's successful and retry paths, the Generate buttons' download click flow under a DOM stub (lockout guard versus the programmatic download anchor, for both build paths and targets), page-edit normalization/application (preview and packaged-homepage parity for every target and theme), the `/api/page-editor` save/load routes (CSRF enforcement, Neon-store round-trip through a tagged-SQL test double, error paths, and missing-`DATABASE_URL` 503), the page editor bridge (link, export apply + server save + acknowledgement, invalid payloads, clear edits), the Brivon h1–h8 heading rule in both the package and the preview, a 40-concurrent-user stress test of `/api/generate`, admin credentials/session utilities, menu normalization, and payment-proof/reminder rules. The suite passed 82 tests when re-run on 2026-10-12 (see the work-list verification below; 72 at the 2026-10-11 scan). `npm audit` reports zero vulnerabilities, and `npm run check` passes the root builder's Wrangler dry run; that config reports the `ASSETS` binding only. Local Wrangler smoke coverage is recorded for the builder shell, all nine previews, both generated ZIP targets, and the page editor assets. No live Neon page-edit persistence round-trip is claimed here. The earlier repository audit also recorded generated-package syntax checks, a generated Cloudflare Wrangler dry run, runtime login/session smoke checks for both generated targets, and a Postgres-compatible PGlite schema/reminder/proof SQL smoke test.
 
 No live Neon database, Vercel deployment, production Cloudflare deployment, or real hosted cron invocation has been tested. Those remain deployment checks, not verified behavior from this repository audit.
 
@@ -270,3 +271,130 @@ QA'd on branch `arena/ec85247e-telepractice-studio`, commit `83ab2e4` ("Fix Gene
 - Automated page-editor persistence tests exercise the Neon-backed SQL store with a tagged-SQL test double and verify that missing `DATABASE_URL` returns 503. No live Neon database round-trip is claimed. The test suite also verifies `/api/preview` and both `/api/generate` targets apply page edits, and that the packaged `brivon.css` carries the h1–h8 rule.
 - Live 40-user stress over real HTTP: 40/40 valid ZIPs in ~2.5 s wall (numbers in the stress-test section above).
 - Generated-package checks: ZIP homepages carry the exported edits for Vercel, Cloudflare and Brivon; the env file carries only the PBKDF2 hash; the raw password appears nowhere in the ZIP.
+
+## Verification record — functionality scan (2026-10-11)
+
+Scanned branch `arena/921a26d1-telepractice-studio` (from commit `09307c8`) to check every documented capability against a working implementation. Executed, not just read:
+
+- `npm test`: **72/72 pass**, including the 40-concurrent-user stress test (40/40 valid ZIPs, ~1.5 s wall, p50 ~1.4 s).
+- `npx wrangler deploy --dry-run`: passes and reports the `ASSETS` binding only. `npm audit`: zero vulnerabilities.
+- Live builder over `wrangler dev`: builder shell and assets served; `/api/health` 200; all nine `GET /api/preview` themes return 200 with the matching `theme-*` class on a self-contained document (no `<script>`, no local asset URLs, sample SVGs inlined, Brivon linking Google Fonts); `/_scaffold/templates/**` is readable while every other `/_scaffold/` path and a traversal attempt return 404.
+- `POST /api/generate` through the real CSRF route returned a 34-entry Vercel ZIP and a 33-entry Cloudflare ZIP. Both carried the Brivon homepage when `brivon-dark` was selected, the page edit, custom pages, `db/seed.sql`, the dated dashboard path in `README.md`, the PBKDF2 hash (never the raw password) in `.env`/`.dev.vars`, the Neon URL with `sslmode`/`channel_binding` stripped, a fresh `CSRF_SECRET` and (Vercel only) `CRON_SECRET`.
+- Browser build path: `public/package-builder.js` over the served `/_scaffold/templates/` files produced the same entry list as the server build with byte-identical deterministic contents — only per-build secrets, `generatedAt`, `createdAt` and demo-post timestamps differ.
+- Generated packages: every ESM file passes `node --check`; every relative import and every local `src`/`href` asset reference inside both ZIPs resolves.
+- Both generated runtimes were started locally (Node 22): Vercel `node dev.js`, Cloudflare `wrangler dev`. Without a reachable Neon database they still served the public homepage, `/api/site` with no secrets, an unauthenticated `/api/admin/session` that omits the dashboard path, authenticated login with the builder credentials returning the dated path, Cloudflare 404 for `/admin.html` and for stale dashboard paths (302 to the current path once signed in), and a Vercel cron endpoint that answers 401 without a valid `Authorization: Bearer <CRON_SECRET>`.
+- Every `/api/...` path called by the builder UI, the generated client UI and the generated owner UI exists in the server that must serve it; both generated runtimes expose the same route set apart from the Vercel-only sweep endpoint.
+
+One documented claim did not match the code and was corrected in §6: the Vercel cron is scheduled `0 0 * * *` (daily, Hobby-compatible), not every minute. The suite count in §8 was also stale (69 → 72). `README.md`'s CSRF troubleshooting paragraph still quotes a builder message ("Set CSRF_SECRET as a Worker secret before using the builder") that no current code path can emit; it is explicitly scoped to older deployments, so it was left as a legacy note.
+
+Not verified by this scan: any live Neon round-trip, a hosted Vercel or Cloudflare deployment, or a real cron invocation.
+
+## Work list — deploy packaging, client signup and owner editing (2026-10-12)
+
+Operator-reported items, with the root cause found for each and what was changed. All three were reproduced locally against real PostgreSQL (PGlite) running the *generated packages*, then re-verified after the fix.
+
+### To-do list as reported
+
+1. **"Fix the zipping of the packed code once the code deploy type is chosen."**
+2. **"Double-check why the user can't sign up when the deployed code was pushed to the Cloudflare platform."**
+3. **"Fix the signup and the functionality of admin login to edit the web app on the website admin page."**
+
+### 1. Packaging / zipping — status: verified, two packaging defects fixed
+
+The ZIP plumbing for the selected target was already correct: `public/zip.js` writes a standard store-method archive with a CRC-32 per entry, a proper central directory and a rejection of `..` path segments, and only the chosen runtime reaches the archive. Re-verified on the rebuilt packages — **14/14 ZIP checks per target**: server build returns `application/zip` under a filename matching the target; only the target's env file is present (`api/.env` for Vercel, `.dev.vars` for Cloudflare); the browser build and the server build produce the **same entry list in the same order**, with every deterministic entry byte-identical; no raw password; `lib/db-errors.js` shipped; `ensureSiteRow` and `articleGalleryRows` compiled into the runtime; `db/seed.sql` non-destructive; manifest `target` correct; the page edit applied and the custom page shipped; `DATABASE_URL` normalized (no `sslmode`/`channel_binding`). The five entries that differ between the two builds of the same configuration are volatile by design (fresh `CSRF_SECRET`, timestamps), not nondeterminism.
+
+Two genuine packaging defects were found and fixed:
+
+- **`db/seed.sql` was destructive on re-run.** It wrote the site row with `ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config`, so re-running the seed after the owner had edited the site silently reverted the live configuration to the build-time values. It is now `ON CONFLICT (site_id) DO NOTHING`, with a header explaining that it is optional starter content and safe to rerun (`public/package-core.js` → `createSeedSql`).
+- **The ZIP manifest claimed the wrong runtime.** Every package (including Vercel ones) said `"generator": "Canopy Studio Cloudflare Builder"`. It is now target-neutral — `"generator": "Canopy Studio Builder"`, `version 1.3.0` — with `target` carrying the runtime.
+
+The packaged `README.md` now states that `db/schema.sql` is required and safe to rerun, that the deployed site creates its own configuration row on first use, that `db/seed.sql` is optional sample content, and (Cloudflare) lists the exact `npx wrangler secret put …` commands with the message each missing value produces.
+
+### 2. Why signup failed on the deployed Cloudflare package — status: root-caused and fixed
+
+**Reproduced:** with a fresh Neon database that has `db/schema.sql` applied but not `db/seed.sql`, `POST /api/auth/register` answered **HTTP 503 `{"error":"Could not create the client account."}`** and the server log showed:
+
+```
+error: insert or update on table "client_accounts" violates foreign key constraint "client_accounts_site_id_fkey"
+detail: Key (site_id)=(…) is not present in table "sites".
+```
+
+**Root cause:** the package's public configuration lives in one row of `sites`, and that row was only ever created by `db/seed.sql` or by the owner saving `PUT /api/site`. Eight tables — `blog_posts`, `gallery_items`, `client_accounts`, `client_sessions`, `monthly_schedules`, `appointments`, `appointment_payment_proofs`, `consultation_notes` — reference `sites(site_id)` by foreign key, so without seed.sql the *entire* database-backed surface failed: client signup 503, bookings impossible, CMS and availability writes refused. The public site itself still rendered (the config read falls back to the build-time configuration), which is why the site looked healthy while signup was broken. Running the seed by hand, or opening the dashboard and saving details once, made signup work — that was the workaround, not the expected setup.
+
+**Fix:** both runtimes now create the row themselves, once per isolate/instance, before the first query — `INSERT INTO sites (site_id, config) VALUES (…) ON CONFLICT (site_id) DO NOTHING`. `DO NOTHING` is deliberate: an existing (owner-edited) row is never modified. In the Cloudflare runtime the shared `sql(env)` helper guarantees it, and in the Vercel runtime `getDb()` does, so no route — present or future — can skip it. A failed bootstrap clears the memo so the next request retries.
+
+**Also fixed:** the failure was unhelpful to diagnose. New shared library `public/_scaffold/templates/shared/lib/db-errors.js` (shipped in every package, listed in `manifest.json` → `sharedRuntime`) maps driver error codes to actionable, secret-free messages — `42P01` "run db/schema.sql", `23503` "the site record is missing…", `3D00_`, `28P01`, `42501`, `57P03`, `53300` — and is now wired into registration, appointments, payment-proof upload, owner CMS writes, availability publish, consultation notes and site settings in both runtimes.
+
+### 3. Owner sign-in and editing the web app — status: one real bug fixed, whole surface verified
+
+Owner sign-in itself was sound: wrong password → 401, correct builder credentials → session + dated `dashboardPath`, unauthenticated session never discloses the path, `/admin.html` → 404, and a stale Cloudflare path redirects (302) to the current path once signed in. A deployed site that cannot sign in is missing Worker secrets — the runtime answers `503 "Owner sign-in is not configured. Set ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD_HASH and CSRF_SECRET."`, and Wrangler does not upload `.dev.vars`. The packaged README now spells out the five `wrangler secret put` commands and the message each missing value produces.
+
+**Real editing bug found and fixed — articles with gallery images could not be saved.** `POST/PUT /api/admin/posts` passed the dashboard's gallery rows straight into `jsonb_to_recordset(…) AS incoming(image_url text, alt_text text, caption text, sort_order integer)`, but `articlePostPayload` builds camelCase items (`imageUrl`, `altText`, `caption`, `sortOrder`). Every column therefore arrived `NULL` and the insert failed with `null value in column "image_url" of relation "blog_post_images"`, answered as **503 "Could not save the post."** Any article that carried at least one gallery image was unsavable in both runtimes (articles without gallery images worked, which is why it went unnoticed). New `articleGalleryRows()` maps the fields explicitly in both the insert and the update statement of both runtimes.
+
+### Verification (2026-10-12)
+
+- **End-to-end harness, real PostgreSQL (PGlite), packages built from the current templates:** Cloudflare **47/47**, Vercel **47/47**, each also **47/47 with `db/seed.sql` applied**. Coverage: public reads → client signup, duplicate-email 409, logout, re-login → owner wrong-password 401, sign-in, session/dashboard path, `/admin.html` 404 → identity + menu + appearance save and public re-read → article with a gallery image created, read back (admin list and public article endpoint), updated to draft, second article published → gallery item created and updated → availability published (next month) → four bookings, payment-proof upload, client cancellation → owner unpaid list, mark received, release booking (`slotReleased: true`), approve proof, private image `no-store`, appointment list, private consultation note visible to the client, owner cancellation → draft hidden publicly while the owner still sees it → no secret material in `/api/site`.
+- **Before/after, same 37–47 check suite on the pre-fix package:** 18/37, with signup 503, article-with-gallery 503 and every booking/payment check failing as a consequence. After: 47/47.
+- **ZIP checks:** 14/14 per target (see above), including server-vs-browser build equality.
+- **`npm test`: 78/78** (72 existing + 6 new in `test/deployment-fixes.test.js` covering the site-record bootstrap, the camelCase→snake_case mapping, the database-error mapping, the non-destructive seed, the target-neutral manifest and packaged shared libraries).
+- **Live `wrangler dev` on the rebuilt Cloudflare package:** boots, serves `/`, `/api/health`, `/api/csrf` and `/api/site` (generated fallback when the database is unreachable), and answers database-backed reads with a clean 503 instead of crashing.
+- **Deployment caveats confirmed, not changed:** the availability publisher accepts a month only until its deadline (the 28th of the previous month), so the dashboard defaults to *next* month and the API answers `409 "This month's schedule deadline was …"` for a closed month; Vercel's cron remains daily on Hobby (see §6).
+
+Still not verified here: a live Neon round-trip, a hosted Vercel or Cloudflare deployment, or a real cron invocation. The fixes were proven against the generated packages running on a Postgres-compatible engine plus live `wrangler dev`, not on the operator's account.
+
+## Work list — parameterized packages, CSRF initialization, owner-only capacity, `tele_` database (2026-10-12)
+
+Operator-reported items, each reproduced locally against real PostgreSQL (PGlite) running the *generated packages* (both targets), fixed, then re-verified. The packages under test were rebuilt from the current templates for every run.
+
+### To-do list as reported
+
+1. **"Check the code again for any parameterized error when the user changes a setting on builder; the zip package must list the configurations and apply the setting as parameters to the code that will be zipped and deployed — then fix these."**
+2. **"When I deployed the Cloudflare app, the client-side register function says the security token can't initialize. Fix it."**
+3. **"Remove the calendar meter functionality on server side and client side — first check `current_code.md` and the code about a non-signed-in user seeing an appointment bar meter — then remove all those; only the site owner will see those, not his clients."**
+4. **"Fix the database: the connection was provided but there is no table yet for the admin, the admin username and password must be stored in the DB, and on the Cloudflare deployment there are no tables yet. The tables must also be prefixed `tele_`."**
+
+### 1. Parameterized settings and the package's configuration list — status: audited, one real defect fixed
+
+Every builder setting is parameterized into the package through one token map in `public/package-core.js` (`replaceTokens`: `__SITE_ID__`, `__SITE_CONFIG_JSON__`, `__SCHEMA_STATEMENTS__`, `__BUSINESS_NAME__`, `__BRAND_NAME__`, `__LOCATION__`, `__EMAIL__`, `__PHONE__`, `__PAPER_COLOR__`, `__THEME_CLASS__`, `__DEPLOY_TARGET__`, applied to every shared-public file and the target files, including the Brivon homepage design that is not part of the shared list) and one secret map (`replaceSecretTokens`, applied only to the generated `.dev.vars`/`.env`: `__DATABASE_URL__`, `__ADMIN_USERNAME__`, `__ADMIN_EMAIL__`, `__ADMIN_PASSWORD_HASH__`, `__CSRF_SECRET__`, `__CRON_SECRET__`). A packaging audit now asserts, for **both targets × both design families** (Cloudflare/Vercel × canopy/brivon-dark, 45 checks per combination), that:
+
+- no placeholder survives anywhere in the ZIP (a literal `__…__` would be the parameterized error the operator suspected);
+- identity, time zone, payment details, features, theme class and the page edit reach the packaged homepage, `site-config.js`, the runtime's compiled-in defaults (`DEFAULT_CONFIG`) and `db/seed.sql`;
+- `manifest.json` lists the configurations this ZIP was generated with under `config` — all 19 keys (`siteId, specialty, specialtyLabel, businessName, brandName, location, email, phone, timeZone, theme, editorialAccent, primaryColor, accentColor, paperColor, fontStyle, features, payments, menuLinks, createdAt`) with the builder's values — and leaks no secret and no connection string;
+- the schema is embedded as parameters (`const SCHEMA_STATEMENTS = [ … 59 statements … ]`, `CREATE TABLE IF NOT EXISTS tele_sites`) rather than shipped as a token, and the runtime seeds `tele_admin_users` and reads the owner account back from it.
+
+**Fixed: the ZIP was not reproducible.** `generatedAt`, `createdAt`, `db/seed.sql`, `db/apply-config.sql` and the demo-article dates were stamped from the clock inside the generator, so two builds of *identical* settings produced different bytes; the operator could not tell a settings change from a timestamp change. Generation now anchors every generated date to the payload's `createdAt` (the moment the builder snapshotted the controls) — `public/package-core.js` `createdStamp`. Two builds of the same settings are now byte-identical apart from the freshly generated env file (new CSRF/CRON secrets and PBKDF2 salt), which the ZIP check confirms entry by entry.
+
+### 2. "Security token can't initialize" on the deployed Cloudflare app — status: root-caused and fixed
+
+**Root cause:** the generated runtime's CSRF layer required the `CSRF_SECRET` Worker secret, and Wrangler does not upload `.dev.vars` on deploy. A Worker deployed with only `DATABASE_URL` (and the `ADMIN_*` values) therefore answered `GET /api/csrf` with `503 "Set a CSRF_SECRET Worker secret before using forms."`, so the appointments page could not initialize a token and client registration could never start. The register route itself (`POST /api/auth/register`) was healthy — the failure was in the token handshake in front of it.
+
+**Fix:** `csrfSecret(env)` now falls back to a stable, private secret derived on the server — `HMAC-SHA256(DATABASE_URL, 'canopy-csrf-v1:' + SITE_ID)`, memoized per isolate — so a deployment with a database connection always has working forms; an explicit `CSRF_SECRET` always wins, and rotating `DATABASE_URL` simply invalidates outstanding tokens. The error message now names both options. Registered CSRF verification is unchanged (double-submit cookie plus HMAC signature over a 24-byte nonce, one-hour token lifetime).
+
+**Verified:** with `CSRF_SECRET` removed from `.dev.vars`/`.env`, the full end-to-end flow passes on both packages — `GET /api/csrf` issues a token and `POST /api/auth/register` answers 201 (58/58 Cloudflare and 58/58 Vercel checks; with an empty database too, 59/59 each). The packaged README now states that `CSRF_SECRET` is optional and why, and each package ships `npm run secrets` (`scripts/set-secrets.mjs`) to push `DATABASE_URL`, the `ADMIN_*` values, `CSRF_SECRET` and `CRON_SECRET` from `.dev.vars`/`.env` to Cloudflare (`wrangler secret put`) or Vercel (`vercel env add`) without printing them, with `--dry-run`.
+
+### 3. Calendar capacity meter removed from the public site — status: removed on both sides, owner keeps the numbers
+
+**Server side (both runtimes):** the public `GET /api/availability/summary` route is gone, and `GET /api/availability` now answers exactly `{ month, published, hasTimes, days, slots }` — `days` carries a per-day open count, `slots` the open 30-minute times, `hasTimes` distinguishes "the owner has not opened any times" from "no future times remain". No published/reserved totals, no fill percentage, no summary endpoint. The owner route `GET /api/admin/availability` keeps `totalSlots`/`bookedSlots` (and the publish response keeps its totals) behind owner authentication.
+
+**Client side:** the "this month at a glance" capacity card is deleted from `appointments.html`, `renderMeter()` is gone from `appointments.js`, and the calendar is now single-column in all three breakpoints. The dead meter rules were also pruned from the shipped `site.css`/`brivon.css` (21 rules + 27 selectors), and a stale `renderMeter({})` call left in the calendar error path — which would have thrown a `ReferenceError` and masked the real error — was removed.
+
+**Owner view:** the availability panel in the dashboard shows the metric for the owner: `N published slots · M reserved · P% filled` (plus a month-locked note), computed from the owner-only payload.
+
+### 4. Database tables, the `tele_` prefix, and the owner account stored in the database — status: implemented and verified on an empty database
+
+**All tables are now prefixed `tele_`** — 12 tables (`tele_sites`, `tele_admin_users`, `tele_blog_posts`, `tele_blog_post_images`, `tele_gallery_items`, `tele_client_accounts`, `tele_client_sessions`, `tele_monthly_schedules`, `tele_consultation_slots`, `tele_appointments`, `tele_appointment_payment_proofs`, `tele_consultation_notes`) in the generated schema, the builder's own `tele_builder_page_edits`, and every query in both runtimes, `db/seed.sql` and `db/apply-config.sql`. `shared/db/schema.sql` still renames any pre-existing un-prefixed table in place (`DO $$ … ALTER TABLE … RENAME TO tele_…`), so an older deployment keeps its data. The builder's page-edit store renames `builder_page_edits` the same way.
+
+**The schema is no longer something the operator must run.** Both runtimes embed the schema (`const SCHEMA_STATEMENTS = [ … ]`, substituted from the same generated `db/schema.sql`) and apply it in one transaction on the first database request (`ensureSchema`), best-effort with a fallback message if the database user cannot create tables. That is what the operator's "Cloudflare deployment has no tables yet" hit: a fresh Neon database received no tables, so registration failed on the missing schema.
+
+**The owner username and password now live in the database**, in `tele_admin_users` (one row per site: `username`, `email`, `password_hash`, timestamps). The first database request also creates the `tele_sites` configuration row (`INSERT … ON CONFLICT (site_id) DO NOTHING`, so owner-edited settings are never overwritten) and seeds the admin row from `ADMIN_USERNAME`/`ADMIN_EMAIL`/`ADMIN_PASSWORD_HASH` (`ON CONFLICT (site_id) DO NOTHING`). The database copy is authoritative afterwards: sign-in resolves the row first and falls back to the environment values only when no row exists. A new dashboard **Sign-in** panel (`PUT /api/admin/account`, CSRF + session + current password) changes the username, email or password and re-issues the session; redeploying never overwrites a changed account.
+
+**Database errors now explain themselves** (`shared/lib/db-errors.js`, shipped in every package): `42P01` → run `db/schema.sql` (or check schema permissions), `23503` → the setup record is missing, `3D00`/`28P01`/`42501` → check the `DATABASE_URL` database, password or grants, `57P03`/`53300` → the database is unavailable or the direct connection string was used instead of the pooled one. Messages are public-safe: no SQL, host, user or password.
+
+### Verification (2026-10-12, after the fixes)
+
+- **End-to-end harness on the rebuilt packages, real PostgreSQL (PGlite), 10 combinations:** Cloudflare and Vercel × {schema applied, `db/seed.sql` applied, **empty database (no schema at all)**, no `CSRF_SECRET`, empty database + no `CSRF_SECRET`} → **57/57, 57/57, 58/58, 58/58, 59/59** per target. Coverage: public reads → client signup (201), duplicate email 409, logout, re-login with no `CSRF_SECRET` configured → owner wrong password 401, sign-in, session/dashboard path, `/admin.html` 404 → identity/menu/appearance save → article with gallery images created/updated/published (and a draft hidden publicly) → gallery item created/updated → availability published → four bookings, payment-proof upload, client cancellation → owner unpaid list, mark received, release, approve proof, private image `no-store`, appointment list, private consultation note, owner cancellation → account rotation through `PUT /api/admin/account` (old password 401, new email + password 200, the new hash read back from `tele_admin_users`).
+- **Schema bootstrap on an empty database:** the harness applies **no SQL at all** for the `--empty-db` runs and the runtime's own bootstrap creates all 12 `tele_*` tables, the site row and the seeded admin row, after which the whole flow passes (58/58 and 59/59).
+- **Capacity is owner-only, proven end to end:** the public `/api/availability` payload is asserted to contain none of `totalSlots`, `bookedSlots`, `fillPercent`, `availableSlots`; the public summary route answers 404; the owner route still returns totals to a signed-in owner and refuses an anonymous caller; the packaged client page carries no meter markup or `renderMeter` code.
+- **Packaging:** 45 propagation checks per target × design combination (all four green, no leftover placeholders), and **14/14 ZIP checks per target** including "deterministic entries byte-identical" between the server build and the browser build of the same configuration (only the env file differs, by design).
+- **`npm test`: 82/82.** Four tests were added for this round — reproducible packages, the `tele_` schema bootstrap embedded in the runtime, the owner account stored in and resolved from `tele_admin_users`, and the absence of any public capacity meter — and the packaged-README assertions were updated to the new setup story.
+- **Not verified here:** a live Neon round-trip, a hosted Cloudflare/Vercel deployment, or a real cron invocation. The operator's own Worker could not be inspected (no credentials); every claim above is from the generated packages running locally against real SQL.

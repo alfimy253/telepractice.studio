@@ -4,7 +4,7 @@
   let csrfToken = '';
   let signedIn = false;
   let paymentsRefreshTimer = null;
-  const ADMIN_PAGE_IDS = new Set(['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments', 'payments']);
+  const ADMIN_PAGE_IDS = new Set(['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments', 'payments', 'signin']);
   const MAX_MENU_LINKS = 16;
   const $ = (id) => document.getElementById(id);
   const isSignedIn = () => signedIn;
@@ -193,6 +193,16 @@
     } catch (_) {}
     applyToForm(); previewTheme(); renderMenuLinks(site.menuLinks);
   }
+  function fillOwnerAccount(session = {}) {
+    const form = $('accountForm'); if (!form) return;
+    form.elements.username.value = session.username || '';
+    form.elements.email.value = session.email || '';
+    form.elements.currentPassword.value = '';
+    form.elements.newPassword.value = '';
+    $('accountMessage').textContent = session.username
+      ? 'Signed in with the account stored in this site’s database.'
+      : '';
+  }
   function setSignedIn(value, email = '') {
     signedIn = Boolean(value);
     $('loginPanel').hidden = signedIn;
@@ -227,6 +237,7 @@
       if (followDashboardPath(session)) return;
       syncAdminPageFromHash();
       setSignedIn(session.authenticated, session.email || '');
+      fillOwnerAccount(session);
       if (session.authenticated) await loadAdminWorkspace();
     } catch (error) {
       setSignedIn(false);
@@ -403,7 +414,12 @@
       setScheduleExceptions(Array.isArray(data.schedule?.exceptions) ? data.schedule.exceptions : []);
       $('scheduleDeadline').textContent = data.locked ? `Deadline passed · ${data.deadline}` : `${data.schedule?.status === 'published' ? 'Published' : 'Due'} by ${data.deadline}`;
       $('scheduleDeadline').classList.toggle('is-locked', Boolean(data.locked));
-      $('availabilityScheduleMessage').textContent = `${data.totalSlots || 0} published slots · ${data.bookedSlots || 0} reserved${data.locked ? ' · month locked' : ''}`;
+      // The fill meter lives here, in the owner dashboard: clients only see
+      // which dates still have open times.
+      const publishedSlots = Number(data.totalSlots || 0);
+      const reservedSlots = Number(data.bookedSlots || 0);
+      const fillPercent = publishedSlots ? Math.round(reservedSlots * 100 / publishedSlots) : 0;
+      $('availabilityScheduleMessage').textContent = `${publishedSlots} published slots · ${reservedSlots} reserved · ${fillPercent}% filled${data.locked ? ' · month locked' : ''}`;
       $('availabilityScheduleMessage').classList.remove('is-error');
       if (button) { button.disabled = Boolean(data.locked); button.textContent = data.schedule?.status === 'published' ? 'Update published schedule' : 'Publish availability'; }
     } catch (error) { $('availabilityScheduleMessage').textContent = error.message; $('availabilityScheduleMessage').classList.add('is-error'); if (button) button.disabled = false; }
@@ -715,6 +731,32 @@
       const update = { ...site, businessName: String(form.get('businessName') || '').trim(), brandName: String(form.get('businessName') || '').trim().replace(/\s+(care|clinic|studio|practice|dental)$/i, '').trim(), location: String(form.get('location') || '').trim(), email: String(form.get('email') || '').trim(), phone: String(form.get('phone') || '').trim() };
       try { const data = await api('/api/site', { method: 'PUT', body: update }); site = data.config || update; applyToForm(); status('Details saved'); toast('Practice details updated', 'Your public site now has the latest contact information.'); }
       catch (error) { status('Could not save', true); toast(error.message, true); }
+    });
+    $('accountForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can change the sign-in details.', true); return; }
+      const message = $('accountMessage');
+      message.textContent = 'Saving…';
+      try {
+        const data = await api('/api/admin/account', {
+          method: 'PUT',
+          body: {
+            username: form.elements.username.value.trim(),
+            email: form.elements.email.value.trim(),
+            currentPassword: form.elements.currentPassword.value,
+            newPassword: form.elements.newPassword.value
+          }
+        });
+        fillOwnerAccount({ username: data.username, email: data.email });
+        $('ownerEmail').textContent = `SIGNED IN · ${data.email}`;
+        message.textContent = 'Sign-in details saved. This session was refreshed.';
+        status('Sign-in details saved');
+        toast('Owner sign-in updated', 'Use the new details the next time you sign in.');
+      } catch (error) {
+        message.textContent = error.message;
+        status('Could not save', true);
+      }
     });
     $('themeForm').addEventListener('input', previewTheme);
     $('themeForm').addEventListener('change', (event) => {

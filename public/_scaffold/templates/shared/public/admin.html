@@ -25,6 +25,7 @@
         <button type="button" data-admin-page-link="availability" aria-controls="availabilityManager"><span class="admin-nav-number">06</span><span>Availability</span></button>
         <button type="button" data-admin-page-link="appointments" aria-controls="appointmentManager"><span class="admin-nav-number">07</span><span>Appointments</span></button>
         <button type="button" data-admin-page-link="payments" aria-controls="paymentsManager"><span class="admin-nav-number">08</span><span>Payments</span></button>
+        <button type="button" data-admin-page-link="signin" aria-controls="adminPage-signin"><span class="admin-nav-number">09</span><span>Sign-in</span></button>
         <small class="admin-page-nav-note">Your changes are saved to this practice site.</small>
       </nav>
       <div class="admin-main-column">
@@ -108,6 +109,15 @@
             <div class="payment-list-toolbar"><p>Uploaded screenshots stay private. Approve a successful payment or reject it and release the time.</p><button type="button" id="refreshPayments">Refresh ↻</button></div>
             <div id="paymentsList" class="payment-review-list"><p class="empty-posts">No payment proofs have been uploaded.</p></div>
           </section>
+        </section>
+        <section class="panel-admin admin-card" id="adminPage-signin" data-admin-page="signin" hidden>
+          <div class="admin-card-heading"><div><span class="admin-section-index">09 / SIGN-IN</span><h2>Owner sign-in</h2><p>Your owner account is stored in this site's database (tele_admin_users), so it survives redeploys and keeps working after the builder secrets are rotated.</p></div><span class="card-icon">✦</span></div>
+          <form id="accountForm" class="admin-form" method="post" action="/api/admin/account">
+            <div class="admin-form-grid"><label><span>Owner username</span><input name="username" maxlength="64" autocomplete="username" required></label><label><span>Owner email</span><input name="email" type="email" maxlength="254" autocomplete="email" required></label><label><span>Current password</span><input name="currentPassword" type="password" maxlength="128" autocomplete="current-password" required></label><label><span>New password <small>(leave blank to keep)</small></span><input name="newPassword" type="password" minlength="12" maxlength="128" autocomplete="new-password" placeholder="12+ characters"></label></div>
+            <p class="admin-form-note">The stored password is a salted PBKDF2 hash; the raw password is never saved. Saving signs you in again with the new details.</p>
+            <div class="admin-form-actions"><small>Signing in accepts the username or the owner email.</small><button type="submit" class="admin-primary">Save sign-in details</button></div>
+            <p class="admin-form-message" id="accountMessage" aria-live="polite"></p>
+          </form>
         </section>
       </div>
       <aside class="admin-aside">

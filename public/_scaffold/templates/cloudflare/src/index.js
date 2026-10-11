@@ -5,9 +5,15 @@ import { cleanMenuLinks } from '../lib/menu-links.js';
 import { normalizeSiteTheme } from '../lib/site-theme.js';
 import { detectPaymentProofMime, MAX_PAYMENT_PROOF_BYTES, PAYMENT_PROOF_MIME_TYPES, paymentProofFromBase64, paymentProofToBase64 } from '../lib/payment-proof.js';
 import { runPaymentReminderChecks } from '../lib/payment-reminders.js';
+import { databaseErrorMessage } from '../lib/db-errors.js';
 
 const SITE_ID = '__SITE_ID__';
 const DEFAULT_CONFIG = __SITE_CONFIG_JSON__;
+// db/schema.sql, split into single statements by the builder and applied as one
+// transaction the first time this isolate touches the database, so a fresh Neon
+// URL gets its tele_* tables without a manual step. The same file remains in
+// db/schema.sql for manual or pre-provisioned setups.
+const SCHEMA_STATEMENTS = __SCHEMA_STATEMENTS__;
 const CSRF_COOKIE = 'practice_csrf';
 const CLIENT_SESSION_COOKIE = 'canopy_client';
 const CLIENT_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -188,34 +194,47 @@ function articlePostPayload(value = {}) {
   if (!title || !body || !featureImageUrl || !featureImageAlt) return null;
   return { title, slug, excerpt, body, category, status, featureImageUrl, featureImageAlt, gallery };
 }
+function articleGalleryRows(gallery) {
+  // jsonb_to_recordset below declares snake_case columns, while the owner
+  // dashboard posts camelCase gallery rows ({ imageUrl, altText, caption,
+  // sortOrder }). Passing the objects through unchanged inserted NULLs and the
+  // save failed with "null value in column \"image_url\"" whenever an article
+  // carried a gallery image, so map the fields explicitly.
+  return JSON.stringify((Array.isArray(gallery) ? gallery : []).map((image) => ({
+    image_url: image?.imageUrl ?? '',
+    alt_text: image?.altText ?? '',
+    caption: image?.caption ?? '',
+    sort_order: Number(image?.sortOrder ?? 0)
+  })));
+}
 async function persistArticle(sql, post, id = '') {
   if (id) return sql`
     WITH saved AS (
-      UPDATE blog_posts SET title = ${post.title}, slug = ${post.slug}, excerpt = ${post.excerpt}, body = ${post.body}, feature_image_url = ${post.featureImageUrl}, feature_image_alt = ${post.featureImageAlt}, category = ${post.category}, status = ${post.status}, published_at = CASE WHEN ${post.status} = 'published' THEN COALESCE(published_at, now()) ELSE NULL END, updated_at = now()
+      UPDATE tele_blog_posts SET title = ${post.title}, slug = ${post.slug}, excerpt = ${post.excerpt}, body = ${post.body}, feature_image_url = ${post.featureImageUrl}, feature_image_alt = ${post.featureImageAlt}, category = ${post.category}, status = ${post.status}, published_at = CASE WHEN ${post.status} = 'published' THEN COALESCE(published_at, now()) ELSE NULL END, updated_at = now()
       WHERE site_id = ${SITE_ID} AND id = ${id}::uuid
       RETURNING id, site_id, title, slug, excerpt, body, feature_image_url AS "featureImageUrl", feature_image_alt AS "featureImageAlt", category, status, published_at AS "publishedAt", created_at AS "createdAt"
     ), cleared AS (
-      DELETE FROM blog_post_images AS image USING saved WHERE image.site_id = saved.site_id AND image.post_id = saved.id RETURNING image.id
+      DELETE FROM tele_blog_post_images AS image USING saved WHERE image.site_id = saved.site_id AND image.post_id = saved.id RETURNING image.id
     ), added AS (
-      INSERT INTO blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order)
+      INSERT INTO tele_blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order)
       SELECT saved.site_id, saved.id, incoming.image_url, incoming.alt_text, incoming.caption, incoming.sort_order
       FROM saved CROSS JOIN (SELECT count(*) AS cleared_count FROM cleared) AS cleared_images
-      CROSS JOIN jsonb_to_recordset(${JSON.stringify(post.gallery)}::jsonb) AS incoming(image_url text, alt_text text, caption text, sort_order integer)
+      CROSS JOIN jsonb_to_recordset(${articleGalleryRows(post.gallery)}::jsonb) AS incoming(image_url text, alt_text text, caption text, sort_order integer)
       RETURNING id
     )
     SELECT saved.* FROM saved`;
   return sql`
     WITH saved AS (
-      INSERT INTO blog_posts (site_id, title, slug, excerpt, body, feature_image_url, feature_image_alt, category, status, published_at)
+      INSERT INTO tele_blog_posts (site_id, title, slug, excerpt, body, feature_image_url, feature_image_alt, category, status, published_at)
       VALUES (${SITE_ID}, ${post.title}, ${post.slug}, ${post.excerpt}, ${post.body}, ${post.featureImageUrl}, ${post.featureImageAlt}, ${post.category}, ${post.status}, CASE WHEN ${post.status} = 'published' THEN now() ELSE NULL END)
       RETURNING id, site_id, title, slug, excerpt, body, feature_image_url AS "featureImageUrl", feature_image_alt AS "featureImageAlt", category, status, published_at AS "publishedAt", created_at AS "createdAt"
     ), cleared AS (
-      DELETE FROM blog_post_images AS image USING saved WHERE image.site_id = saved.site_id AND image.post_id = saved.id RETURNING image.id
+      DELETE FROM tele_blog_post_images AS image USING saved WHERE image.site_id = saved.site_id AND image.post_id = saved.id RETURNING image.id
     ), added AS (
-      INSERT INTO blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order)
+      INSERT INTO tele_blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order)
       SELECT saved.site_id, saved.id, incoming.image_url, incoming.alt_text, incoming.caption, incoming.sort_order
       FROM saved CROSS JOIN (SELECT count(*) AS cleared_count FROM cleared) AS cleared_images
-      CROSS JOIN jsonb_to_recordset(${JSON.stringify(post.gallery)}::jsonb) AS incoming(image_url text, alt_text text, caption text, sort_order integer)
+      CROSS JOIN jsonb_to_recordset(${articleGalleryRows(post.gallery)}::jsonb) AS incoming(image_url text, alt_text text, caption text, sort_order integer)
       RETURNING id
     )
     SELECT saved.* FROM saved`;
@@ -224,8 +243,69 @@ function displayTime(value) {
   const [hour, minute] = value.split(':').map(Number); const suffix = hour >= 12 ? 'pm' : 'am';
   return `${hour % 12 || 12}:${String(minute).padStart(2, '0')} ${suffix}`;
 }
-function sql(env) {
+// The site owns exactly one row in `sites`, which holds its public
+// configuration. db/seed.sql writes that row and the owner's "save details"
+// writes it, but a fresh deployment that only ran db/schema.sql has none — and
+// every client account, booking, CMS row and schedule references
+// sites(site_id) by foreign key, so client signup answered
+// "Could not create the client account." (500/503) until the owner happened to
+// save something first. Create the row on first database use instead; an
+// existing row — including owner-edited settings — is never modified.
+function rawSql(env) {
   return createNeonClient(env.DATABASE_URL);
+}
+let schemaReady = null;
+let schemaFailures = 0;
+function ensureSchema(env) {
+  if (schemaReady) return schemaReady;
+  if (!env.DATABASE_URL || schemaFailures > 1) return Promise.resolve();
+  const client = rawSql(env);
+  schemaReady = (async () => {
+    await client.transaction((transaction) => SCHEMA_STATEMENTS.map((statement) => transaction.query(statement)));
+  })().catch((cause) => {
+    // Best effort: if the database user may not create tables, the real query
+    // still runs and reports its own, more specific error.
+    schemaReady = null;
+    schemaFailures += 1;
+    console.error('schema bootstrap failed', cause);
+  });
+  return schemaReady;
+}
+let siteRowReady = null;
+function ensureSiteRow(env) {
+  if (!siteRowReady) {
+    const client = rawSql(env);
+    siteRowReady = (async () => {
+      await ensureSchema(env);
+      await client`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(DEFAULT_CONFIG)}::jsonb) ON CONFLICT (site_id) DO NOTHING`;
+    })().catch((cause) => { siteRowReady = null; throw cause; });
+  }
+  return siteRowReady;
+}
+// The owner account lives in tele_admin_users. The ADMIN_* Worker secrets seed
+// that row on first use; after that the database copy is authoritative, so the
+// owner can change the username, email or password in the dashboard without
+// touching Worker secrets. An existing row is never overwritten by a redeploy.
+let adminUserReady = null;
+function ensureAdminUser(env) {
+  if (!adminUserReady) {
+    const client = rawSql(env);
+    adminUserReady = (async () => {
+      await ensureSiteRow(env);
+      if (!env.ADMIN_USERNAME || !env.ADMIN_EMAIL || !env.ADMIN_PASSWORD_HASH) return;
+      await client`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${String(env.ADMIN_USERNAME).trim()}, ${String(env.ADMIN_EMAIL).trim()}, ${String(env.ADMIN_PASSWORD_HASH)}) ON CONFLICT (site_id) DO NOTHING`;
+    })().catch((cause) => { adminUserReady = null; throw cause; });
+  }
+  return adminUserReady;
+}
+// Same call shape as before (`await sql(env)` + tagged template), so every
+// existing query keeps working; each one first guarantees the site row exists.
+function sql(env) {
+  const client = rawSql(env);
+  return async (strings, ...values) => {
+    await ensureSiteRow(env);
+    return client(strings, ...values);
+  };
 }
 function base64url(bytes) {
   let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -240,9 +320,21 @@ async function hmac(value, secret) {
   const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value)));
 }
+let derivedCsrfSecret = '';
+// A Worker deployed without `wrangler secret put CSRF_SECRET` still needs
+// working forms on the client site (sign-up, booking, owner sign-in). Derive a
+// stable secret from the database URL every deployment already has: it never
+// leaves the server, and changing DATABASE_URL simply invalidates outstanding
+// tokens. An explicit CSRF_SECRET always wins.
+async function csrfSecret(env) {
+  if (env.CSRF_SECRET) return String(env.CSRF_SECRET);
+  if (!env.DATABASE_URL) return '';
+  if (!derivedCsrfSecret) derivedCsrfSecret = base64url(await hmac(`canopy-csrf-v1:${SITE_ID}`, String(env.DATABASE_URL)));
+  return derivedCsrfSecret;
+}
 async function issueCsrf(request, env) {
-  const secret = env.CSRF_SECRET;
-  if (!secret) return error('Set a CSRF_SECRET Worker secret before using forms.', 503);
+  const secret = await csrfSecret(env);
+  if (!secret) return error('Set a CSRF_SECRET Worker secret (or DATABASE_URL) before using forms.', 503);
   const nonceBytes = crypto.getRandomValues(new Uint8Array(24));
   const nonce = base64url(nonceBytes);
   const signature = base64url(await hmac(nonce, secret));
@@ -281,8 +373,8 @@ function clientSummary(row) { return { id: row.id, name: row.name, email: row.em
 async function createClientSession(request, env, account) {
   const token = base64url(crypto.getRandomValues(new Uint8Array(32)));
   const tokenHash = await sessionTokenHash(token);
-  await sql(env)`DELETE FROM client_sessions WHERE site_id = ${SITE_ID} AND expires_at < now()`;
-  await sql(env)`INSERT INTO client_sessions (site_id, client_account_id, token_hash, expires_at) VALUES (${SITE_ID}, ${account.id}, ${tokenHash}, now() + (${CLIENT_SESSION_TTL_SECONDS} * interval '1 second'))`;
+  await sql(env)`DELETE FROM tele_client_sessions WHERE site_id = ${SITE_ID} AND expires_at < now()`;
+  await sql(env)`INSERT INTO tele_client_sessions (site_id, client_account_id, token_hash, expires_at) VALUES (${SITE_ID}, ${account.id}, ${tokenHash}, now() + (${CLIENT_SESSION_TTL_SECONDS} * interval '1 second'))`;
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
   return { 'Set-Cookie': `${CLIENT_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${CLIENT_SESSION_TTL_SECONDS}${secure}` };
 }
@@ -294,7 +386,7 @@ async function currentClient(request, env) {
   const token = readCookie(request.headers.get('Cookie'), CLIENT_SESSION_COOKIE);
   if (!token || !env.DATABASE_URL) return null;
   const tokenHash = await sessionTokenHash(token);
-  const rows = await sql(env)`SELECT account.id, account.full_name AS name, account.email, account.phone FROM client_sessions AS session JOIN client_accounts AS account ON account.id = session.client_account_id AND account.site_id = session.site_id WHERE session.site_id = ${SITE_ID} AND session.token_hash = ${tokenHash} AND session.expires_at > now() LIMIT 1`;
+  const rows = await sql(env)`SELECT account.id, account.full_name AS name, account.email, account.phone FROM tele_client_sessions AS session JOIN tele_client_accounts AS account ON account.id = session.client_account_id AND account.site_id = session.site_id WHERE session.site_id = ${SITE_ID} AND session.token_hash = ${tokenHash} AND session.expires_at > now() LIMIT 1`;
   return rows[0] || null;
 }
 function constantEqual(left, right) {
@@ -310,7 +402,7 @@ async function csrfOk(request, env) {
   const cookie = readCookie(request.headers.get('Cookie'), CSRF_COOKIE);
   const header = request.headers.get('X-CSRF-Token');
   if (!cookie || !header || !constantEqual(cookie, header)) return false;
-  const secret = env.CSRF_SECRET;
+  const secret = await csrfSecret(env);
   if (!secret) return false;
   const [nonce, signature, ...rest] = header.split('.');
   if (!nonce || !signature || rest.length) return false;
@@ -318,21 +410,51 @@ async function csrfOk(request, env) {
   const expected = await hmac(nonce, secret);
   return actual.length === expected.length && constantEqual(base64url(actual), base64url(expected));
 }
-function adminConfigured(env) {
-  return Boolean(env.ADMIN_USERNAME && env.ADMIN_EMAIL && env.ADMIN_PASSWORD_HASH && env.CSRF_SECRET);
+function ownerPasswordProblem(value) {
+  if (value.length < 12 || value.length > 128) return 'The password must be 12–128 characters long.';
+  if (!/[a-z]/.test(value) || !/[A-Z]/.test(value) || !/[0-9]/.test(value) || !/[^A-Za-z0-9\s]/.test(value)) {
+    return 'The password must include a lowercase letter, an uppercase letter, a number and a symbol.';
+  }
+  return '';
+}
+// Resolves the owner account: the tele_admin_users row first (seeded from the
+// ADMIN_* secrets on first use), then the secrets themselves as a fallback.
+async function adminCredentials(env) {
+  const fromSecrets = {
+    username: cleanText(env.ADMIN_USERNAME, 64), email: cleanText(env.ADMIN_EMAIL, 254),
+    passwordHash: String(env.ADMIN_PASSWORD_HASH || ''), source: 'worker-secrets'
+  };
+  const secretsComplete = Boolean(fromSecrets.username && fromSecrets.email && fromSecrets.passwordHash);
+  if (!env.DATABASE_URL) return secretsComplete ? fromSecrets : null;
+  try {
+    await ensureAdminUser(env);
+    const rows = await sql(env)`SELECT username, email, password_hash AS "passwordHash" FROM tele_admin_users WHERE site_id = ${SITE_ID} LIMIT 1`;
+    if (rows[0]) return { username: String(rows[0].username), email: String(rows[0].email), passwordHash: String(rows[0].passwordHash), source: 'database' };
+  } catch (cause) { console.error('owner account read failed', cause); }
+  return secretsComplete ? fromSecrets : null;
+}
+async function adminConfigured(env) {
+  return Boolean(await adminCredentials(env));
 }
 function adminSessionCookieName(request) {
   return new URL(request.url).protocol === 'https:' ? '__Host-canopy_owner' : 'canopy_owner';
 }
 async function adminOk(request, env) {
-  if (!adminConfigured(env)) return false;
+  const credentials = await adminCredentials(env);
+  if (!credentials) return false;
+  const secret = await csrfSecret(env);
+  if (!secret) return false;
   const token = readCookie(request.headers.get('Cookie'), adminSessionCookieName(request));
-  return verifyAdminSession(token, env.ADMIN_USERNAME, env.ADMIN_PASSWORD_HASH, env.CSRF_SECRET);
+  return verifyAdminSession(token, credentials.username, credentials.passwordHash, secret);
 }
-function adminFailure(env) {
-  return adminConfigured(env)
+async function adminFailure(env) {
+  return await adminConfigured(env)
     ? error('Owner session is not valid. Sign in again.', 401)
-    : error('Owner sign-in is not configured. Set ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD_HASH and CSRF_SECRET.', 503);
+    : error('Owner sign-in is not configured. Set ADMIN_USERNAME, ADMIN_EMAIL and ADMIN_PASSWORD_HASH on the Worker (the database copy is used once it exists).', 503);
+}
+function ownerSessionCookie(request, token) {
+  const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+  return `${adminSessionCookieName(request)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`;
 }
 async function readJson(request) {
   const contentLength = Number(request.headers.get('Content-Length') || 0);
@@ -362,55 +484,86 @@ async function readJson(request) {
 async function siteConfig(env) {
   if (!env.DATABASE_URL) return { config: DEFAULT_CONFIG, source: 'generated-fallback' };
   try {
-    const rows = await sql(env)`SELECT config FROM sites WHERE site_id = ${SITE_ID} LIMIT 1`;
+    const rows = await sql(env)`SELECT config FROM tele_sites WHERE site_id = ${SITE_ID} LIMIT 1`;
     return { config: cleanSiteConfig(rows[0]?.config || DEFAULT_CONFIG), source: rows[0] ? 'neon' : 'generated-fallback' };
   } catch (cause) { console.error('site config read failed', cause); return { config: DEFAULT_CONFIG, source: 'generated-fallback' }; }
 }
+// The public calendar only needs to know which dates still have open times.
+// Reserved/published totals (the "capacity meter") are owner-only: they are
+// returned by the /api/admin/availability route, never by this helper's public
+// callers, which project `hasTimes`, `days` and `slots` only.
 async function availabilityForMonth(env, month, filterDate = '') {
   const start = monthStart(month);
   if (!start) throw new Error('Choose a valid month in YYYY-MM format.');
-  if (!env.DATABASE_URL) return { month, published: false, slots: [], days: [], totalSlots: 0, bookedSlots: 0, availableSlots: 0, fillPercent: 0 };
+  if (!env.DATABASE_URL) return { month, published: false, hasTimes: false, slots: [], days: [], totalSlots: 0, bookedSlots: 0 };
   const rows = filterDate
-    ? await sql(env)`SELECT schedule.status, slot.id, slot.slot_date::text AS date, to_char(slot.slot_time, 'HH24:MI') AS time, EXISTS (SELECT 1 FROM appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled') AS booked FROM monthly_schedules AS schedule LEFT JOIN consultation_slots AS slot ON slot.site_id = schedule.site_id AND slot.month_start = schedule.month_start AND slot.is_open = true AND slot.slot_date = ${filterDate}::date WHERE schedule.site_id = ${SITE_ID} AND schedule.month_start = ${start}::date ORDER BY slot.slot_date, slot.slot_time`
-    : await sql(env)`SELECT schedule.status, slot.id, slot.slot_date::text AS date, to_char(slot.slot_time, 'HH24:MI') AS time, EXISTS (SELECT 1 FROM appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled') AS booked FROM monthly_schedules AS schedule LEFT JOIN consultation_slots AS slot ON slot.site_id = schedule.site_id AND slot.month_start = schedule.month_start AND slot.is_open = true WHERE schedule.site_id = ${SITE_ID} AND schedule.month_start = ${start}::date ORDER BY slot.slot_date, slot.slot_time`;
+    ? await sql(env)`SELECT schedule.status, slot.id, slot.slot_date::text AS date, to_char(slot.slot_time, 'HH24:MI') AS time, EXISTS (SELECT 1 FROM tele_appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled') AS booked FROM tele_monthly_schedules AS schedule LEFT JOIN tele_consultation_slots AS slot ON slot.site_id = schedule.site_id AND slot.month_start = schedule.month_start AND slot.is_open = true AND slot.slot_date = ${filterDate}::date WHERE schedule.site_id = ${SITE_ID} AND schedule.month_start = ${start}::date ORDER BY slot.slot_date, slot.slot_time`
+    : await sql(env)`SELECT schedule.status, slot.id, slot.slot_date::text AS date, to_char(slot.slot_time, 'HH24:MI') AS time, EXISTS (SELECT 1 FROM tele_appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled') AS booked FROM tele_monthly_schedules AS schedule LEFT JOIN tele_consultation_slots AS slot ON slot.site_id = schedule.site_id AND slot.month_start = schedule.month_start AND slot.is_open = true WHERE schedule.site_id = ${SITE_ID} AND schedule.month_start = ${start}::date ORDER BY slot.slot_date, slot.slot_time`;
   const published = rows[0]?.status === 'published'; const slotRows = rows.filter((row) => row.id);
   const bookedSlots = slotRows.filter((row) => row.booked).length; const totalSlots = slotRows.length;
   const today = localToday(); const clock = localClock();
   const upcomingRows = slotRows.filter((row) => row.date > today || (row.date === today && row.time > clock)); const dayMap = new Map();
   for (const row of upcomingRows) {
-    const day = dayMap.get(row.date) || { date: row.date, available: 0, booked: 0 };
-    day[row.booked ? 'booked' : 'available'] += 1; dayMap.set(row.date, day);
+    if (row.booked) continue;
+    const day = dayMap.get(row.date) || { date: row.date, available: 0 };
+    day.available += 1; dayMap.set(row.date, day);
   }
-  return { month, published, totalSlots, bookedSlots, availableSlots: totalSlots - bookedSlots, fillPercent: totalSlots ? Math.round(bookedSlots * 100 / totalSlots) : 0, days: [...dayMap.values()], slots: upcomingRows.filter((row) => !row.booked).map((row) => ({ id: row.id, date: row.date, time: row.time, label: displayTime(row.time) })) };
+  return { month, published, hasTimes: slotRows.length > 0, totalSlots, bookedSlots, days: [...dayMap.values()], slots: upcomingRows.filter((row) => !row.booked).map((row) => ({ id: row.id, date: row.date, time: row.time, label: displayTime(row.time) })) };
 }
 async function routeApi(request, env) {
   const url = new URL(request.url); const path = url.pathname; const method = request.method.toUpperCase();
   if (path === '/api/health' && method === 'GET') return json({ ok: true, runtime: 'cloudflare-workers', siteId: SITE_ID });
   if (path === '/api/csrf' && method === 'GET') return issueCsrf(request, env);
   if (path === '/api/admin/session' && method === 'GET') {
-    const configured = adminConfigured(env);
-    const authenticated = configured && await adminOk(request, env);
+    const credentials = await adminCredentials(env);
+    const authenticated = Boolean(credentials) && await adminOk(request, env);
     return json({
-      configured,
+      configured: Boolean(credentials),
       authenticated,
       ...(authenticated ? { dashboardPath: adminDashboardPath(new Date(), SITE_TIME_ZONE) } : {}),
-      email: authenticated ? env.ADMIN_EMAIL : ''
+      email: authenticated ? credentials.email : '',
+      username: authenticated ? credentials.username : ''
     });
   }
   if (path === '/api/admin/login' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    if (!adminConfigured(env)) return adminFailure(env);
+    const credentials = await adminCredentials(env);
+    if (!credentials) return adminFailure(env);
     const value = await readJson(request);
     if (!value || typeof value !== 'object') return error('Send a valid owner sign-in form.');
-    const username = cleanText(value.username, 64);
+    const username = cleanText(value.username, 254);
     const password = String(value.password || '');
-    const usernameMatches = constantEqual(username.toLowerCase(), String(env.ADMIN_USERNAME).trim().toLowerCase());
-    const passwordMatches = await verifyPasswordHash(password, String(env.ADMIN_PASSWORD_HASH));
+    const entered = username.toLowerCase();
+    const usernameMatches = constantEqual(entered, credentials.username.toLowerCase())
+      || (Boolean(credentials.email) && constantEqual(entered, credentials.email.toLowerCase()));
+    const passwordMatches = await verifyPasswordHash(password, credentials.passwordHash);
     if (!usernameMatches || !passwordMatches) return error('Username or password is incorrect.', 401);
-    const token = await createAdminSession(env.ADMIN_USERNAME, env.ADMIN_PASSWORD_HASH, env.CSRF_SECRET);
-    const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-    const cookie = `${adminSessionCookieName(request)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`;
-    return json({ ok: true, email: env.ADMIN_EMAIL, dashboardPath: adminDashboardPath(new Date(), SITE_TIME_ZONE) }, 200, { 'Set-Cookie': cookie });
+    const token = await createAdminSession(credentials.username, credentials.passwordHash, await csrfSecret(env));
+    return json({ ok: true, email: credentials.email, dashboardPath: adminDashboardPath(new Date(), SITE_TIME_ZONE) }, 200, { 'Set-Cookie': ownerSessionCookie(request, token) });
+  }
+  if (path === '/api/admin/account' && method === 'PUT') {
+    if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
+    const credentials = await adminCredentials(env);
+    if (!credentials) return adminFailure(env);
+    if (!await adminOk(request, env)) return error('Owner session is not valid. Sign in again.', 401);
+    const value = await readJson(request);
+    if (!value || typeof value !== 'object') return error('Send a valid owner account form.');
+    const currentPassword = String(value.currentPassword || '');
+    if (!await verifyPasswordHash(currentPassword, credentials.passwordHash)) return error('Current password is incorrect.', 401);
+    const username = cleanText(value.username, 64) || credentials.username;
+    const email = cleanText(value.email, 254) || credentials.email;
+    const newPassword = String(value.newPassword || '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/.test(username)) {
+      return error('Enter a username between 3 and 64 characters using letters, numbers, dots, underscores or hyphens.');
+    }
+    if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(email)) return error('Enter a valid owner email address.');
+    if (newPassword) { const problem = ownerPasswordProblem(newPassword); if (problem) return error(problem); }
+    const passwordHash = newPassword ? await makePasswordHash(newPassword) : credentials.passwordHash;
+    try {
+      await sql(env)`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${username}, ${email}, ${passwordHash}) ON CONFLICT (site_id) DO UPDATE SET username = EXCLUDED.username, email = EXCLUDED.email, password_hash = EXCLUDED.password_hash, updated_at = now()`;
+    } catch (cause) { console.error('owner account save failed', cause); return error(databaseErrorMessage(cause, 'Could not save the owner sign-in details.'), 503); }
+    const token = await createAdminSession(username, passwordHash, await csrfSecret(env));
+    return json({ ok: true, username, email }, 200, { 'Set-Cookie': ownerSessionCookie(request, token) });
   }
   if (path === '/api/admin/logout' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
@@ -426,9 +579,9 @@ async function routeApi(request, env) {
     const config = cleanSiteConfig(body);
     if (!config.businessName || (config.email && !/^\S+@\S+\.\S+$/.test(config.email))) return error('Check the practice name and contact email.');
     try {
-      const rows = await sql(env)`INSERT INTO sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(config)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now() RETURNING config`;
+      const rows = await sql(env)`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(config)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now() RETURNING config`;
       return json({ config: rows[0].config });
-    } catch (cause) { console.error('site config save failed', cause); return error('Could not save the site settings. Check the Neon schema and connection.', 503); }
+    } catch (cause) { console.error('site config save failed', cause); return error(databaseErrorMessage(cause, 'Could not save the site settings. Check the Neon schema and connection.'), 503); }
   }
   if (path === '/api/auth/register' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
@@ -439,10 +592,10 @@ async function routeApi(request, env) {
     if (!name || !/^\S+@\S+\.\S+$/.test(email) || !phone || password.length < 12 || password.length > 128) return error('Enter your name, a valid email, phone number, and a password of at least 12 characters.');
     const passwordHash = await makePasswordHash(password);
     try {
-      const accounts = await sql(env)`INSERT INTO client_accounts (site_id, full_name, email, phone, password_hash) VALUES (${SITE_ID}, ${name}, ${email}, ${phone}, ${passwordHash}) RETURNING id, full_name AS name, email, phone`;
+      const accounts = await sql(env)`INSERT INTO tele_client_accounts (site_id, full_name, email, phone, password_hash) VALUES (${SITE_ID}, ${name}, ${email}, ${phone}, ${passwordHash}) RETURNING id, full_name AS name, email, phone`;
       const sessionHeaders = await createClientSession(request, env, accounts[0]);
       return json({ client: clientSummary(accounts[0]) }, 201, sessionHeaders);
-    } catch (cause) { console.error('client account registration failed', cause); return error(cause.code === '23505' ? 'An account with that email already exists. Please sign in instead.' : 'Could not create the client account.', cause.code === '23505' ? 409 : 503); }
+    } catch (cause) { console.error('client account registration failed', cause); return error(cause.code === '23505' ? 'An account with that email already exists. Please sign in instead.' : databaseErrorMessage(cause, 'Could not create the client account. Check that the appointment database is reachable.'), cause.code === '23505' ? 409 : 503); }
   }
   if (path === '/api/auth/login' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
@@ -451,7 +604,7 @@ async function routeApi(request, env) {
     const value = await readJson(request); if (!value || typeof value !== 'object') return error('Send a valid sign-in form.');
     const email = cleanText(value.email, 120).toLowerCase(); const password = String(value.password || '');
     if (!/^\S+@\S+\.\S+$/.test(email) || !password || password.length > 128) return error('Enter a valid email and password.');
-    const accounts = await sql(env)`SELECT id, full_name AS name, email, phone, password_hash AS "passwordHash" FROM client_accounts WHERE site_id = ${SITE_ID} AND email = ${email} LIMIT 1`;
+    const accounts = await sql(env)`SELECT id, full_name AS name, email, phone, password_hash AS "passwordHash" FROM tele_client_accounts WHERE site_id = ${SITE_ID} AND email = ${email} LIMIT 1`;
     if (!accounts.length || !await passwordMatches(password, accounts[0].passwordHash)) return error('Email or password is incorrect.', 401);
     const sessionHeaders = await createClientSession(request, env, accounts[0]);
     return json({ client: clientSummary(accounts[0]) }, 200, sessionHeaders);
@@ -465,7 +618,7 @@ async function routeApi(request, env) {
     const token = readCookie(request.headers.get('Cookie'), CLIENT_SESSION_COOKIE);
     if (token && env.DATABASE_URL) {
       const tokenHash = await sessionTokenHash(token);
-      await sql(env)`DELETE FROM client_sessions WHERE site_id = ${SITE_ID} AND token_hash = ${tokenHash}`;
+      await sql(env)`DELETE FROM tele_client_sessions WHERE site_id = ${SITE_ID} AND token_hash = ${tokenHash}`;
     }
     return json({ ok: true }, 200, clearClientSession(request));
   }
@@ -473,7 +626,7 @@ async function routeApi(request, env) {
     if (!DEFAULT_CONFIG.features?.blog) return json({ posts: [] });
     if (!env.DATABASE_URL) return json({ posts: DEFAULT_CONFIG.demoPosts || [] });
     try {
-      const posts = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.published_at AS "publishedAt", post.created_at AS "createdAt" FROM blog_posts AS post WHERE post.site_id = ${SITE_ID} AND post.status = 'published' ORDER BY post.published_at DESC NULLS LAST, post.created_at DESC LIMIT 12`;
+      const posts = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.published_at AS "publishedAt", post.created_at AS "createdAt" FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} AND post.status = 'published' ORDER BY post.published_at DESC NULLS LAST, post.created_at DESC LIMIT 12`;
       return json({ posts });
     } catch (cause) { console.error('blog read failed', cause); return error('Could not load journal posts.', 503); }
   }
@@ -486,7 +639,7 @@ async function routeApi(request, env) {
       return post ? json({ post }) : error('Article not found.', 404);
     }
     try {
-      const rows = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM blog_posts AS post WHERE post.site_id = ${SITE_ID} AND post.status = 'published' AND post.slug = ${slug} LIMIT 1`;
+      const rows = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM tele_blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} AND post.status = 'published' AND post.slug = ${slug} LIMIT 1`;
       return rows.length ? json({ post: rows[0] }) : error('Article not found.', 404);
     } catch (cause) { console.error('blog article read failed', cause); return error('Could not load this article.', 503); }
   }
@@ -494,23 +647,19 @@ async function routeApi(request, env) {
     if (!DEFAULT_CONFIG.features?.gallery) return json({ items: [] });
     if (!env.DATABASE_URL) return json({ items: DEFAULT_CONFIG.demoGallery || [] });
     try {
-      const items = await sql(env)`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM gallery_items WHERE site_id = ${SITE_ID} AND status = 'published' ORDER BY sort_order ASC, created_at DESC LIMIT 24`;
+      const items = await sql(env)`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM tele_gallery_items WHERE site_id = ${SITE_ID} AND status = 'published' ORDER BY sort_order ASC, created_at DESC LIMIT 24`;
       return json({ items });
     } catch (cause) { console.error('gallery read failed', cause); return error('Could not load gallery items.', 503); }
-  }
-  if (path === '/api/availability/summary' && method === 'GET') {
-    const month = String(url.searchParams.get('month') || '');
-    if (!monthStart(month)) return error('Choose a valid month.');
-    if (!DEFAULT_CONFIG.features?.scheduling) return json({ month, published: false, totalSlots: 0, bookedSlots: 0, availableSlots: 0, fillPercent: 0 });
-    const data = await availabilityForMonth(env, month);
-    return json({ month: data.month, published: data.published, totalSlots: data.totalSlots, bookedSlots: data.bookedSlots, availableSlots: data.availableSlots, fillPercent: data.fillPercent });
   }
   if (path === '/api/availability' && method === 'GET') {
     const date = String(url.searchParams.get('date') || ''); const month = String(url.searchParams.get('month') || (date ? date.slice(0, 7) : localToday().slice(0, 7)));
     if (!monthStart(month)) return error('Choose a valid month.');
     if (date && (!validDate(date) || date < localToday() || date.slice(0, 7) !== month)) return error('Choose a valid future date in the selected month.');
-    if (!DEFAULT_CONFIG.features?.scheduling) return json({ month, published: false, slots: [], days: [], totalSlots: 0, bookedSlots: 0, availableSlots: 0, fillPercent: 0 });
-    try { return json(await availabilityForMonth(env, month, date)); }
+    if (!DEFAULT_CONFIG.features?.scheduling) return json({ month, published: false, hasTimes: false, slots: [], days: [] });
+    try {
+      const data = await availabilityForMonth(env, month, date);
+      return json({ month: data.month, published: data.published, hasTimes: data.hasTimes, days: data.days, slots: data.slots });
+    }
     catch (cause) { console.error('availability read failed', cause); return error('Could not load the monthly schedule.', 503); }
   }
   if (path === '/api/admin/availability' && method === 'GET') {
@@ -520,8 +669,8 @@ async function routeApi(request, env) {
     if (!start) return error('Choose a valid month.');
     if (!env.DATABASE_URL) return error('Availability needs a configured appointment database.', 503);
     try {
-      const schedules = await sql(env)`SELECT weekly_rules AS "weeklyRules", exceptions, status, published_at AS "publishedAt" FROM monthly_schedules WHERE site_id = ${SITE_ID} AND month_start = ${start}::date LIMIT 1`;
-      const metrics = await sql(env)`SELECT count(*)::int AS total, count(*) FILTER (WHERE EXISTS (SELECT 1 FROM appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled'))::int AS booked FROM consultation_slots AS slot WHERE slot.site_id = ${SITE_ID} AND slot.month_start = ${start}::date AND slot.is_open = true`;
+      const schedules = await sql(env)`SELECT weekly_rules AS "weeklyRules", exceptions, status, published_at AS "publishedAt" FROM tele_monthly_schedules WHERE site_id = ${SITE_ID} AND month_start = ${start}::date LIMIT 1`;
+      const metrics = await sql(env)`SELECT count(*)::int AS total, count(*) FILTER (WHERE EXISTS (SELECT 1 FROM tele_appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled'))::int AS booked FROM tele_consultation_slots AS slot WHERE slot.site_id = ${SITE_ID} AND slot.month_start = ${start}::date AND slot.is_open = true`;
       const schedule = schedules[0] || { weeklyRules: Array.from({ length: 7 }, (_unused, weekday) => ({ weekday, enabled: false, startTime: '09:00', endTime: '17:00' })), exceptions: [], status: 'unpublished' };
       return json({ month, deadline: monthDeadline(month), locked: !schedules.length && localToday() > monthDeadline(month), schedule, totalSlots: Number(metrics[0]?.total || 0), bookedSlots: Number(metrics[0]?.booked || 0) });
     } catch (cause) { console.error('owner schedule read failed', cause); return error('Could not load this month’s availability form.', 503); }
@@ -536,24 +685,24 @@ async function routeApi(request, env) {
     const schedule = cleanMonthlySchedule(value, month); const slots = schedule && buildMonthlySlots(schedule);
     if (!schedule || !slots) return error('Check the seven weekly-hour rows and date exceptions. Use 30-minute start/end times and no more than 1,000 slots.');
     try {
-      const existing = await sql(env)`SELECT status FROM monthly_schedules WHERE site_id = ${SITE_ID} AND month_start = ${start}::date LIMIT 1`;
+      const existing = await sql(env)`SELECT status FROM tele_monthly_schedules WHERE site_id = ${SITE_ID} AND month_start = ${start}::date LIMIT 1`;
       const deadline = monthDeadline(month);
       if (!existing.length && localToday() > deadline) return error(`This month’s schedule deadline was ${deadline}. A missing schedule stays unavailable.`, 409);
       const slotJson = JSON.stringify(slots.map((slot) => ({ slot_date: slot.slotDate, slot_time: slot.slotTime })));
-      const conflicts = await sql(env)`SELECT appointment.id FROM appointments AS appointment WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= ${start}::date AND appointment.appointment_date < (${start}::date + interval '1 month')::date AND appointment.status <> 'cancelled' AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${slotJson}::jsonb) AS proposed(slot_date date, slot_time time) WHERE proposed.slot_date = appointment.appointment_date AND proposed.slot_time = appointment.appointment_time) LIMIT 1`;
+      const conflicts = await sql(env)`SELECT appointment.id FROM tele_appointments AS appointment WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= ${start}::date AND appointment.appointment_date < (${start}::date + interval '1 month')::date AND appointment.status <> 'cancelled' AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${slotJson}::jsonb) AS proposed(slot_date date, slot_time time) WHERE proposed.slot_date = appointment.appointment_date AND proposed.slot_time = appointment.appointment_time) LIMIT 1`;
       if (conflicts.length) return error('This change would remove a reserved appointment time. Keep it in the schedule or cancel the appointment first.', 409);
       const saved = await sql(env)`
         WITH saved AS (
-          INSERT INTO monthly_schedules (site_id, month_start, weekly_rules, exceptions, status, published_at)
+          INSERT INTO tele_monthly_schedules (site_id, month_start, weekly_rules, exceptions, status, published_at)
           VALUES (${SITE_ID}, ${start}::date, ${JSON.stringify(schedule.weeklyRules)}::jsonb, ${JSON.stringify(schedule.exceptions)}::jsonb, 'published', now())
           ON CONFLICT (site_id, month_start) DO UPDATE SET weekly_rules = EXCLUDED.weekly_rules, exceptions = EXCLUDED.exceptions, status = 'published', published_at = now(), updated_at = now()
           RETURNING site_id, month_start
         ), removed AS (
-          DELETE FROM consultation_slots AS slot USING saved WHERE slot.site_id = saved.site_id AND slot.month_start = saved.month_start
+          DELETE FROM tele_consultation_slots AS slot USING saved WHERE slot.site_id = saved.site_id AND slot.month_start = saved.month_start
             AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${slotJson}::jsonb) AS proposed(slot_date date, slot_time time) WHERE proposed.slot_date = slot.slot_date AND proposed.slot_time = slot.slot_time)
           RETURNING slot.id
         ), added AS (
-          INSERT INTO consultation_slots (site_id, month_start, slot_date, slot_time, is_open)
+          INSERT INTO tele_consultation_slots (site_id, month_start, slot_date, slot_time, is_open)
           SELECT saved.site_id, saved.month_start, proposed.slot_date, proposed.slot_time, true FROM saved
           CROSS JOIN jsonb_to_recordset(${slotJson}::jsonb) AS proposed(slot_date date, slot_time time)
           ON CONFLICT (site_id, slot_date, slot_time) DO UPDATE SET month_start = EXCLUDED.month_start, is_open = true, updated_at = now()
@@ -565,7 +714,7 @@ async function routeApi(request, env) {
       return json({ schedule: { ...schedule, status: 'published', publishedAt: new Date().toISOString() }, deadline, totalSlots: availability.totalSlots, bookedSlots: availability.bookedSlots });
     } catch (cause) {
       if (cause.code === '23505' || cause.code === '23503') return error('The schedule conflicts with a reserved appointment. Refresh and try again.', 409);
-      console.error('owner schedule publish failed', cause); return error('Could not publish this month’s schedule.', 503);
+      console.error('owner schedule publish failed', cause); return error(databaseErrorMessage(cause, 'Could not publish this month’s schedule.'), 503);
     }
   }
   if (path === '/api/appointments' && method === 'POST') {
@@ -578,19 +727,19 @@ async function routeApi(request, env) {
     const paymentMethod = ['gcash', 'maya'].includes(value.paymentMethod) ? value.paymentMethod : '';
     if (!/^[0-9a-f-]{36}$/i.test(slotId) || !DEFAULT_CONFIG.services.includes(service) || !paymentMethod) return error('Choose a valid open time, visit type and GCash or Maya payment method.');
     try {
-      const rows = await sql(env)`INSERT INTO appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status, payment_method, payment_status, payment_due_at) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${client.phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed', ${paymentMethod}, 'awaiting_proof', now() + interval '15 minutes' FROM consultation_slots AS slot JOIN monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${SITE_TIME_ZONE} > now() AND NOT EXISTS (SELECT 1 FROM appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time, payment_due_at AS "paymentDueAt"`;
+      const rows = await sql(env)`INSERT INTO tele_appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status, payment_method, payment_status, payment_due_at) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${client.phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed', ${paymentMethod}, 'awaiting_proof', now() + interval '15 minutes' FROM tele_consultation_slots AS slot JOIN tele_monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${SITE_TIME_ZONE} > now() AND NOT EXISTS (SELECT 1 FROM tele_appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time, payment_due_at AS "paymentDueAt"`;
       if (!rows.length) return error('That time was just taken or is no longer available. Refresh the calendar and choose another.', 409);
       return json({ ok: true, appointment: { ...rows[0], timeLabel: displayTime(rows[0].time), status: 'confirmed', paymentStatus: 'awaiting_proof', paymentMethod } }, 201);
     } catch (cause) {
       if (cause.code === '23505') return error('That time was just taken. Refresh the calendar and choose another.', 409);
-      console.error('appointment reservation failed', cause); return error('We could not reserve this consultation. Please try again.', 503);
+      console.error('appointment reservation failed', cause); return error(databaseErrorMessage(cause, 'We could not reserve this consultation. Please try again.'), 503);
     }
   }
   if (path === '/api/client/appointments' && method === 'GET') {
     const client = await currentClient(request, env);
     if (!client) return error('Sign in to view your consultations.', 401);
     try {
-      const appointments = await sql(env)`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.payment_status AS "paymentStatus", appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.payment_manual_received_at AS "paymentManualReceivedAt", appointment.created_at AS "createdAt", proof.id AS "paymentProofId", proof.review_status AS "paymentProofStatus", proof.uploaded_at AS "paymentProofUploadedAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN appointment_payment_proofs AS proof ON proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id AND proof.client_account_id = appointment.client_account_id LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id AND note.client_account_id = appointment.client_account_id WHERE appointment.site_id = ${SITE_ID} AND appointment.client_account_id = ${client.id} ORDER BY appointment.appointment_date DESC, appointment.appointment_time DESC LIMIT 200`;
+      const appointments = await sql(env)`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.payment_status AS "paymentStatus", appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.payment_manual_received_at AS "paymentManualReceivedAt", appointment.created_at AS "createdAt", proof.id AS "paymentProofId", proof.review_status AS "paymentProofStatus", proof.uploaded_at AS "paymentProofUploadedAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM tele_appointments AS appointment LEFT JOIN tele_appointment_payment_proofs AS proof ON proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id AND proof.client_account_id = appointment.client_account_id LEFT JOIN tele_consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id AND note.client_account_id = appointment.client_account_id WHERE appointment.site_id = ${SITE_ID} AND appointment.client_account_id = ${client.id} ORDER BY appointment.appointment_date DESC, appointment.appointment_time DESC LIMIT 200`;
       return json({ appointments: appointments.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
     } catch (cause) { console.error('client appointment list failed', cause); return error('Could not load your consultations.', 503); }
   }
@@ -627,7 +776,7 @@ async function routeApi(request, env) {
       const rows = await sql(env)`
         WITH target AS (
           SELECT appointment.id, appointment.client_account_id, appointment.payment_method, appointment.payment_status
-          FROM appointments AS appointment
+          FROM tele_appointments AS appointment
           WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid
             AND appointment.client_account_id = ${client.id} AND appointment.status <> 'cancelled'
           AND (
@@ -635,23 +784,23 @@ async function routeApi(request, env) {
             OR (appointment.payment_status = 'approved' AND appointment.payment_manual_received_at IS NOT NULL)
           )
           AND NOT EXISTS (
-            SELECT 1 FROM appointment_payment_proofs AS existing_proof
+            SELECT 1 FROM tele_appointment_payment_proofs AS existing_proof
             WHERE existing_proof.site_id = appointment.site_id AND existing_proof.appointment_id = appointment.id
           )
           FOR UPDATE
         ), saved AS (
-          INSERT INTO appointment_payment_proofs (site_id, appointment_id, client_account_id, payment_method, image_mime_type, image_base64, review_status)
+          INSERT INTO tele_appointment_payment_proofs (site_id, appointment_id, client_account_id, payment_method, image_mime_type, image_base64, review_status)
           SELECT ${SITE_ID}, target.id, target.client_account_id, target.payment_method, ${contentType}, ${imageBase64}, CASE WHEN target.payment_status = 'approved' THEN 'approved' ELSE 'pending_review' END
           FROM target
           RETURNING id, appointment_id, uploaded_at, review_status AS status
         ), updated AS (
-          UPDATE appointments AS appointment SET payment_status = CASE WHEN appointment.payment_status = 'awaiting_proof' THEN 'pending_review' ELSE appointment.payment_status END
+          UPDATE tele_appointments AS appointment SET payment_status = CASE WHEN appointment.payment_status = 'awaiting_proof' THEN 'pending_review' ELSE appointment.payment_status END
           FROM saved WHERE appointment.site_id = ${SITE_ID} AND appointment.id = saved.appointment_id
           RETURNING appointment.id
         )
         SELECT saved.id, saved.uploaded_at, saved.status FROM saved JOIN updated ON updated.id = saved.appointment_id LIMIT 1`;
       if (!rows.length) {
-        const appointments = await sql(env)`SELECT status, payment_status AS "paymentStatus" FROM appointments WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND client_account_id = ${client.id} LIMIT 1`;
+        const appointments = await sql(env)`SELECT status, payment_status AS "paymentStatus" FROM tele_appointments WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND client_account_id = ${client.id} LIMIT 1`;
         if (!appointments.length) return error('That consultation was not found.', 404);
         if (appointments[0].status === 'cancelled') return error('The practice has released this booking. Contact the practice if you already sent payment.', 409);
         return error('Payment proof was already uploaded or this consultation is no longer awaiting proof.', 409);
@@ -659,7 +808,7 @@ async function routeApi(request, env) {
       return json({ proof: { id: rows[0].id, status: rows[0].status, uploadedAt: rows[0].uploaded_at } }, 201);
     } catch (cause) {
       if (cause.code === '23505') return error('Payment proof has already been uploaded for this consultation.', 409);
-      console.error('payment proof upload failed', cause); return error('Could not save payment proof. Please try again while the booking is active.', 503);
+      console.error('payment proof upload failed', cause); return error(databaseErrorMessage(cause, 'Could not save payment proof. Please try again while the booking is active.'), 503);
     }
   }
   if (path.startsWith('/api/client/appointments/') && method === 'PATCH') {
@@ -668,21 +817,21 @@ async function routeApi(request, env) {
     if (!client) return error('Sign in to manage your consultations.', 401);
     if (!/^[0-9a-f-]{36}$/i.test(id) || value?.status !== 'cancelled') return error('Invalid consultation update.');
     try {
-      const rows = await sql(env)`UPDATE appointments SET status = 'cancelled' WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND client_account_id = ${client.id} AND status <> 'cancelled' RETURNING id, status`;
+      const rows = await sql(env)`UPDATE tele_appointments SET status = 'cancelled' WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND client_account_id = ${client.id} AND status <> 'cancelled' RETURNING id, status`;
       return rows.length ? json({ appointment: rows[0] }) : error('That consultation was not found or was already cancelled.', 404);
     } catch (cause) { console.error('client appointment cancel failed', cause); return error('Could not cancel this consultation.', 503); }
   }
   if (path === '/api/admin/appointments' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
     try {
-      const appointments = await sql(env)`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, client.id AS "clientId", note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= (${localToday()}::date - interval '90 days')::date AND appointment.appointment_date <= (${localToday()}::date + interval '90 days')::date ORDER BY appointment.appointment_date ASC, appointment.appointment_time ASC LIMIT 300`;
+      const appointments = await sql(env)`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, client.id AS "clientId", note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM tele_appointments AS appointment LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id LEFT JOIN tele_consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= (${localToday()}::date - interval '90 days')::date AND appointment.appointment_date <= (${localToday()}::date + interval '90 days')::date ORDER BY appointment.appointment_date ASC, appointment.appointment_time ASC LIMIT 300`;
       return json({ appointments: appointments.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
     } catch (cause) { console.error('appointment list failed', cause); return error('Could not load appointment requests. Check the Neon schema.', 503); }
   }
   if (path === '/api/admin/payments/unpaid' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
     try {
-      const bookings = await sql(env)`SELECT appointment.id, appointment.name, client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username, appointment.service, appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.created_at AS "createdAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time FROM appointments AS appointment LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE appointment.site_id = ${SITE_ID} AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) ORDER BY appointment.created_at ASC LIMIT 300`;
+      const bookings = await sql(env)`SELECT appointment.id, appointment.name, client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username, appointment.service, appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.created_at AS "createdAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time FROM tele_appointments AS appointment LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE appointment.site_id = ${SITE_ID} AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM tele_appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) ORDER BY appointment.created_at ASC LIMIT 300`;
       return json({ bookings: bookings.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
     } catch (cause) { console.error('unpaid booking list failed', cause); return error('Could not load bookings awaiting payment proof.', 503); }
   }
@@ -693,8 +842,8 @@ async function routeApi(request, env) {
     if (!/^[0-9a-f-]{36}$/i.test(id) || !['received', 'release'].includes(action)) return error('Choose whether payment was received or the booking should be released.');
     try {
       const rows = action === 'received'
-        ? await sql(env)`UPDATE appointments AS appointment SET payment_status = 'approved', payment_manual_received_at = now() WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`
-        : await sql(env)`UPDATE appointments AS appointment SET status = 'cancelled' WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`;
+        ? await sql(env)`UPDATE tele_appointments AS appointment SET payment_status = 'approved', payment_manual_received_at = now() WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM tele_appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`
+        : await sql(env)`UPDATE tele_appointments AS appointment SET status = 'cancelled' WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM tele_appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`;
       if (!rows.length) return error('This booking is no longer awaiting payment proof. Refresh the payment list.', 409);
       return json({ appointment: rows[0], slotReleased: action === 'release' });
     } catch (cause) { console.error('unpaid booking update failed', cause); return error('Could not update this booking.', 503); }
@@ -702,7 +851,7 @@ async function routeApi(request, env) {
   if (path === '/api/admin/payments' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
     try {
-      const payments = await sql(env)`SELECT proof.id, proof.payment_method AS "paymentMethod", proof.review_status AS status, proof.uploaded_at AS "uploadedAt", appointment.id AS "appointmentId", appointment.name, appointment.service, appointment.status AS "appointmentStatus", appointment.payment_status AS "appointmentPaymentStatus", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, appointment.created_at AS "bookedAt", client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username FROM appointment_payment_proofs AS proof JOIN appointments AS appointment ON appointment.id = proof.appointment_id AND appointment.site_id = proof.site_id LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE proof.site_id = ${SITE_ID} ORDER BY proof.uploaded_at DESC LIMIT 300`;
+      const payments = await sql(env)`SELECT proof.id, proof.payment_method AS "paymentMethod", proof.review_status AS status, proof.uploaded_at AS "uploadedAt", appointment.id AS "appointmentId", appointment.name, appointment.service, appointment.status AS "appointmentStatus", appointment.payment_status AS "appointmentPaymentStatus", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, appointment.created_at AS "bookedAt", client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username FROM tele_appointment_payment_proofs AS proof JOIN tele_appointments AS appointment ON appointment.id = proof.appointment_id AND appointment.site_id = proof.site_id LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE proof.site_id = ${SITE_ID} ORDER BY proof.uploaded_at DESC LIMIT 300`;
       return json({ payments: payments.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
     } catch (cause) { console.error('payment list failed', cause); return error('Could not load payment proofs.', 503); }
   }
@@ -711,7 +860,7 @@ async function routeApi(request, env) {
     const id = path.slice('/api/admin/payment-proofs/'.length, -'/image'.length);
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid payment proof id.');
     try {
-      const rows = await sql(env)`SELECT image_mime_type AS "mimeType", image_base64 AS image FROM appointment_payment_proofs WHERE site_id = ${SITE_ID} AND id = ${id}::uuid LIMIT 1`;
+      const rows = await sql(env)`SELECT image_mime_type AS "mimeType", image_base64 AS image FROM tele_appointment_payment_proofs WHERE site_id = ${SITE_ID} AND id = ${id}::uuid LIMIT 1`;
       if (!rows.length) return error('Payment proof not found.', 404);
       const mimeType = PAYMENT_PROOF_MIME_TYPES.includes(rows[0].mimeType) ? rows[0].mimeType : 'application/octet-stream';
       const headers = headersWithSecurity({ 'Content-Type': mimeType, 'Content-Disposition': 'inline; filename="payment-proof"', 'Cache-Control': 'private, no-store' });
@@ -725,8 +874,8 @@ async function routeApi(request, env) {
     if (!/^[0-9a-f-]{36}$/i.test(id) || !['approved', 'rejected'].includes(decision)) return error('Choose whether to approve or reject this payment proof.');
     try {
       const rows = decision === 'approved'
-        ? await sql(env)`WITH reviewed AS (UPDATE appointment_payment_proofs AS proof SET review_status = 'approved', reviewed_at = now() FROM appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), saved AS (UPDATE appointments AS appointment SET payment_status = 'approved' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN saved ON saved.id = reviewed.appointment_id`
-        : await sql(env)`WITH reviewed AS (UPDATE appointment_payment_proofs AS proof SET review_status = 'rejected', reviewed_at = now() FROM appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), released AS (UPDATE appointments AS appointment SET payment_status = 'rejected', status = 'cancelled' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN released ON released.id = reviewed.appointment_id`;
+        ? await sql(env)`WITH reviewed AS (UPDATE tele_appointment_payment_proofs AS proof SET review_status = 'approved', reviewed_at = now() FROM tele_appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), saved AS (UPDATE tele_appointments AS appointment SET payment_status = 'approved' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN saved ON saved.id = reviewed.appointment_id`
+        : await sql(env)`WITH reviewed AS (UPDATE tele_appointment_payment_proofs AS proof SET review_status = 'rejected', reviewed_at = now() FROM tele_appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), released AS (UPDATE tele_appointments AS appointment SET payment_status = 'rejected', status = 'cancelled' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN released ON released.id = reviewed.appointment_id`;
       if (!rows.length) return error('This payment proof was already reviewed or the consultation is no longer active.', 409);
       return json({ proof: { id: rows[0].id, status: decision }, slotReleased: decision === 'rejected' });
     } catch (cause) { console.error('payment proof review failed', cause); return error('Could not update the payment proof.', 503); }
@@ -738,14 +887,14 @@ async function routeApi(request, env) {
     if (!/^[0-9a-f-]{36}$/i.test(id) || !['requested', 'confirmed', 'cancelled'].includes(status)) return error('Invalid appointment update.');
     try {
       if (status === 'cancelled') {
-        const rows = await sql(env)`UPDATE appointments SET status = 'cancelled' WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND (appointment_date + appointment_time) AT TIME ZONE ${SITE_TIME_ZONE} > now() + interval '24 hours' RETURNING id, status`;
+        const rows = await sql(env)`UPDATE tele_appointments SET status = 'cancelled' WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND (appointment_date + appointment_time) AT TIME ZONE ${SITE_TIME_ZONE} > now() + interval '24 hours' RETURNING id, status`;
         if (!rows.length) {
-          const exists = await sql(env)`SELECT id FROM appointments WHERE site_id = ${SITE_ID} AND id = ${id}::uuid LIMIT 1`;
+          const exists = await sql(env)`SELECT id FROM tele_appointments WHERE site_id = ${SITE_ID} AND id = ${id}::uuid LIMIT 1`;
           return exists.length ? error('Owner cancellations must be made at least 24 hours before the appointment.', 409) : error('That appointment was not found.', 404);
         }
         return json({ appointment: rows[0] });
       }
-      const rows = await sql(env)`UPDATE appointments SET status = ${status} WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id, status`;
+      const rows = await sql(env)`UPDATE tele_appointments SET status = ${status} WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id, status`;
       return rows.length ? json({ appointment: rows[0] }) : error('That appointment was not found.', 404);
     } catch (cause) {
       if (cause.code === '23505') return error('That time slot has already been taken.', 409);
@@ -760,17 +909,17 @@ async function routeApi(request, env) {
     const noteBody = cleanText(value.noteBody, 12000);
     try {
       if (!noteBody) {
-        await sql(env)`DELETE FROM consultation_notes WHERE site_id = ${SITE_ID} AND appointment_id = ${id}::uuid`;
+        await sql(env)`DELETE FROM tele_consultation_notes WHERE site_id = ${SITE_ID} AND appointment_id = ${id}::uuid`;
         return json({ note: null });
       }
-      const rows = await sql(env)`INSERT INTO consultation_notes (site_id, appointment_id, client_account_id, note_body) SELECT ${SITE_ID}, appointment.id, appointment.client_account_id, ${noteBody} FROM appointments AS appointment WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.client_account_id IS NOT NULL ON CONFLICT (site_id, appointment_id) DO UPDATE SET client_account_id = EXCLUDED.client_account_id, note_body = EXCLUDED.note_body, updated_at = now() RETURNING note_body AS "noteBody", updated_at AS "noteUpdatedAt"`;
+      const rows = await sql(env)`INSERT INTO tele_consultation_notes (site_id, appointment_id, client_account_id, note_body) SELECT ${SITE_ID}, appointment.id, appointment.client_account_id, ${noteBody} FROM tele_appointments AS appointment WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.client_account_id IS NOT NULL ON CONFLICT (site_id, appointment_id) DO UPDATE SET client_account_id = EXCLUDED.client_account_id, note_body = EXCLUDED.note_body, updated_at = now() RETURNING note_body AS "noteBody", updated_at AS "noteUpdatedAt"`;
       return rows.length ? json({ note: rows[0] }) : error('This older appointment has no linked client account, so it cannot receive a private account note.', 400);
-    } catch (cause) { console.error('consultation note save failed', cause); return error('Could not save this private consultation note.', 503); }
+    } catch (cause) { console.error('consultation note save failed', cause); return error(databaseErrorMessage(cause, 'Could not save this private consultation note.'), 503); }
   }
   if (path === '/api/admin/posts' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
     try {
-      const posts = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.status, post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM blog_posts AS post WHERE post.site_id = ${SITE_ID} ORDER BY post.created_at DESC LIMIT 100`;
+      const posts = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.status, post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM tele_blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} ORDER BY post.created_at DESC LIMIT 100`;
       return json({ posts });
     } catch (cause) { console.error('admin blog read failed', cause); return error('Could not load blog posts. Check the Neon schema.', 503); }
   }
@@ -783,7 +932,7 @@ async function routeApi(request, env) {
     try {
       const posts = await persistArticle(sql(env), post);
       return json({ post: posts[0] }, 201);
-    } catch (cause) { console.error('blog post save failed', cause); return error(cause.code === '23505' ? 'That URL slug is already in use or gallery order is duplicated.' : 'Could not save the post.', cause.code === '23505' ? 409 : 503); }
+    } catch (cause) { console.error('blog post save failed', cause); return error(cause.code === '23505' ? 'That URL slug is already in use or gallery order is duplicated.' : databaseErrorMessage(cause, 'Could not save the post.'), cause.code === '23505' ? 409 : 503); }
   }
   if (path.startsWith('/api/admin/posts/') && method === 'PUT') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
@@ -798,7 +947,7 @@ async function routeApi(request, env) {
       return posts.length ? json({ post: posts[0] }) : error('That post was not found.', 404);
     } catch (cause) {
       if (cause.code === '23505') return error('That URL slug is already in use or gallery order is duplicated.', 409);
-      console.error('blog post update failed', cause); return error('Could not update the post.', 503);
+      console.error('blog post update failed', cause); return error(databaseErrorMessage(cause, 'Could not update the post.'), 503);
     }
   }
   if (path.startsWith('/api/admin/posts/') && method === 'DELETE') {
@@ -807,14 +956,14 @@ async function routeApi(request, env) {
     const id = path.slice('/api/admin/posts/'.length);
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid post id.');
     try {
-      const rows = await sql(env)`DELETE FROM blog_posts WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id`;
+      const rows = await sql(env)`DELETE FROM tele_blog_posts WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id`;
       return rows.length ? json({ ok: true }) : error('That post was not found.', 404);
     } catch (cause) { console.error('blog post delete failed', cause); return error('Could not delete the post.', 503); }
   }
   if (path === '/api/admin/gallery' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
     try {
-      const items = await sql(env)`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM gallery_items WHERE site_id = ${SITE_ID} ORDER BY sort_order ASC, created_at DESC LIMIT 100`;
+      const items = await sql(env)`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM tele_gallery_items WHERE site_id = ${SITE_ID} ORDER BY sort_order ASC, created_at DESC LIMIT 100`;
       return json({ items });
     } catch (cause) { console.error('gallery admin read failed', cause); return error('Could not load gallery items. Check the Neon schema.', 503); }
   }
@@ -825,9 +974,9 @@ async function routeApi(request, env) {
     const item = galleryPayload(value);
     if (!validGalleryPayload(item)) return error('Add a title, valid HTTPS or same-site image URL and alternative text. Display order must be from 0 to 9999.');
     try {
-      const items = await sql(env)`INSERT INTO gallery_items (site_id, title, image_url, alt_text, caption, category, status, sort_order) VALUES (${SITE_ID}, ${item.title}, ${item.imageUrl}, ${item.altText}, ${item.caption}, ${item.category}, ${item.status}, ${item.sortOrder}) RETURNING id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt"`;
+      const items = await sql(env)`INSERT INTO tele_gallery_items (site_id, title, image_url, alt_text, caption, category, status, sort_order) VALUES (${SITE_ID}, ${item.title}, ${item.imageUrl}, ${item.altText}, ${item.caption}, ${item.category}, ${item.status}, ${item.sortOrder}) RETURNING id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt"`;
       return json({ item: items[0] }, 201);
-    } catch (cause) { console.error('gallery item create failed', cause); return error('Could not save the gallery item.', 503); }
+    } catch (cause) { console.error('gallery item create failed', cause); return error(databaseErrorMessage(cause, 'Could not save the gallery item.'), 503); }
   }
   if (path.startsWith('/api/admin/gallery/') && (method === 'PUT' || method === 'DELETE')) {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
@@ -836,7 +985,7 @@ async function routeApi(request, env) {
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid gallery item id.');
     if (method === 'DELETE') {
       try {
-        const rows = await sql(env)`DELETE FROM gallery_items WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id`;
+        const rows = await sql(env)`DELETE FROM tele_gallery_items WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id`;
         return rows.length ? json({ ok: true }) : error('That gallery item was not found.', 404);
       } catch (cause) { console.error('gallery item delete failed', cause); return error('Could not delete the gallery item.', 503); }
     }
@@ -844,9 +993,9 @@ async function routeApi(request, env) {
     const item = galleryPayload(value);
     if (!validGalleryPayload(item)) return error('Add a title, valid HTTPS or same-site image URL and alternative text. Display order must be from 0 to 9999.');
     try {
-      const items = await sql(env)`UPDATE gallery_items SET title = ${item.title}, image_url = ${item.imageUrl}, alt_text = ${item.altText}, caption = ${item.caption}, category = ${item.category}, status = ${item.status}, sort_order = ${item.sortOrder}, updated_at = now() WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt"`;
+      const items = await sql(env)`UPDATE tele_gallery_items SET title = ${item.title}, image_url = ${item.imageUrl}, alt_text = ${item.altText}, caption = ${item.caption}, category = ${item.category}, status = ${item.status}, sort_order = ${item.sortOrder}, updated_at = now() WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt"`;
       return items.length ? json({ item: items[0] }) : error('That gallery item was not found.', 404);
-    } catch (cause) { console.error('gallery item update failed', cause); return error('Could not update the gallery item.', 503); }
+    } catch (cause) { console.error('gallery item update failed', cause); return error(databaseErrorMessage(cause, 'Could not update the gallery item.'), 503); }
   }
   return error('API route not found.', 404);
 }

@@ -13,7 +13,8 @@
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
     "check": "wrangler deploy --dry-run",
-    "payments:worker": "node --env-file=.dev.vars payment-reminder-worker.js"
+    "payments:worker": "node --env-file=.dev.vars payment-reminder-worker.js",
+    "secrets": "node scripts/set-secrets.mjs --target=cloudflare"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.2"

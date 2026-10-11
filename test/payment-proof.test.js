@@ -71,7 +71,7 @@ test('both generated runtimes preserve bookings and support the 12/15-minute rem
   assert.match(cloudflare, /request\.body\?\.getReader\(\)/);
   assert.match(cloudflare, /total > MAX_JSON_BYTES/);
   assert.match(vercelConfig, /\"path\": \"\/api\/internal\/payment-sweeps\", \"schedule\": \"0 0 \* \* \*\"/);
-  assert.match(schema, /CREATE TABLE IF NOT EXISTS appointment_payment_proofs/);
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS tele_appointment_payment_proofs/);
   assert.match(schema, /image_base64 text NOT NULL/);
   assert.match(schema, /payment_reminder_sent_at timestamptz/);
   assert.match(schema, /payment_owner_attention_at timestamptz/);
