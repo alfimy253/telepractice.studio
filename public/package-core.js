@@ -179,9 +179,18 @@ function normalizeConfig(input = {}) {
   const defaultPrimary = theme === 'editorial' ? EDITORIAL_ACCENTS[editorialAccent] : preset.primaryColor;
   const email = clean(input.email, 120, `hello@${siteId}.example`);
   if (email && !/^\S+@\S+\.\S+$/.test(email)) throw new Error('Enter a valid practice email address.');
+  // Every generated file (site-config.js, the runtime's compiled-in defaults,
+  // manifest.json, db/seed.sql, db/apply-config.sql) embeds this configuration,
+  // so the timestamp has to come from the payload instead of the clock: two
+  // builds of the same settings then produce byte-identical ZIPs, and the
+  // sample post dates follow the same anchor. The builder always sends
+  // `createdAt`; a direct API call without one still works.
+  const createdStamp = new Date(clean(input.createdAt, 40, '') || Date.now());
+  const createdTime = Number.isNaN(createdStamp.getTime()) ? Date.now() : createdStamp.getTime();
+  const createdAt = new Date(createdTime).toISOString();
   const demoPosts = vertical.posts.map((post, index) => {
     const gallery = SAMPLE_POST_GALLERIES[index].map((image, sortOrder) => ({ ...image, sortOrder }));
-    return { ...post, id: `sample-${index + 1}`, featureImageUrl: gallery[0].imageUrl, featureImageAlt: gallery[0].altText, gallery, publishedAt: new Date(Date.now() - (index + 1) * 86400000 * 9).toISOString() };
+    return { ...post, id: `sample-${index + 1}`, featureImageUrl: gallery[0].imageUrl, featureImageAlt: gallery[0].altText, gallery, publishedAt: new Date(createdTime - (index + 1) * 86400000 * 9).toISOString() };
   });
   const customPages = normalizeCustomPages(input.customPages);
   return {
@@ -201,7 +210,7 @@ function normalizeConfig(input = {}) {
     customPages, menuLinks: menuLinksForPages(customPages),
     heroEyebrow: vertical.eyebrow, heroHeadline: vertical.headline, heroText: vertical.heroText,
     services: vertical.services, demoPosts, demoGallery: DEMO_GALLERY.map((item) => ({ ...item })),
-    createdAt: clean(input.createdAt, 40, new Date().toISOString())
+    createdAt
   };
 }
 // Kept separate from normalizeConfig's return value on purpose: `config` is
@@ -227,16 +236,82 @@ async function buildSecrets(input) {
     databaseUrl: normalizeDatabaseUrl(input.databaseUrl)
   };
 }
-function replaceTokens(text, config) {
+// Splits db/schema.sql into individual statements so the generated runtime can
+// apply the whole file as one transaction on first use. The splitter tracks
+// line comments, block comments, single quotes, double quotes and
+// dollar-quoted blocks (the schema uses DO $$ … $$ for idempotent migrations),
+// so a `;` inside any of those never ends a statement.
+function splitSqlStatements(sql) {
+  const statements = [];
+  let current = '';
+  let index = 0;
+  const text = String(sql || '');
+  while (index < text.length) {
+    const character = text[index];
+    const rest = text.slice(index);
+    // Dollar-quoted block: $$ … $$ or $tag$ … $tag$.
+    const dollar = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(rest);
+    if (dollar && !current.startsWith("'")) {
+      const tag = dollar[0];
+      const end = text.indexOf(tag, index + tag.length);
+      const stop = end < 0 ? text.length : end + tag.length;
+      current += text.slice(index, stop);
+      index = stop;
+      continue;
+    }
+    if (rest.startsWith('--')) {
+      const end = text.indexOf('\n', index);
+      const stop = end < 0 ? text.length : end;
+      current += text.slice(index, stop);
+      index = stop;
+      continue;
+    }
+    if (rest.startsWith('/*')) {
+      const end = text.indexOf('*/', index + 2);
+      const stop = end < 0 ? text.length : end + 2;
+      current += text.slice(index, stop);
+      index = stop;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      const quote = character;
+      let stop = index + 1;
+      while (stop < text.length) {
+        if (text[stop] === quote) {
+          if (text[stop + 1] === quote) { stop += 2; continue; }
+          stop += 1; break;
+        }
+        stop += 1;
+      }
+      current += text.slice(index, stop);
+      index = stop;
+      continue;
+    }
+    if (character === ';') {
+      const statement = current.trim();
+      if (statement && !/^(--[^\n]*\n?\s*)*$/.test(statement)) statements.push(statement);
+      current = '';
+      index += 1;
+      continue;
+    }
+    current += character;
+    index += 1;
+  }
+  const trailing = current.trim();
+  if (trailing && !/^(--[^\n]*\n?\s*)*$/.test(trailing)) statements.push(trailing);
+  return statements;
+}
+function replaceTokens(text, config, extras = {}) {
   const tokens = {
     '__SITE_ID__': config.siteId, '__SITE_CONFIG_JSON__': jsSafeJson(config),
+    '__SCHEMA_STATEMENTS__': jsSafeJson(extras.schemaStatements || []),
     '__BUSINESS_NAME__': htmlEscape(config.businessName), '__BRAND_NAME__': htmlEscape(config.brandName),
     '__LOCATION__': htmlEscape(config.location), '__EMAIL__': htmlEscape(config.email),
     '__PHONE__': htmlEscape(config.phone), '__PAPER_COLOR__': config.paperColor,
     '__THEME_CLASS__': `theme-${config.theme}`,
     '__DEPLOY_TARGET__': htmlEscape(config.target === 'cloudflare' ? 'Cloudflare Workers' : 'Vercel')
   };
-  return text.replace(/__SITE_ID__|__SITE_CONFIG_JSON__|__BUSINESS_NAME__|__BRAND_NAME__|__LOCATION__|__EMAIL__|__PHONE__|__PAPER_COLOR__|__THEME_CLASS__|__DEPLOY_TARGET__/g, (token) => tokens[token]);
+  return text.replace(/__SITE_ID__|__SITE_CONFIG_JSON__|__SCHEMA_STATEMENTS__|__BUSINESS_NAME__|__BRAND_NAME__|__LOCATION__|__EMAIL__|__PHONE__|__PAPER_COLOR__|__THEME_CLASS__|__DEPLOY_TARGET__/g, (token) => tokens[token]);
 }
 // Applied only to the generated .dev.vars / .env files. Kept separate from
 // replaceTokens() so a real DATABASE_URL or generated secret can never leak
@@ -255,15 +330,39 @@ function replaceSecretTokens(text, secrets) {
 }
 function createSeedSql(config) {
   const lines = [
-    '-- Run this file once after schema.sql in the Neon database used by this site package.',
-    `INSERT INTO sites (site_id, config) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(JSON.stringify(config))}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now();`, ''
+    '-- Optional starter content for the Neon database used by this site package.',
+    '-- Run it after schema.sql. It is safe to rerun: existing rows are kept, so it',
+    '-- never overwrites owner edits or content changed in the dashboard. A deployed',
+    '-- site also creates its own configuration row on first use, so the site works',
+    '-- after schema.sql alone; this file only adds the generated sample content.', '',
+    `INSERT INTO tele_sites (site_id, config) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(JSON.stringify(config))}::jsonb) ON CONFLICT (site_id) DO NOTHING;`, ''
   ];
   for (const post of config.demoPosts) {
-    lines.push(`INSERT INTO blog_posts (site_id, title, slug, excerpt, body, feature_image_url, feature_image_alt, category, status, published_at) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(post.title)}, ${sqlLiteral(post.slug)}, ${sqlLiteral(post.excerpt)}, ${sqlLiteral(post.body)}, ${sqlLiteral(post.featureImageUrl)}, ${sqlLiteral(post.featureImageAlt)}, ${sqlLiteral(post.category)}, 'published', now()) ON CONFLICT (site_id, slug) DO NOTHING;`);
-    for (const [index, image] of (post.gallery || []).entries()) lines.push(`INSERT INTO blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order) SELECT ${sqlLiteral(config.siteId)}, post.id, ${sqlLiteral(image.imageUrl)}, ${sqlLiteral(image.altText)}, ${sqlLiteral(image.caption)}, ${index} FROM blog_posts AS post WHERE post.site_id = ${sqlLiteral(config.siteId)} AND post.slug = ${sqlLiteral(post.slug)} AND NOT EXISTS (SELECT 1 FROM blog_post_images AS existing WHERE existing.post_id = post.id AND existing.sort_order = ${index});`);
+    lines.push(`INSERT INTO tele_blog_posts (site_id, title, slug, excerpt, body, feature_image_url, feature_image_alt, category, status, published_at) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(post.title)}, ${sqlLiteral(post.slug)}, ${sqlLiteral(post.excerpt)}, ${sqlLiteral(post.body)}, ${sqlLiteral(post.featureImageUrl)}, ${sqlLiteral(post.featureImageAlt)}, ${sqlLiteral(post.category)}, 'published', now()) ON CONFLICT (site_id, slug) DO NOTHING;`);
+    for (const [index, image] of (post.gallery || []).entries()) lines.push(`INSERT INTO tele_blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order) SELECT ${sqlLiteral(config.siteId)}, post.id, ${sqlLiteral(image.imageUrl)}, ${sqlLiteral(image.altText)}, ${sqlLiteral(image.caption)}, ${index} FROM tele_blog_posts AS post WHERE post.site_id = ${sqlLiteral(config.siteId)} AND post.slug = ${sqlLiteral(post.slug)} AND NOT EXISTS (SELECT 1 FROM tele_blog_post_images AS existing WHERE existing.post_id = post.id AND existing.sort_order = ${index});`);
   }
-  for (const item of config.demoGallery) lines.push(`INSERT INTO gallery_items (site_id, title, image_url, alt_text, caption, category, status, sort_order) SELECT ${sqlLiteral(config.siteId)}, ${sqlLiteral(item.title)}, ${sqlLiteral(item.imageUrl)}, ${sqlLiteral(item.altText)}, ${sqlLiteral(item.caption)}, ${sqlLiteral(item.category)}, 'published', ${Number(item.sortOrder)} WHERE NOT EXISTS (SELECT 1 FROM gallery_items WHERE site_id = ${sqlLiteral(config.siteId)} AND title = ${sqlLiteral(item.title)});`);
+  for (const item of config.demoGallery) lines.push(`INSERT INTO tele_gallery_items (site_id, title, image_url, alt_text, caption, category, status, sort_order) SELECT ${sqlLiteral(config.siteId)}, ${sqlLiteral(item.title)}, ${sqlLiteral(item.imageUrl)}, ${sqlLiteral(item.altText)}, ${sqlLiteral(item.caption)}, ${sqlLiteral(item.category)}, 'published', ${Number(item.sortOrder)} WHERE NOT EXISTS (SELECT 1 FROM tele_gallery_items WHERE site_id = ${sqlLiteral(config.siteId)} AND title = ${sqlLiteral(item.title)});`);
   return lines.join('\n') + '\n';
+}
+// Explicitly pushes the settings baked into this package into an existing
+// database. seed.sql keeps whatever the database already has, so a redeployed
+// package with new builder settings would otherwise keep showing the earlier
+// configuration the site stored on first use.
+function createApplyConfigSql(config) {
+  return [
+    '-- Push the settings from this code package into the site record in Neon.',
+    '--',
+    '-- The deployed site stores its configuration in the tele_sites row, which is',
+    '-- why owner dashboard edits survive redeploys. Run this file only when you',
+    '-- want this package’s builder settings to replace what the database stores',
+    '-- (for example after rebuilding the ZIP with a new practice name or theme).',
+    '-- It overwrites: practice details, design, features, payment details, custom',
+    '-- pages and menu links. It does not touch client accounts, bookings, payment',
+    '-- proofs, schedules, notes or any other content.',
+    '',
+    `INSERT INTO tele_sites (site_id, config) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(JSON.stringify(config))}::jsonb)`,
+    'ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now();', ''
+  ].join('\n');
 }
 function generatedReadme(config, secrets) {
   const code = (value) => String.fromCharCode(96) + value + String.fromCharCode(96);
@@ -281,13 +380,16 @@ function generatedReadme(config, secrets) {
       : `${code('DATABASE_URL')} still has a placeholder value because no database connection string was entered in the builder. Replace it with your pooled Neon URL, for example ${code('postgresql://USER:PASSWORD@HOST.neon.tech/DB')} (leave out ${code('sslmode')}/${code('channel_binding')} — the generated runtime uses Neon's secure HTTP transport and does not use them).`,
     `Treat ${code(envFile)} as a secret: it is already ignored by the included ${code('.gitignore')}, so keep it out of source control.`, '',
     '## Database setup',
-    `Create a Neon Postgres database (if you have not already), then run ${code('db/schema.sql')} (safe to rerun; it includes idempotent migrations) and ${code('db/seed.sql')}. The seed file includes the generated site configuration, payment details, custom pages and sample practice content.`, '',
+    `Create a Neon Postgres database (if you have not already) and put its pooled connection string in ${code('DATABASE_URL')} — that is the whole setup. On the first database request the deployed site applies the schema it ships (${code('db/schema.sql')}, also applied automatically inside the runtime) in one transaction, creates its own configuration row, and seeds the owner account row. Client signup, bookings and the owner dashboard therefore work on an empty database. Every table is prefixed ${code('tele_')}.`,
+    `Running ${code('db/schema.sql')} yourself is optional and equivalent — it is safe to rerun because every statement uses ${code('CREATE TABLE IF NOT EXISTS')} plus idempotent migrations; do this when the database user cannot create tables, or when you prefer to provision ahead of time. ${code('db/seed.sql')} is also optional: run it once if you want the generated site configuration, payment details, custom pages and sample practice content loaded up front. It is safe to rerun and never overwrites content you changed in the dashboard. ${code('db/apply-config.sql')} pushes this package's builder settings over whatever the database currently stores. If ${code('DATABASE_URL')} is missing or unreachable, the public site still serves the configuration compiled into the package while database-backed features report a clear error.`, '',
     config.target === 'vercel' ? '## Deploy to Vercel' : '## Deploy to Cloudflare Workers',
     config.target === 'vercel'
-      ? `Use Node.js 20.6+ for the standalone worker script, then deploy this folder to Vercel. In the Vercel dashboard, copy the values from ${code('.env')} into the project's Environment Variables (the ${code('.env')} file itself is only read locally). For local development, run ${code('npm install')} and ${code('npm run dev')}.`
-      : `Use Node.js 22+ and run ${code('npm install')}. In the Cloudflare dashboard, set the values from ${code('.dev.vars')} under Worker Settings → Variables and Secrets. Store ${code('DATABASE_URL')}, ${code('ADMIN_PASSWORD_HASH')} and ${code('CSRF_SECRET')} as secrets; set ${code('ADMIN_USERNAME')} and ${code('ADMIN_EMAIL')} as variables or secrets. Wrangler does not upload ${code('.dev.vars')} during ${code('npm run deploy')}. For local development, ${code('.dev.vars')} is already in place, so just run ${code('npm run dev')}.`, '',
+      ? `Use Node.js 20.6+ for the standalone worker script, then deploy this folder to Vercel. In the Vercel dashboard, copy every value from ${code('.env')} into the project's Environment Variables (the ${code('.env')} file itself is only read locally). For local development, run ${code('npm install')} and ${code('npm run dev')}.`
+      : `Use Node.js 22+ and run ${code('npm install')}. Wrangler does not upload ${code('.dev.vars')} during ${code('npm run deploy')}, so a deployed Worker has no configuration until you set it: run ${code('npx wrangler secret put DATABASE_URL')}, ${code('npx wrangler secret put ADMIN_PASSWORD_HASH')}, ${code('npx wrangler secret put CSRF_SECRET')}, ${code('npx wrangler secret put ADMIN_USERNAME')} and ${code('npx wrangler secret put ADMIN_EMAIL')}, pasting each value from ${code('.dev.vars')} (or set the same names under Worker Settings → Variables and Secrets). Run ${code('npm run secrets')} to push ${code('DATABASE_URL')}, the ${code('ADMIN_*')} values, ${code('CSRF_SECRET')} and ${code('CRON_SECRET')} from ${code('.dev.vars')} to the Worker without printing them (${code('npm run secrets -- --dry-run')} lists what would be pushed). Missing values are reported, not guessed: without the ${code('ADMIN_*')} values the owner dashboard answers “Owner sign-in is not configured…”, and without ${code('DATABASE_URL')} client accounts and the dashboard editor answer that the appointment database is not configured. ${code('CSRF_SECRET')} is optional — without it the runtime derives a private, stable secret from ${code('DATABASE_URL')}, so client sign-up and booking forms still work; setting it explicitly is recommended for production. For local development, ${code('.dev.vars')} is already in place, so just run ${code('npm run dev')}.`, '',
     '## Owner dashboard and sign-in',
     `The owner dashboard path is generated from the current date in the site's time zone (default ${code(config.timeZone)}). Today, when this package was generated, its path is ${code(currentAdminPath)}; it changes at local midnight. The dashboard is not linked from public pages; enter this URL directly and sign in using the administrator account configured in the builder. The public sign-in form intentionally starts blank; the raw password is never embedded in public site assets.`,
+    `The owner account lives in the database, in ${code('tele_admin_users')} — one row per site, holding the username, email and a salted PBKDF2 password hash. The ${code('ADMIN_USERNAME')}/${code('ADMIN_EMAIL')}/${code('ADMIN_PASSWORD_HASH')} values only seed that row on first use; afterwards the database copy is authoritative, and the owner can change the username, email or password from the dashboard's Sign-in panel (it asks for the current password and re-issues the session). Redeploying this package never overwrites a changed account.`,
+    `Calendar capacity is owner-only: the dashboard shows how many slots are published, how many are reserved and the percentage filled. Public visitors only ever see the month, which days have open times and the open slots themselves; the public API returns no totals.`,
     `Path scheme: Monday = dog, Tuesday = rat, Wednesday = ant, Thursday = fish, Friday = fly, Saturday = cat, Sunday = cockroach. Take the animal's last letter, append ${code('admin')} and the current calendar day number, then append ${code('/dashboard')}. For example, Tuesday on the 8th is ${code('/tadmin8/dashboard')}. The changing path is only an obscurity measure—the username/password sign-in is the actual access control.`,
     `The Menu links view in the owner dashboard can rename, reorder, add or remove public navigation links. Links accept same-site paths or HTTPS URLs; the site starts with ${config.customPages.length} generated custom menu page${config.customPages.length === 1 ? '' : 's'}. GCash/Maya payment details are also configured in the generated settings.`, '',
     '## Payment reminders and booking release',
@@ -733,6 +835,10 @@ async function buildFiles(input, readTemplate) {
   const pageEdits = normalizePageEdits(input.pageEdits);
   const target = config.target;
   const manifest = JSON.parse(await readTemplate('manifest.json'));
+  // The generated runtime applies the schema itself so a fresh Neon URL gets
+  // its tables on first use; the same statements stay in db/schema.sql for
+  // manual or pre-provisioned setups.
+  const schemaStatements = splitSqlStatements(await readTemplate('shared/db/schema.sql'));
   const files = new Map();
   const publicPath = (relative) => target === 'vercel' ? relative.replace(/^public\//, '') : relative;
   files.set('.gitignore', `node_modules/\n${ENV_FILE_BY_TARGET[target]}\n`);
@@ -753,9 +859,10 @@ async function buildFiles(input, readTemplate) {
     files.set(relative, await readTemplate(`shared/${relative}`));
   }
   files.set('db/seed.sql', createSeedSql(config));
+  files.set('db/apply-config.sql', createApplyConfigSql(config));
 
   for (const relative of manifest[target]) {
-    let content = replaceTokens(await readTemplate(`${target}/${relative}`), config);
+    let content = replaceTokens(await readTemplate(`${target}/${relative}`), config, { schemaStatements });
     if (relative === ENV_FILE_BY_TARGET[target]) content = replaceSecretTokens(content, secrets);
     files.set(relative, content);
   }
@@ -766,11 +873,27 @@ async function buildFiles(input, readTemplate) {
 
   files.set('README.md', generatedReadme(config, secrets));
   files.set('manifest.json', JSON.stringify({
-    generator: 'Canopy Studio Cloudflare Builder', version: '1.2.0', siteId: config.siteId,
-    specialty: config.specialty, generatedAt: new Date().toISOString(), target,
+    // The generator name is target-neutral on purpose: the same builder writes
+    // both packages, and only `target` says which runtime this ZIP carries.
+    generator: 'Canopy Studio Builder', version: '1.3.0', siteId: config.siteId,
+    // The build stamp comes from the payload so two builds of the same settings
+    // produce identical manifests (see createdStamp above).
+    specialty: config.specialty, generatedAt: config.createdAt, target,
     database: 'Neon Postgres', features: config.features,
     customPages: config.customPages.map(({ menuName, url, pageTitle }) => ({ menuName, url, pageTitle })),
-    config: { businessName: config.businessName, location: config.location, theme: config.theme, primaryColor: config.primaryColor, fontStyle: config.fontStyle }
+    // The full list of builder settings this ZIP was generated with, so an
+    // operator can confirm the package carries the configuration they chose.
+    // Secrets (database URL, password hash, CSRF/cron keys, raw password) are
+    // deliberately absent: they only ever reach the generated env file.
+    config: {
+      siteId: config.siteId, specialty: config.specialty, specialtyLabel: config.specialtyLabel,
+      businessName: config.businessName, brandName: config.brandName,
+      location: config.location, email: config.email, phone: config.phone, timeZone: config.timeZone,
+      theme: config.theme, editorialAccent: config.editorialAccent,
+      primaryColor: config.primaryColor, accentColor: config.accentColor, paperColor: config.paperColor,
+      fontStyle: config.fontStyle, features: config.features, payments: config.payments,
+      menuLinks: config.menuLinks, createdAt: config.createdAt
+    }
   }, null, 2) + '\n');
   return { config, files };
 }
@@ -779,4 +902,4 @@ async function generateBundle(input, readTemplate) {
   const buffer = createZip([...files.entries()]);
   return { config, buffer, filename: `${config.siteId}-${config.target}.zip` };
 }
-export { buildPreviewDocument, generateBundle, normalizeAdminAccount, normalizeConfig, normalizePageEdits, applyPageEdits, PAGE_EDIT_EXCLUDED_IDS };
+export { buildPreviewDocument, generateBundle, normalizeAdminAccount, normalizeConfig, normalizePageEdits, applyPageEdits, splitSqlStatements, PAGE_EDIT_EXCLUDED_IDS };

@@ -54,28 +54,17 @@
   }
   function monthParts(value) { const [year, month] = value.split('-').map(Number); return { year, month }; }
   function dayDateString(year, month, day) { return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`; }
-  function renderMeter(data) {
-    const percent = Math.max(0, Math.min(100, Number(data?.fillPercent) || 0));
-    $('capacityPercent').textContent = `${percent}%`;
-    $('capacityFill').style.width = `${percent}%`;
-    $('capacityMeter').setAttribute('aria-valuenow', String(percent));
-    $('bookedCount').textContent = String(data?.bookedSlots || 0);
-    $('availableCount').textContent = String(data?.availableSlots || 0);
-    let detail = 'No monthly schedule has been published yet.';
-    if (data?.published && !data.totalSlots) detail = 'The owner has published this month, but no consultation times are open.';
-    else if (data?.published && percent >= 100) detail = 'All published consultation times are reserved.';
-    else if (data?.published) detail = `${data.totalSlots} published consultation times · ${data.availableSlots} still open.`;
-    $('capacityDetail').textContent = detail;
-  }
   function renderCalendar(data) {
     monthData = data;
     $('calendarMonthLabel').textContent = formatMonth(data.month);
     $('previousMonth').disabled = data.month <= currentYearMonth();
     $('nextMonth').disabled = data.month >= monthShift(currentYearMonth(), 11);
-    renderMeter(data);
+    // This page shows clients which dates are still open. Published and
+    // reserved totals stay in the owner dashboard: /api/availability answers
+    // with `hasTimes`, `days` and `slots` only.
     if (!site.features?.scheduling) $('calendarStatus').textContent = 'Online appointments are not enabled. Please contact the practice directly.';
     else if (!data.published) $('calendarStatus').textContent = 'This calendar is empty until the practice publishes its monthly availability.';
-    else if (!data.totalSlots) $('calendarStatus').textContent = 'No consultation times have been opened for this month yet.';
+    else if (!data.hasTimes) $('calendarStatus').textContent = 'No consultation times have been opened for this month yet.';
     else if (!data.days?.length) $('calendarStatus').textContent = 'No future consultation times remain in this month. Try the next month.';
     else $('calendarStatus').textContent = 'Choose a highlighted date to see the owner’s open consultation times.';
     const grid = $('calendarDays'); grid.replaceChildren();
@@ -91,7 +80,7 @@
         if (stats.available > 0) button.classList.add('has-open-times'); else button.classList.add('day-full');
         if (date === selectedDate) button.classList.add('selected');
         button.setAttribute('role', 'gridcell');
-        button.setAttribute('aria-label', `${formatDate(date)}, ${stats.available} open and ${stats.booked} reserved`);
+        button.setAttribute('aria-label', `${formatDate(date)}, ${stats.available} open`);
         const numeral = document.createElement('strong'); numeral.textContent = String(day);
         const count = document.createElement('small'); count.textContent = stats.available ? `${stats.available} open` : 'Full';
         button.append(numeral, count);
@@ -118,7 +107,7 @@
     const caption = document.createElement('small'); caption.textContent = day?.available ? `${day.available} times open` : 'No times open';
     heading.append(title, caption); node.appendChild(heading);
     if (!current.length) {
-      const empty = document.createElement('p'); empty.className = 'slot-empty'; empty.textContent = day?.booked ? 'All owner-published times on this date are reserved.' : 'No appointment times are published for this date.'; node.appendChild(empty); return;
+      const empty = document.createElement('p'); empty.className = 'slot-empty'; empty.textContent = 'No appointment times are available on this date.'; node.appendChild(empty); return;
     }
     const list = document.createElement('div'); list.className = 'slot-button-list';
     current.forEach((slot) => {
@@ -147,7 +136,7 @@
       renderCalendar(data);
     } catch (error) {
       $('calendarDays').replaceChildren(); $('calendarSlots').innerHTML = '<p class="slot-empty">The calendar could not be loaded right now.</p>';
-      $('calendarStatus').textContent = error.message; renderMeter({});
+      $('calendarStatus').textContent = error.message;
     }
   }
   async function loadSiteSettings() {

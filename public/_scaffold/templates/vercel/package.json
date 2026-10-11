@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "node dev.js",
     "start": "node dev.js",
-    "payments:worker": "node --env-file=.env payment-reminder-worker.js"
+    "payments:worker": "node --env-file=.env payment-reminder-worker.js",
+    "secrets": "node scripts/set-secrets.mjs --target=vercel"
   },
   "engines": {
     "node": ">=20.6"

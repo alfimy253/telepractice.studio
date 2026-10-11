@@ -8,11 +8,17 @@ import { cleanMenuLinks } from '../lib/menu-links.js';
 import { normalizeSiteTheme } from '../lib/site-theme.js';
 import { detectPaymentProofMime, MAX_PAYMENT_PROOF_BYTES, PAYMENT_PROOF_MIME_TYPES, paymentProofFromBase64, paymentProofToBase64 } from '../lib/payment-proof.js';
 import { runPaymentReminderChecks } from '../lib/payment-reminders.js';
+import { databaseErrorMessage } from '../lib/db-errors.js';
 import { createHmac, randomBytes, timingSafeEqual, webcrypto } from 'node:crypto';
 
 const app = express();
 const SITE_ID = '__SITE_ID__';
 const DEFAULT_CONFIG = __SITE_CONFIG_JSON__;
+// db/schema.sql, split into single statements by the builder and applied as one
+// transaction the first time this instance touches the database, so a fresh
+// Neon URL gets its tele_* tables without a manual step. The same file remains
+// in db/schema.sql for manual or pre-provisioned setups.
+const SCHEMA_STATEMENTS = __SCHEMA_STATEMENTS__;
 const MAX_BODY = '256kb';
 
 app.disable('x-powered-by');
@@ -36,8 +42,81 @@ app.use((req, res, next) => {
   next();
 });
 
-const getDb = () => createNeonClient(process.env.DATABASE_URL);
-const csrfSecret = () => process.env.CSRF_SECRET || (process.env.NODE_ENV === 'production' ? '' : 'local-development-only-change-before-deploy');
+// The site owns exactly one row in `sites`, which holds its public
+// configuration. db/seed.sql writes that row and the owner's "save details"
+// writes it, but a fresh deployment that only ran db/schema.sql has none — and
+// every client account, booking, CMS row and schedule references
+// sites(site_id) by foreign key, so client signup answered
+// "Could not create the client account." until the owner happened to save
+// something first. Create the row on first database use instead; an existing
+// row — including owner-edited settings — is never modified.
+let schemaReady = null;
+let schemaFailures = 0;
+function ensureSchema() {
+  if (schemaReady) return schemaReady;
+  if (!process.env.DATABASE_URL || schemaFailures > 1) return Promise.resolve();
+  const client = createNeonClient(process.env.DATABASE_URL);
+  schemaReady = (async () => {
+    await client.transaction((transaction) => SCHEMA_STATEMENTS.map((statement) => transaction.query(statement)));
+  })().catch((cause) => {
+    // Best effort: if the database user may not create tables, the real query
+    // still runs and reports its own, more specific error.
+    schemaReady = null;
+    schemaFailures += 1;
+    console.error('schema bootstrap failed', cause);
+  });
+  return schemaReady;
+}
+let siteRowReady = null;
+function ensureSiteRow() {
+  if (!siteRowReady) {
+    const client = createNeonClient(process.env.DATABASE_URL);
+    siteRowReady = (async () => {
+      await ensureSchema();
+      await client`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(DEFAULT_CONFIG)}::jsonb) ON CONFLICT (site_id) DO NOTHING`;
+    })().catch((cause) => { siteRowReady = null; throw cause; });
+  }
+  return siteRowReady;
+}
+// The owner account lives in tele_admin_users. The ADMIN_* environment values
+// seed that row on first use; after that the database copy is authoritative, so
+// the owner can change the username, email or password in the dashboard without
+// touching the deployment environment. An existing row is never overwritten.
+let adminUserReady = null;
+function ensureAdminUser() {
+  if (!adminUserReady) {
+    const client = createNeonClient(process.env.DATABASE_URL);
+    adminUserReady = (async () => {
+      await ensureSiteRow();
+      if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD_HASH) return;
+      await client`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${String(process.env.ADMIN_USERNAME).trim()}, ${String(process.env.ADMIN_EMAIL).trim()}, ${String(process.env.ADMIN_PASSWORD_HASH)}) ON CONFLICT (site_id) DO NOTHING`;
+    })().catch((cause) => { adminUserReady = null; throw cause; });
+  }
+  return adminUserReady;
+}
+// Same call shape as before (`const sql = getDb()` + tagged template), so every
+// existing query keeps working; each one first guarantees the site row exists.
+const getDb = () => {
+  const client = createNeonClient(process.env.DATABASE_URL);
+  return async (strings, ...values) => {
+    await ensureSiteRow();
+    return client(strings, ...values);
+  };
+};
+// A deployment without CSRF_SECRET still needs working forms on the client site
+// (sign-up, booking, owner sign-in). Derive a stable secret from the database
+// URL every deployment already has: it never leaves the server, and changing
+// DATABASE_URL simply invalidates outstanding tokens. An explicit CSRF_SECRET
+// always wins, and development keeps its local fallback.
+let derivedCsrfSecret = '';
+const csrfSecret = () => {
+  if (process.env.CSRF_SECRET) return String(process.env.CSRF_SECRET);
+  if (process.env.DATABASE_URL) {
+    if (!derivedCsrfSecret) derivedCsrfSecret = createHmac('sha256', String(process.env.DATABASE_URL)).update(`canopy-csrf-v1:${SITE_ID}`).digest('base64url');
+    return derivedCsrfSecret;
+  }
+  return process.env.NODE_ENV === 'production' ? '' : 'local-development-only-change-before-deploy';
+};
 const csrfCookie = 'practice_csrf';
 const clientSessionCookie = 'canopy_client';
 const clientSessionTtlSeconds = 30 * 24 * 60 * 60;
@@ -69,16 +148,45 @@ function cookieValue(header, name) {
   }
   return '';
 }
-function adminConfigured() {
-  return Boolean(process.env.ADMIN_USERNAME && process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD_HASH && csrfSecret());
+function ownerPasswordProblem(value) {
+  if (value.length < 12 || value.length > 128) return 'The password must be 12–128 characters long.';
+  if (!/[a-z]/.test(value) || !/[A-Z]/.test(value) || !/[0-9]/.test(value) || !/[^A-Za-z0-9\s]/.test(value)) {
+    return 'The password must include a lowercase letter, an uppercase letter, a number and a symbol.';
+  }
+  return '';
+}
+// Resolves the owner account: the tele_admin_users row first (seeded from the
+// ADMIN_* environment values on first use), then those values as a fallback.
+async function adminCredentials() {
+  const fromEnvironment = {
+    username: cleanText(process.env.ADMIN_USERNAME, 64), email: cleanText(process.env.ADMIN_EMAIL, 254),
+    passwordHash: String(process.env.ADMIN_PASSWORD_HASH || ''), source: 'environment'
+  };
+  const environmentComplete = Boolean(fromEnvironment.username && fromEnvironment.email && fromEnvironment.passwordHash);
+  if (!process.env.DATABASE_URL) return environmentComplete ? fromEnvironment : null;
+  try {
+    await ensureAdminUser();
+    const rows = await getDb()`SELECT username, email, password_hash AS "passwordHash" FROM tele_admin_users WHERE site_id = ${SITE_ID} LIMIT 1`;
+    if (rows[0]) return { username: String(rows[0].username), email: String(rows[0].email), passwordHash: String(rows[0].passwordHash), source: 'database' };
+  } catch (cause) { console.error('owner account read failed', cause); }
+  return environmentComplete ? fromEnvironment : null;
+}
+async function adminConfigured() {
+  if (!csrfSecret()) return false;
+  return Boolean(await adminCredentials());
 }
 function adminSessionCookieName(req) {
   return req.secure ? '__Host-canopy_owner' : 'canopy_owner';
 }
+function ownerSessionCookie(req, token) {
+  const secure = req.secure ? '; Secure' : '';
+  return `${adminSessionCookieName(req)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`;
+}
 async function adminOk(req) {
-  if (!adminConfigured()) return false;
+  const credentials = await adminCredentials();
+  if (!credentials || !csrfSecret()) return false;
   const token = cookieValue(req.headers.cookie, adminSessionCookieName(req));
-  return verifyAdminSession(token, process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD_HASH, csrfSecret());
+  return verifyAdminSession(token, credentials.username, credentials.passwordHash, csrfSecret());
 }
 async function passwordDigest(password, salt, iterations = passwordIterations) {
   const key = await webcrypto.subtle.importKey('raw', Buffer.from(password, 'utf8'), 'PBKDF2', false, ['deriveBits']);
@@ -108,8 +216,8 @@ async function createClientSession(req, res, account) {
   const token = randomBytes(32).toString('base64url');
   const tokenHash = await sessionTokenHash(token);
   const sql = getDb();
-  await sql`DELETE FROM client_sessions WHERE site_id = ${SITE_ID} AND expires_at < now()`;
-  await sql`INSERT INTO client_sessions (site_id, client_account_id, token_hash, expires_at) VALUES (${SITE_ID}, ${account.id}, ${tokenHash}, now() + (${clientSessionTtlSeconds} * interval '1 second'))`;
+  await sql`DELETE FROM tele_client_sessions WHERE site_id = ${SITE_ID} AND expires_at < now()`;
+  await sql`INSERT INTO tele_client_sessions (site_id, client_account_id, token_hash, expires_at) VALUES (${SITE_ID}, ${account.id}, ${tokenHash}, now() + (${clientSessionTtlSeconds} * interval '1 second'))`;
   const secure = req.secure ? '; Secure' : '';
   res.setHeader('Set-Cookie', `${clientSessionCookie}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${clientSessionTtlSeconds}${secure}`);
 }
@@ -122,7 +230,7 @@ async function currentClient(req) {
   if (!token || !process.env.DATABASE_URL) return null;
   const tokenHash = await sessionTokenHash(token);
   const sql = getDb();
-  const rows = await sql`SELECT account.id, account.full_name AS name, account.email, account.phone FROM client_sessions AS session JOIN client_accounts AS account ON account.id = session.client_account_id AND account.site_id = session.site_id WHERE session.site_id = ${SITE_ID} AND session.token_hash = ${tokenHash} AND session.expires_at > now() LIMIT 1`;
+  const rows = await sql`SELECT account.id, account.full_name AS name, account.email, account.phone FROM tele_client_sessions AS session JOIN tele_client_accounts AS account ON account.id = session.client_account_id AND account.site_id = session.site_id WHERE session.site_id = ${SITE_ID} AND session.token_hash = ${tokenHash} AND session.expires_at > now() LIMIT 1`;
   return rows[0] || null;
 }
 function csrfGuard(req, res, next) {
@@ -135,7 +243,7 @@ function csrfGuard(req, res, next) {
   next();
 }
 async function adminGuard(req, res, next) {
-  if (!adminConfigured()) return res.status(503).json({ error: 'Owner sign-in is not configured. Check ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD_HASH and CSRF_SECRET.' });
+  if (!await adminConfigured()) return res.status(503).json({ error: 'Owner sign-in is not configured. Set ADMIN_USERNAME, ADMIN_EMAIL and ADMIN_PASSWORD_HASH (the database copy is used once it exists).' });
   if (!await adminOk(req)) return res.status(401).json({ error: 'Owner session is not valid. Sign in again.' });
   next();
 }
@@ -313,34 +421,47 @@ function articlePostPayload(value = {}) {
   if (!title || !body || !featureImageUrl || !featureImageAlt) return null;
   return { title, slug, excerpt, body, category, status, featureImageUrl, featureImageAlt, gallery };
 }
+// jsonb_to_recordset below declares snake_case columns, while the owner
+// dashboard posts camelCase gallery rows ({ imageUrl, altText, caption,
+// sortOrder }). Passing the objects through unchanged inserted NULLs and the
+// save failed with "null value in column \"image_url\"" whenever an article
+// carried a gallery image, so map the fields explicitly.
+function articleGalleryRows(gallery) {
+  return JSON.stringify((Array.isArray(gallery) ? gallery : []).map((image) => ({
+    image_url: image?.imageUrl ?? '',
+    alt_text: image?.altText ?? '',
+    caption: image?.caption ?? '',
+    sort_order: Number(image?.sortOrder ?? 0)
+  })));
+}
 async function persistArticle(sql, post, id = '') {
   if (id) return sql`
     WITH saved AS (
-      UPDATE blog_posts SET title = ${post.title}, slug = ${post.slug}, excerpt = ${post.excerpt}, body = ${post.body}, feature_image_url = ${post.featureImageUrl}, feature_image_alt = ${post.featureImageAlt}, category = ${post.category}, status = ${post.status}, published_at = CASE WHEN ${post.status} = 'published' THEN COALESCE(published_at, now()) ELSE NULL END, updated_at = now()
+      UPDATE tele_blog_posts SET title = ${post.title}, slug = ${post.slug}, excerpt = ${post.excerpt}, body = ${post.body}, feature_image_url = ${post.featureImageUrl}, feature_image_alt = ${post.featureImageAlt}, category = ${post.category}, status = ${post.status}, published_at = CASE WHEN ${post.status} = 'published' THEN COALESCE(published_at, now()) ELSE NULL END, updated_at = now()
       WHERE site_id = ${SITE_ID} AND id = ${id}::uuid
       RETURNING id, site_id, title, slug, excerpt, body, feature_image_url AS "featureImageUrl", feature_image_alt AS "featureImageAlt", category, status, published_at AS "publishedAt", created_at AS "createdAt"
     ), cleared AS (
-      DELETE FROM blog_post_images AS image USING saved WHERE image.site_id = saved.site_id AND image.post_id = saved.id RETURNING image.id
+      DELETE FROM tele_blog_post_images AS image USING saved WHERE image.site_id = saved.site_id AND image.post_id = saved.id RETURNING image.id
     ), added AS (
-      INSERT INTO blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order)
+      INSERT INTO tele_blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order)
       SELECT saved.site_id, saved.id, incoming.image_url, incoming.alt_text, incoming.caption, incoming.sort_order
       FROM saved CROSS JOIN (SELECT count(*) AS cleared_count FROM cleared) AS cleared_images
-      CROSS JOIN jsonb_to_recordset(${JSON.stringify(post.gallery)}::jsonb) AS incoming(image_url text, alt_text text, caption text, sort_order integer)
+      CROSS JOIN jsonb_to_recordset(${articleGalleryRows(post.gallery)}::jsonb) AS incoming(image_url text, alt_text text, caption text, sort_order integer)
       RETURNING id
     )
     SELECT saved.* FROM saved`;
   return sql`
     WITH saved AS (
-      INSERT INTO blog_posts (site_id, title, slug, excerpt, body, feature_image_url, feature_image_alt, category, status, published_at)
+      INSERT INTO tele_blog_posts (site_id, title, slug, excerpt, body, feature_image_url, feature_image_alt, category, status, published_at)
       VALUES (${SITE_ID}, ${post.title}, ${post.slug}, ${post.excerpt}, ${post.body}, ${post.featureImageUrl}, ${post.featureImageAlt}, ${post.category}, ${post.status}, CASE WHEN ${post.status} = 'published' THEN now() ELSE NULL END)
       RETURNING id, site_id, title, slug, excerpt, body, feature_image_url AS "featureImageUrl", feature_image_alt AS "featureImageAlt", category, status, published_at AS "publishedAt", created_at AS "createdAt"
     ), cleared AS (
-      DELETE FROM blog_post_images AS image USING saved WHERE image.site_id = saved.site_id AND image.post_id = saved.id RETURNING image.id
+      DELETE FROM tele_blog_post_images AS image USING saved WHERE image.site_id = saved.site_id AND image.post_id = saved.id RETURNING image.id
     ), added AS (
-      INSERT INTO blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order)
+      INSERT INTO tele_blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order)
       SELECT saved.site_id, saved.id, incoming.image_url, incoming.alt_text, incoming.caption, incoming.sort_order
       FROM saved CROSS JOIN (SELECT count(*) AS cleared_count FROM cleared) AS cleared_images
-      CROSS JOIN jsonb_to_recordset(${JSON.stringify(post.gallery)}::jsonb) AS incoming(image_url text, alt_text text, caption text, sort_order integer)
+      CROSS JOIN jsonb_to_recordset(${articleGalleryRows(post.gallery)}::jsonb) AS incoming(image_url text, alt_text text, caption text, sort_order integer)
       RETURNING id
     )
     SELECT saved.* FROM saved`;
@@ -357,29 +478,57 @@ app.get('/api/csrf', (req, res) => {
   } catch (error) { res.status(503).json({ error: error.message }); }
 });
 app.get('/api/admin/session', asyncRoute(async (req, res) => {
-  const configured = adminConfigured();
-  const authenticated = configured && await adminOk(req);
+  const credentials = await adminCredentials();
+  const authenticated = Boolean(credentials) && await adminOk(req);
   res.json({
-    configured,
+    configured: Boolean(credentials),
     authenticated,
     ...(authenticated ? { dashboardPath: adminDashboardPath(new Date(), siteTimeZone) } : {}),
-    email: authenticated ? process.env.ADMIN_EMAIL : ''
+    email: authenticated ? credentials.email : '',
+    username: authenticated ? credentials.username : ''
   });
 }));
 app.post('/api/admin/login', csrfGuard, asyncRoute(async (req, res) => {
-  if (!adminConfigured()) return res.status(503).json({ error: 'Owner sign-in is not configured. Check the environment variables.' });
-  const username = cleanText(req.body?.username, 64).toLowerCase();
+  const credentials = await adminCredentials();
+  if (!credentials) return res.status(503).json({ error: 'Owner sign-in is not configured. Set ADMIN_USERNAME, ADMIN_EMAIL and ADMIN_PASSWORD_HASH (the database copy is used once it exists).' });
+  const username = cleanText(req.body?.username, 254).toLowerCase();
   const password = String(req.body?.password || '');
-  const expectedUsername = String(process.env.ADMIN_USERNAME).trim().toLowerCase();
+  const expected = String(credentials.username).trim().toLowerCase();
   const givenBytes = Buffer.from(username);
-  const expectedBytes = Buffer.from(expectedUsername);
+  const expectedBytes = Buffer.from(expected);
   const usernameMatches = givenBytes.length === expectedBytes.length && timingSafeEqual(givenBytes, expectedBytes);
-  const passwordMatches = await verifyPasswordHash(password, process.env.ADMIN_PASSWORD_HASH);
-  if (!usernameMatches || !passwordMatches) return res.status(401).json({ error: 'Username or password is incorrect.' });
-  const token = await createAdminSession(process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD_HASH, csrfSecret());
-  const secure = req.secure ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `${adminSessionCookieName(req)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`);
-  res.json({ ok: true, email: process.env.ADMIN_EMAIL, dashboardPath: adminDashboardPath(new Date(), siteTimeZone) });
+  const emailBytes = Buffer.from(String(credentials.email || '').trim().toLowerCase());
+  const emailMatches = emailBytes.length > 0 && givenBytes.length === emailBytes.length && timingSafeEqual(givenBytes, emailBytes);
+  const passwordMatches = await verifyPasswordHash(password, credentials.passwordHash);
+  if ((!usernameMatches && !emailMatches) || !passwordMatches) return res.status(401).json({ error: 'Username or password is incorrect.' });
+  const token = await createAdminSession(credentials.username, credentials.passwordHash, csrfSecret());
+  res.setHeader('Set-Cookie', ownerSessionCookie(req, token));
+  res.json({ ok: true, email: credentials.email, dashboardPath: adminDashboardPath(new Date(), siteTimeZone) });
+}));
+app.put('/api/admin/account', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  const credentials = await adminCredentials();
+  if (!credentials) return res.status(503).json({ error: 'Owner sign-in is not configured. Set ADMIN_USERNAME, ADMIN_EMAIL and ADMIN_PASSWORD_HASH (the database copy is used once it exists).' });
+  const currentPassword = String(req.body?.currentPassword || '');
+  if (!await verifyPasswordHash(currentPassword, credentials.passwordHash)) return res.status(401).json({ error: 'Current password is incorrect.' });
+  const username = cleanText(req.body?.username, 64) || credentials.username;
+  const email = cleanText(req.body?.email, 254) || credentials.email;
+  const newPassword = String(req.body?.newPassword || '');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/.test(username)) {
+    return res.status(400).json({ error: 'Enter a username between 3 and 64 characters using letters, numbers, dots, underscores or hyphens.' });
+  }
+  if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(email)) return res.status(400).json({ error: 'Enter a valid owner email address.' });
+  if (newPassword) { const problem = ownerPasswordProblem(newPassword); if (problem) return res.status(400).json({ error: problem }); }
+  const passwordHash = newPassword ? await makePasswordHash(newPassword) : credentials.passwordHash;
+  try {
+    const sql = getDb();
+    await sql`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${username}, ${email}, ${passwordHash}) ON CONFLICT (site_id) DO UPDATE SET username = EXCLUDED.username, email = EXCLUDED.email, password_hash = EXCLUDED.password_hash, updated_at = now()`;
+  } catch (error) {
+    console.error('owner account save failed', error);
+    return res.status(503).json({ error: databaseErrorMessage(error, 'Could not save the owner sign-in details.') });
+  }
+  const token = await createAdminSession(username, passwordHash, csrfSecret());
+  res.setHeader('Set-Cookie', ownerSessionCookie(req, token));
+  res.json({ ok: true, username, email });
 }));
 app.post('/api/admin/logout', csrfGuard, (req, res) => {
   const secure = req.secure ? '; Secure' : '';
@@ -390,7 +539,7 @@ app.get('/api/site', asyncRoute(async (_req, res) => {
   if (!process.env.DATABASE_URL) return res.json({ config: DEFAULT_CONFIG, source: 'generated-fallback' });
   try {
     const sql = getDb();
-    const rows = await sql`SELECT config FROM sites WHERE site_id = ${SITE_ID} LIMIT 1`;
+    const rows = await sql`SELECT config FROM tele_sites WHERE site_id = ${SITE_ID} LIMIT 1`;
     res.json({ config: cleanSiteConfig(rows[0]?.config || DEFAULT_CONFIG), source: rows[0] ? 'neon' : 'generated-fallback' });
   } catch (error) { console.error('site config read failed', error); res.json({ config: DEFAULT_CONFIG, source: 'generated-fallback' }); }
 }));
@@ -406,12 +555,13 @@ app.post('/api/auth/register', csrfGuard, asyncRoute(async (req, res) => {
   const passwordHash = await makePasswordHash(password);
   try {
     const sql = getDb();
-    const rows = await sql`INSERT INTO client_accounts (site_id, full_name, email, phone, password_hash) VALUES (${SITE_ID}, ${name}, ${email}, ${phone}, ${passwordHash}) RETURNING id, full_name AS name, email, phone`;
+    const rows = await sql`INSERT INTO tele_client_accounts (site_id, full_name, email, phone, password_hash) VALUES (${SITE_ID}, ${name}, ${email}, ${phone}, ${passwordHash}) RETURNING id, full_name AS name, email, phone`;
     await createClientSession(req, res, rows[0]);
     res.status(201).json({ client: clientSummary(rows[0]) });
   } catch (error) {
     if (error.code === '23505') return res.status(409).json({ error: 'An account with that email already exists. Please sign in instead.' });
-    throw error;
+    console.error('client account registration failed', error);
+    res.status(503).json({ error: databaseErrorMessage(error, 'Could not create the client account. Check that the appointment database is reachable.') });
   }
 }));
 app.post('/api/auth/login', csrfGuard, asyncRoute(async (req, res) => {
@@ -421,7 +571,7 @@ app.post('/api/auth/login', csrfGuard, asyncRoute(async (req, res) => {
   const email = cleanText(value.email, 120).toLowerCase(); const password = String(value.password || '');
   if (!/^\S+@\S+\.\S+$/.test(email) || !password || password.length > 128) return res.status(400).json({ error: 'Enter a valid email and password.' });
   const sql = getDb();
-  const rows = await sql`SELECT id, full_name AS name, email, phone, password_hash AS "passwordHash" FROM client_accounts WHERE site_id = ${SITE_ID} AND email = ${email} LIMIT 1`;
+  const rows = await sql`SELECT id, full_name AS name, email, phone, password_hash AS "passwordHash" FROM tele_client_accounts WHERE site_id = ${SITE_ID} AND email = ${email} LIMIT 1`;
   if (!rows.length || !await passwordMatches(password, rows[0].passwordHash)) return res.status(401).json({ error: 'Email or password is incorrect.' });
   await createClientSession(req, res, rows[0]);
   res.json({ client: clientSummary(rows[0]) });
@@ -434,7 +584,7 @@ app.post('/api/auth/logout', csrfGuard, asyncRoute(async (req, res) => {
   const token = cookieValue(req.headers.cookie, clientSessionCookie);
   if (token && process.env.DATABASE_URL) {
     const tokenHash = await sessionTokenHash(token); const sql = getDb();
-    await sql`DELETE FROM client_sessions WHERE site_id = ${SITE_ID} AND token_hash = ${tokenHash}`;
+    await sql`DELETE FROM tele_client_sessions WHERE site_id = ${SITE_ID} AND token_hash = ${tokenHash}`;
   }
   clearClientSession(req, res); res.json({ ok: true });
 }));
@@ -442,7 +592,7 @@ app.get('/api/posts', asyncRoute(async (_req, res) => {
   if (!DEFAULT_CONFIG.features?.blog) return res.json({ posts: [] });
   if (!process.env.DATABASE_URL) return res.json({ posts: DEFAULT_CONFIG.demoPosts || [] });
   const sql = getDb();
-  const rows = await sql`SELECT post.id, post.title, post.slug, post.excerpt, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.published_at AS "publishedAt", post.created_at AS "createdAt" FROM blog_posts AS post WHERE post.site_id = ${SITE_ID} AND post.status = 'published' ORDER BY post.published_at DESC NULLS LAST, post.created_at DESC LIMIT 12`;
+  const rows = await sql`SELECT post.id, post.title, post.slug, post.excerpt, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.published_at AS "publishedAt", post.created_at AS "createdAt" FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} AND post.status = 'published' ORDER BY post.published_at DESC NULLS LAST, post.created_at DESC LIMIT 12`;
   res.json({ posts: rows });
 }));
 app.get('/api/posts/:slug', asyncRoute(async (req, res) => {
@@ -452,7 +602,7 @@ app.get('/api/posts/:slug', asyncRoute(async (req, res) => {
     return post ? res.json({ post }) : res.status(404).json({ error: 'Article not found.' });
   }
   const sql = getDb();
-  const rows = await sql`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM blog_posts AS post WHERE post.site_id = ${SITE_ID} AND post.status = 'published' AND post.slug = ${req.params.slug} LIMIT 1`;
+  const rows = await sql`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM tele_blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} AND post.status = 'published' AND post.slug = ${req.params.slug} LIMIT 1`;
   if (!rows.length) return res.status(404).json({ error: 'Article not found.' });
   res.json({ post: rows[0] });
 }));
@@ -460,17 +610,21 @@ app.get('/api/gallery', asyncRoute(async (_req, res) => {
   if (!DEFAULT_CONFIG.features?.gallery) return res.json({ items: [] });
   if (!process.env.DATABASE_URL) return res.json({ items: DEFAULT_CONFIG.demoGallery || [] });
   const sql = getDb();
-  const rows = await sql`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM gallery_items WHERE site_id = ${SITE_ID} AND status = 'published' ORDER BY sort_order ASC, created_at DESC LIMIT 24`;
+  const rows = await sql`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM tele_gallery_items WHERE site_id = ${SITE_ID} AND status = 'published' ORDER BY sort_order ASC, created_at DESC LIMIT 24`;
   res.json({ items: rows });
 }));
+// The public calendar only needs to know which dates still have open times.
+// Reserved/published totals (the "capacity meter") are owner-only: the
+// /api/admin/availability route reports them, and the public route below
+// projects only `hasTimes`, `days` and `slots`.
 async function availabilityForMonth(month, filterDate = '') {
   const start = monthStart(month);
   if (!start) throw new Error('Choose a valid month in YYYY-MM format.');
-  if (!process.env.DATABASE_URL) return { month, published: false, slots: [], days: [], totalSlots: 0, bookedSlots: 0, availableSlots: 0, fillPercent: 0 };
+  if (!process.env.DATABASE_URL) return { month, published: false, hasTimes: false, slots: [], days: [], totalSlots: 0, bookedSlots: 0 };
   const sql = getDb();
   const rows = filterDate
-    ? await sql`SELECT schedule.status, slot.id, slot.slot_date::text AS date, to_char(slot.slot_time, 'HH24:MI') AS time, EXISTS (SELECT 1 FROM appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled') AS booked FROM monthly_schedules AS schedule LEFT JOIN consultation_slots AS slot ON slot.site_id = schedule.site_id AND slot.month_start = schedule.month_start AND slot.is_open = true AND slot.slot_date = ${filterDate}::date WHERE schedule.site_id = ${SITE_ID} AND schedule.month_start = ${start}::date ORDER BY slot.slot_date, slot.slot_time`
-    : await sql`SELECT schedule.status, slot.id, slot.slot_date::text AS date, to_char(slot.slot_time, 'HH24:MI') AS time, EXISTS (SELECT 1 FROM appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled') AS booked FROM monthly_schedules AS schedule LEFT JOIN consultation_slots AS slot ON slot.site_id = schedule.site_id AND slot.month_start = schedule.month_start AND slot.is_open = true WHERE schedule.site_id = ${SITE_ID} AND schedule.month_start = ${start}::date ORDER BY slot.slot_date, slot.slot_time`;
+    ? await sql`SELECT schedule.status, slot.id, slot.slot_date::text AS date, to_char(slot.slot_time, 'HH24:MI') AS time, EXISTS (SELECT 1 FROM tele_appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled') AS booked FROM tele_monthly_schedules AS schedule LEFT JOIN tele_consultation_slots AS slot ON slot.site_id = schedule.site_id AND slot.month_start = schedule.month_start AND slot.is_open = true AND slot.slot_date = ${filterDate}::date WHERE schedule.site_id = ${SITE_ID} AND schedule.month_start = ${start}::date ORDER BY slot.slot_date, slot.slot_time`
+    : await sql`SELECT schedule.status, slot.id, slot.slot_date::text AS date, to_char(slot.slot_time, 'HH24:MI') AS time, EXISTS (SELECT 1 FROM tele_appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled') AS booked FROM tele_monthly_schedules AS schedule LEFT JOIN tele_consultation_slots AS slot ON slot.site_id = schedule.site_id AND slot.month_start = schedule.month_start AND slot.is_open = true WHERE schedule.site_id = ${SITE_ID} AND schedule.month_start = ${start}::date ORDER BY slot.slot_date, slot.slot_time`;
   const published = rows[0]?.status === 'published';
   const slotRows = rows.filter((row) => row.id);
   const bookedSlots = slotRows.filter((row) => row.booked).length;
@@ -479,26 +633,20 @@ async function availabilityForMonth(month, filterDate = '') {
   const upcomingRows = slotRows.filter((row) => row.date > today || (row.date === today && row.time > clock));
   const dayMap = new Map();
   for (const row of upcomingRows) {
-    const day = dayMap.get(row.date) || { date: row.date, available: 0, booked: 0 };
-    day[row.booked ? 'booked' : 'available'] += 1; dayMap.set(row.date, day);
+    if (row.booked) continue;
+    const day = dayMap.get(row.date) || { date: row.date, available: 0 };
+    day.available += 1; dayMap.set(row.date, day);
   }
-  return { month, published, totalSlots, bookedSlots, availableSlots: totalSlots - bookedSlots, fillPercent: totalSlots ? Math.round(bookedSlots * 100 / totalSlots) : 0, days: [...dayMap.values()], slots: upcomingRows.filter((row) => !row.booked).map((row) => ({ id: row.id, date: row.date, time: row.time, label: displayTime(row.time) })) };
+  return { month, published, hasTimes: slotRows.length > 0, totalSlots, bookedSlots, days: [...dayMap.values()], slots: upcomingRows.filter((row) => !row.booked).map((row) => ({ id: row.id, date: row.date, time: row.time, label: displayTime(row.time) })) };
 }
-app.get('/api/availability/summary', asyncRoute(async (req, res) => {
-  const month = String(req.query.month || '');
-  if (!monthStart(month)) return res.status(400).json({ error: 'Choose a valid month.' });
-  if (!DEFAULT_CONFIG.features?.scheduling) return res.json({ month, published: false, totalSlots: 0, bookedSlots: 0, availableSlots: 0, fillPercent: 0 });
-  const data = await availabilityForMonth(month);
-  const { month: shownMonth, published, totalSlots, bookedSlots, availableSlots, fillPercent } = data;
-  res.json({ month: shownMonth, published, totalSlots, bookedSlots, availableSlots, fillPercent });
-}));
 app.get('/api/availability', asyncRoute(async (req, res) => {
   const date = String(req.query.date || '');
   const month = String(req.query.month || (date ? date.slice(0, 7) : localToday().slice(0, 7)));
   if (!monthStart(month)) return res.status(400).json({ error: 'Choose a valid month.' });
   if (date && (!validDate(date) || date < localToday() || date.slice(0, 7) !== month)) return res.status(400).json({ error: 'Choose a valid future date in the selected month.' });
-  if (!DEFAULT_CONFIG.features?.scheduling) return res.json({ month, published: false, slots: [], days: [], totalSlots: 0, bookedSlots: 0, availableSlots: 0, fillPercent: 0 });
-  res.json(await availabilityForMonth(month, date));
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.json({ month, published: false, hasTimes: false, slots: [], days: [] });
+  const data = await availabilityForMonth(month, date);
+  res.json({ month: data.month, published: data.published, hasTimes: data.hasTimes, days: data.days, slots: data.slots });
 }));
 function displayTime(value) {
   const [hour, minute] = value.split(':').map(Number); const suffix = hour >= 12 ? 'pm' : 'am'; const shown = hour % 12 || 12;
@@ -509,8 +657,8 @@ app.get('/api/admin/availability', adminGuard, asyncRoute(async (req, res) => {
   const month = String(req.query.month || ''); const start = monthStart(month);
   if (!start) return res.status(400).json({ error: 'Choose a valid month.' });
   const sql = getDb();
-  const schedules = await sql`SELECT weekly_rules AS "weeklyRules", exceptions, status, published_at AS "publishedAt" FROM monthly_schedules WHERE site_id = ${SITE_ID} AND month_start = ${start}::date LIMIT 1`;
-  const metrics = await sql`SELECT count(*)::int AS total, count(*) FILTER (WHERE EXISTS (SELECT 1 FROM appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled'))::int AS booked FROM consultation_slots AS slot WHERE slot.site_id = ${SITE_ID} AND slot.month_start = ${start}::date AND slot.is_open = true`;
+  const schedules = await sql`SELECT weekly_rules AS "weeklyRules", exceptions, status, published_at AS "publishedAt" FROM tele_monthly_schedules WHERE site_id = ${SITE_ID} AND month_start = ${start}::date LIMIT 1`;
+  const metrics = await sql`SELECT count(*)::int AS total, count(*) FILTER (WHERE EXISTS (SELECT 1 FROM tele_appointments AS appointment WHERE appointment.site_id = slot.site_id AND appointment.appointment_date = slot.slot_date AND appointment.appointment_time = slot.slot_time AND appointment.status <> 'cancelled'))::int AS booked FROM tele_consultation_slots AS slot WHERE slot.site_id = ${SITE_ID} AND slot.month_start = ${start}::date AND slot.is_open = true`;
   const schedule = schedules[0] || { weeklyRules: Array.from({ length: 7 }, (_unused, weekday) => ({ weekday, enabled: false, startTime: '09:00', endTime: '17:00' })), exceptions: [], status: 'unpublished' };
   res.json({ month, deadline: monthDeadline(month), locked: !schedules.length && localToday() > monthDeadline(month), schedule, totalSlots: Number(metrics[0]?.total || 0), bookedSlots: Number(metrics[0]?.booked || 0) });
 }));
@@ -522,26 +670,26 @@ app.put('/api/admin/availability/:month', csrfGuard, adminGuard, asyncRoute(asyn
   const slots = schedule && buildMonthlySlots(schedule);
   if (!schedule || !slots) return res.status(400).json({ error: 'Check the seven weekly-hour rows and date exceptions. Use 30-minute start/end times and no more than 1,000 slots.' });
   const sql = getDb();
-  const existing = await sql`SELECT status FROM monthly_schedules WHERE site_id = ${SITE_ID} AND month_start = ${start}::date LIMIT 1`;
+  const existing = await sql`SELECT status FROM tele_monthly_schedules WHERE site_id = ${SITE_ID} AND month_start = ${start}::date LIMIT 1`;
   const deadline = monthDeadline(month);
   if (!existing.length && localToday() > deadline) return res.status(409).json({ error: `This month’s schedule deadline was ${deadline}. A missing schedule stays unavailable.` });
   const slotJson = JSON.stringify(slots.map((slot) => ({ slot_date: slot.slotDate, slot_time: slot.slotTime })));
-  const conflicts = await sql`SELECT appointment.id FROM appointments AS appointment WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= ${start}::date AND appointment.appointment_date < (${start}::date + interval '1 month')::date AND appointment.status <> 'cancelled' AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${slotJson}::jsonb) AS proposed(slot_date date, slot_time time) WHERE proposed.slot_date = appointment.appointment_date AND proposed.slot_time = appointment.appointment_time) LIMIT 1`;
+  const conflicts = await sql`SELECT appointment.id FROM tele_appointments AS appointment WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= ${start}::date AND appointment.appointment_date < (${start}::date + interval '1 month')::date AND appointment.status <> 'cancelled' AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${slotJson}::jsonb) AS proposed(slot_date date, slot_time time) WHERE proposed.slot_date = appointment.appointment_date AND proposed.slot_time = appointment.appointment_time) LIMIT 1`;
   if (conflicts.length) return res.status(409).json({ error: 'This change would remove a reserved appointment time. Keep it in the schedule or cancel the appointment first.' });
   try {
     const saved = await sql`
       WITH saved AS (
-        INSERT INTO monthly_schedules (site_id, month_start, weekly_rules, exceptions, status, published_at)
+        INSERT INTO tele_monthly_schedules (site_id, month_start, weekly_rules, exceptions, status, published_at)
         VALUES (${SITE_ID}, ${start}::date, ${JSON.stringify(schedule.weeklyRules)}::jsonb, ${JSON.stringify(schedule.exceptions)}::jsonb, 'published', now())
         ON CONFLICT (site_id, month_start) DO UPDATE SET weekly_rules = EXCLUDED.weekly_rules, exceptions = EXCLUDED.exceptions, status = 'published', published_at = now(), updated_at = now()
         RETURNING site_id, month_start
       ), removed AS (
-        DELETE FROM consultation_slots AS slot USING saved
+        DELETE FROM tele_consultation_slots AS slot USING saved
         WHERE slot.site_id = saved.site_id AND slot.month_start = saved.month_start
           AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${slotJson}::jsonb) AS proposed(slot_date date, slot_time time) WHERE proposed.slot_date = slot.slot_date AND proposed.slot_time = slot.slot_time)
         RETURNING slot.id
       ), added AS (
-        INSERT INTO consultation_slots (site_id, month_start, slot_date, slot_time, is_open)
+        INSERT INTO tele_consultation_slots (site_id, month_start, slot_date, slot_time, is_open)
         SELECT saved.site_id, saved.month_start, proposed.slot_date, proposed.slot_time, true
         FROM saved CROSS JOIN jsonb_to_recordset(${slotJson}::jsonb) AS proposed(slot_date date, slot_time time)
         ON CONFLICT (site_id, slot_date, slot_time) DO UPDATE SET month_start = EXCLUDED.month_start, is_open = true, updated_at = now()
@@ -566,7 +714,7 @@ app.post('/api/appointments', csrfGuard, asyncRoute(async (req, res) => {
   if (!/^[0-9a-f-]{36}$/i.test(slotId) || !DEFAULT_CONFIG.services.includes(service) || !paymentMethod) return res.status(400).json({ error: 'Choose a valid open time, visit type and GCash or Maya payment method.' });
   try {
     const sql = getDb();
-    const rows = await sql`INSERT INTO appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status, payment_method, payment_status, payment_due_at) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${client.phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed', ${paymentMethod}, 'awaiting_proof', now() + interval '15 minutes' FROM consultation_slots AS slot JOIN monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${siteTimeZone} > now() AND NOT EXISTS (SELECT 1 FROM appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time, payment_due_at AS "paymentDueAt"`;
+    const rows = await sql`INSERT INTO tele_appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status, payment_method, payment_status, payment_due_at) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${client.phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed', ${paymentMethod}, 'awaiting_proof', now() + interval '15 minutes' FROM tele_consultation_slots AS slot JOIN tele_monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${siteTimeZone} > now() AND NOT EXISTS (SELECT 1 FROM tele_appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time, payment_due_at AS "paymentDueAt"`;
     if (!rows.length) return res.status(409).json({ error: 'That time was just taken or is no longer available. Refresh the calendar and choose another.' });
     res.status(201).json({ ok: true, appointment: { ...rows[0], timeLabel: displayTime(rows[0].time), status: 'confirmed', paymentStatus: 'awaiting_proof', paymentMethod } });
   } catch (error) {
@@ -579,7 +727,7 @@ app.get('/api/client/appointments', asyncRoute(async (req, res) => {
   const client = await currentClient(req);
   if (!client) return res.status(401).json({ error: 'Sign in to view your consultations.' });
   const sql = getDb();
-  const rows = await sql`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.payment_status AS "paymentStatus", appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.payment_manual_received_at AS "paymentManualReceivedAt", appointment.created_at AS "createdAt", proof.id AS "paymentProofId", proof.review_status AS "paymentProofStatus", proof.uploaded_at AS "paymentProofUploadedAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN appointment_payment_proofs AS proof ON proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id AND proof.client_account_id = appointment.client_account_id LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id AND note.client_account_id = appointment.client_account_id WHERE appointment.site_id = ${SITE_ID} AND appointment.client_account_id = ${client.id} ORDER BY appointment.appointment_date DESC, appointment.appointment_time DESC LIMIT 200`;
+  const rows = await sql`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.payment_status AS "paymentStatus", appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.payment_manual_received_at AS "paymentManualReceivedAt", appointment.created_at AS "createdAt", proof.id AS "paymentProofId", proof.review_status AS "paymentProofStatus", proof.uploaded_at AS "paymentProofUploadedAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM tele_appointments AS appointment LEFT JOIN tele_appointment_payment_proofs AS proof ON proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id AND proof.client_account_id = appointment.client_account_id LEFT JOIN tele_consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id AND note.client_account_id = appointment.client_account_id WHERE appointment.site_id = ${SITE_ID} AND appointment.client_account_id = ${client.id} ORDER BY appointment.appointment_date DESC, appointment.appointment_time DESC LIMIT 200`;
   res.json({ appointments: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
 }));
 app.post('/api/client/appointments/:id/payment-proof', csrfGuard, express.raw({ type: PAYMENT_PROOF_MIME_TYPES, limit: MAX_PAYMENT_PROOF_BYTES }), asyncRoute(async (req, res) => {
@@ -600,7 +748,7 @@ app.post('/api/client/appointments/:id/payment-proof', csrfGuard, express.raw({ 
     const rows = await sql`
       WITH target AS (
         SELECT appointment.id, appointment.client_account_id, appointment.payment_method, appointment.payment_status
-        FROM appointments AS appointment
+        FROM tele_appointments AS appointment
         WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid
           AND appointment.client_account_id = ${client.id} AND appointment.status <> 'cancelled'
           AND (
@@ -608,23 +756,23 @@ app.post('/api/client/appointments/:id/payment-proof', csrfGuard, express.raw({ 
             OR (appointment.payment_status = 'approved' AND appointment.payment_manual_received_at IS NOT NULL)
           )
           AND NOT EXISTS (
-            SELECT 1 FROM appointment_payment_proofs AS existing_proof
+            SELECT 1 FROM tele_appointment_payment_proofs AS existing_proof
             WHERE existing_proof.site_id = appointment.site_id AND existing_proof.appointment_id = appointment.id
           )
         FOR UPDATE
       ), saved AS (
-        INSERT INTO appointment_payment_proofs (site_id, appointment_id, client_account_id, payment_method, image_mime_type, image_base64, review_status)
+        INSERT INTO tele_appointment_payment_proofs (site_id, appointment_id, client_account_id, payment_method, image_mime_type, image_base64, review_status)
         SELECT ${SITE_ID}, target.id, target.client_account_id, target.payment_method, ${contentType}, ${imageBase64}, CASE WHEN target.payment_status = 'approved' THEN 'approved' ELSE 'pending_review' END
         FROM target
         RETURNING id, appointment_id, uploaded_at, review_status AS status
       ), updated AS (
-        UPDATE appointments AS appointment SET payment_status = CASE WHEN appointment.payment_status = 'awaiting_proof' THEN 'pending_review' ELSE appointment.payment_status END
+        UPDATE tele_appointments AS appointment SET payment_status = CASE WHEN appointment.payment_status = 'awaiting_proof' THEN 'pending_review' ELSE appointment.payment_status END
         FROM saved WHERE appointment.site_id = ${SITE_ID} AND appointment.id = saved.appointment_id
         RETURNING appointment.id
       )
       SELECT saved.id, saved.uploaded_at, saved.status FROM saved JOIN updated ON updated.id = saved.appointment_id LIMIT 1`;
     if (!rows.length) {
-      const appointment = await sql`SELECT status, payment_status AS "paymentStatus" FROM appointments WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND client_account_id = ${client.id} LIMIT 1`;
+      const appointment = await sql`SELECT status, payment_status AS "paymentStatus" FROM tele_appointments WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND client_account_id = ${client.id} LIMIT 1`;
       if (!appointment.length) return res.status(404).json({ error: 'That consultation was not found.' });
       if (appointment[0].status === 'cancelled') return res.status(409).json({ error: 'The practice has released this booking. Contact the practice if you already sent payment.' });
       return res.status(409).json({ error: 'Payment proof was already uploaded or this consultation is no longer awaiting proof.' });
@@ -633,7 +781,7 @@ app.post('/api/client/appointments/:id/payment-proof', csrfGuard, express.raw({ 
   } catch (error) {
     if (error.code === '23505') return res.status(409).json({ error: 'Payment proof has already been uploaded for this consultation.' });
     console.error('payment proof upload failed', error);
-    res.status(503).json({ error: 'Could not save payment proof. Please try again while the booking is active.' });
+    res.status(503).json({ error: databaseErrorMessage(error, 'Could not save payment proof. Please try again while the booking is active.') });
   }
 }));
 app.patch('/api/client/appointments/:id', csrfGuard, asyncRoute(async (req, res) => {
@@ -641,13 +789,13 @@ app.patch('/api/client/appointments/:id', csrfGuard, asyncRoute(async (req, res)
   if (!client) return res.status(401).json({ error: 'Sign in to manage your consultations.' });
   if (!/^[0-9a-f-]{36}$/i.test(id) || req.body?.status !== 'cancelled') return res.status(400).json({ error: 'Invalid appointment update.' });
   const sql = getDb();
-  const rows = await sql`UPDATE appointments SET status = 'cancelled' WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND client_account_id = ${client.id} AND status <> 'cancelled' RETURNING id, status`;
+  const rows = await sql`UPDATE tele_appointments SET status = 'cancelled' WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND client_account_id = ${client.id} AND status <> 'cancelled' RETURNING id, status`;
   if (!rows.length) return res.status(404).json({ error: 'That consultation was not found or was already cancelled.' });
   res.json({ appointment: rows[0] });
 }));
 app.get('/api/admin/posts', adminGuard, asyncRoute(async (_req, res) => {
   const sql = getDb();
-  const rows = await sql`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.status, post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM blog_posts AS post WHERE post.site_id = ${SITE_ID} ORDER BY post.created_at DESC LIMIT 100`;
+  const rows = await sql`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.status, post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM tele_blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} ORDER BY post.created_at DESC LIMIT 100`;
   res.json({ posts: rows });
 }));
 app.post('/api/admin/posts', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
@@ -659,7 +807,8 @@ app.post('/api/admin/posts', csrfGuard, adminGuard, asyncRoute(async (req, res) 
     res.status(201).json({ post: rows[0] });
   } catch (error) {
     if (error.code === '23505') return res.status(409).json({ error: 'That URL slug is already in use or gallery order is duplicated.' });
-    throw error;
+    console.error('blog post save failed', error);
+    res.status(503).json({ error: databaseErrorMessage(error, 'Could not save the post.') });
   }
 }));
 app.put('/api/admin/posts/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
@@ -674,28 +823,34 @@ app.put('/api/admin/posts/:id', csrfGuard, adminGuard, asyncRoute(async (req, re
     res.json({ post: rows[0] });
   } catch (error) {
     if (error.code === '23505') return res.status(409).json({ error: 'That URL slug is already in use or gallery order is duplicated.' });
-    throw error;
+    console.error('blog post update failed', error);
+    res.status(503).json({ error: databaseErrorMessage(error, 'Could not update the post.') });
   }
 }));
 app.delete('/api/admin/posts/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
   const id = String(req.params.id || '');
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid post id.' });
   const sql = getDb();
-  const rows = await sql`DELETE FROM blog_posts WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id`;
+  const rows = await sql`DELETE FROM tele_blog_posts WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id`;
   if (!rows.length) return res.status(404).json({ error: 'That post was not found.' });
   res.json({ ok: true });
 }));
 app.get('/api/admin/gallery', adminGuard, asyncRoute(async (_req, res) => {
   const sql = getDb();
-  const rows = await sql`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM gallery_items WHERE site_id = ${SITE_ID} ORDER BY sort_order ASC, created_at DESC LIMIT 100`;
+  const rows = await sql`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM tele_gallery_items WHERE site_id = ${SITE_ID} ORDER BY sort_order ASC, created_at DESC LIMIT 100`;
   res.json({ items: rows });
 }));
 app.post('/api/admin/gallery', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
   const item = galleryPayload(req.body || {});
   if (!validGalleryPayload(item)) return res.status(400).json({ error: 'Add a title, valid HTTPS or same-site image URL and alternative text. Display order must be from 0 to 9999.' });
   const sql = getDb();
-  const rows = await sql`INSERT INTO gallery_items (site_id, title, image_url, alt_text, caption, category, status, sort_order) VALUES (${SITE_ID}, ${item.title}, ${item.imageUrl}, ${item.altText}, ${item.caption}, ${item.category}, ${item.status}, ${item.sortOrder}) RETURNING id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt"`;
-  res.status(201).json({ item: rows[0] });
+  try {
+    const rows = await sql`INSERT INTO tele_gallery_items (site_id, title, image_url, alt_text, caption, category, status, sort_order) VALUES (${SITE_ID}, ${item.title}, ${item.imageUrl}, ${item.altText}, ${item.caption}, ${item.category}, ${item.status}, ${item.sortOrder}) RETURNING id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt"`;
+    res.status(201).json({ item: rows[0] });
+  } catch (error) {
+    console.error('gallery item create failed', error);
+    res.status(503).json({ error: databaseErrorMessage(error, 'Could not save the gallery item.') });
+  }
 }));
 app.put('/api/admin/gallery/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
   const id = String(req.params.id || '');
@@ -703,26 +858,31 @@ app.put('/api/admin/gallery/:id', csrfGuard, adminGuard, asyncRoute(async (req, 
   const item = galleryPayload(req.body || {});
   if (!validGalleryPayload(item)) return res.status(400).json({ error: 'Add a title, valid HTTPS or same-site image URL and alternative text. Display order must be from 0 to 9999.' });
   const sql = getDb();
-  const rows = await sql`UPDATE gallery_items SET title = ${item.title}, image_url = ${item.imageUrl}, alt_text = ${item.altText}, caption = ${item.caption}, category = ${item.category}, status = ${item.status}, sort_order = ${item.sortOrder}, updated_at = now() WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt"`;
-  if (!rows.length) return res.status(404).json({ error: 'That gallery item was not found.' });
-  res.json({ item: rows[0] });
+  try {
+    const rows = await sql`UPDATE tele_gallery_items SET title = ${item.title}, image_url = ${item.imageUrl}, alt_text = ${item.altText}, caption = ${item.caption}, category = ${item.category}, status = ${item.status}, sort_order = ${item.sortOrder}, updated_at = now() WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt"`;
+    if (!rows.length) return res.status(404).json({ error: 'That gallery item was not found.' });
+    res.json({ item: rows[0] });
+  } catch (error) {
+    console.error('gallery item update failed', error);
+    res.status(503).json({ error: databaseErrorMessage(error, 'Could not update the gallery item.') });
+  }
 }));
 app.delete('/api/admin/gallery/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
   const id = String(req.params.id || '');
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid gallery item id.' });
   const sql = getDb();
-  const rows = await sql`DELETE FROM gallery_items WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id`;
+  const rows = await sql`DELETE FROM tele_gallery_items WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id`;
   if (!rows.length) return res.status(404).json({ error: 'That gallery item was not found.' });
   res.json({ ok: true });
 }));
 app.get('/api/admin/appointments', adminGuard, asyncRoute(async (_req, res) => {
   const sql = getDb();
-  const rows = await sql`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, client.id AS "clientId", note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM appointments AS appointment LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id LEFT JOIN consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= (${localToday()}::date - interval '90 days')::date AND appointment.appointment_date <= (${localToday()}::date + interval '90 days')::date ORDER BY appointment.appointment_date ASC, appointment.appointment_time ASC LIMIT 300`;
+  const rows = await sql`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, client.id AS "clientId", note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM tele_appointments AS appointment LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id LEFT JOIN tele_consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= (${localToday()}::date - interval '90 days')::date AND appointment.appointment_date <= (${localToday()}::date + interval '90 days')::date ORDER BY appointment.appointment_date ASC, appointment.appointment_time ASC LIMIT 300`;
   res.json({ appointments: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
 }));
 app.get('/api/admin/payments/unpaid', adminGuard, asyncRoute(async (_req, res) => {
   const sql = getDb();
-  const rows = await sql`SELECT appointment.id, appointment.name, client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username, appointment.service, appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.created_at AS "createdAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time FROM appointments AS appointment LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE appointment.site_id = ${SITE_ID} AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) ORDER BY appointment.created_at ASC LIMIT 300`;
+  const rows = await sql`SELECT appointment.id, appointment.name, client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username, appointment.service, appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.created_at AS "createdAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time FROM tele_appointments AS appointment LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE appointment.site_id = ${SITE_ID} AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM tele_appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) ORDER BY appointment.created_at ASC LIMIT 300`;
   res.json({ bookings: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
 }));
 app.patch('/api/admin/payments/unpaid/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
@@ -730,14 +890,14 @@ app.patch('/api/admin/payments/unpaid/:id', csrfGuard, adminGuard, asyncRoute(as
   if (!/^[0-9a-f-]{36}$/i.test(id) || !['received', 'release'].includes(action)) return res.status(400).json({ error: 'Choose whether payment was received or the booking should be released.' });
   const sql = getDb();
   const rows = action === 'received'
-    ? await sql`UPDATE appointments AS appointment SET payment_status = 'approved', payment_manual_received_at = now() WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`
-    : await sql`UPDATE appointments AS appointment SET status = 'cancelled' WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`;
+    ? await sql`UPDATE tele_appointments AS appointment SET payment_status = 'approved', payment_manual_received_at = now() WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM tele_appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`
+    : await sql`UPDATE tele_appointments AS appointment SET status = 'cancelled' WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM tele_appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) RETURNING appointment.id, appointment.status, appointment.payment_status AS "paymentStatus"`;
   if (!rows.length) return res.status(409).json({ error: 'This booking is no longer awaiting payment proof. Refresh the payment list.' });
   res.json({ appointment: rows[0], slotReleased: action === 'release' });
 }));
 app.get('/api/admin/payments', adminGuard, asyncRoute(async (_req, res) => {
   const sql = getDb();
-  const rows = await sql`SELECT proof.id, proof.payment_method AS "paymentMethod", proof.review_status AS status, proof.uploaded_at AS "uploadedAt", appointment.id AS "appointmentId", appointment.name, appointment.service, appointment.status AS "appointmentStatus", appointment.payment_status AS "appointmentPaymentStatus", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, appointment.created_at AS "bookedAt", client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username FROM appointment_payment_proofs AS proof JOIN appointments AS appointment ON appointment.id = proof.appointment_id AND appointment.site_id = proof.site_id LEFT JOIN client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE proof.site_id = ${SITE_ID} ORDER BY proof.uploaded_at DESC LIMIT 300`;
+  const rows = await sql`SELECT proof.id, proof.payment_method AS "paymentMethod", proof.review_status AS status, proof.uploaded_at AS "uploadedAt", appointment.id AS "appointmentId", appointment.name, appointment.service, appointment.status AS "appointmentStatus", appointment.payment_status AS "appointmentPaymentStatus", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, appointment.created_at AS "bookedAt", client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username FROM tele_appointment_payment_proofs AS proof JOIN tele_appointments AS appointment ON appointment.id = proof.appointment_id AND appointment.site_id = proof.site_id LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE proof.site_id = ${SITE_ID} ORDER BY proof.uploaded_at DESC LIMIT 300`;
   res.json({ payments: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
 }));
 app.get('/api/internal/payment-sweeps', asyncRoute(async (req, res) => {
@@ -754,7 +914,7 @@ app.get('/api/admin/payment-proofs/:id/image', adminGuard, asyncRoute(async (req
   const id = String(req.params.id || '');
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid payment proof id.' });
   const sql = getDb();
-  const rows = await sql`SELECT image_mime_type AS "mimeType", image_base64 AS image FROM appointment_payment_proofs WHERE site_id = ${SITE_ID} AND id = ${id}::uuid LIMIT 1`;
+  const rows = await sql`SELECT image_mime_type AS "mimeType", image_base64 AS image FROM tele_appointment_payment_proofs WHERE site_id = ${SITE_ID} AND id = ${id}::uuid LIMIT 1`;
   if (!rows.length) return res.status(404).json({ error: 'Payment proof not found.' });
   const mimeType = PAYMENT_PROOF_MIME_TYPES.includes(rows[0].mimeType) ? rows[0].mimeType : 'application/octet-stream';
   res.setHeader('Content-Type', mimeType);
@@ -768,8 +928,8 @@ app.patch('/api/admin/payment-proofs/:id', csrfGuard, adminGuard, asyncRoute(asy
   if (!/^[0-9a-f-]{36}$/i.test(id) || !['approved', 'rejected'].includes(decision)) return res.status(400).json({ error: 'Choose whether to approve or reject this payment proof.' });
   const sql = getDb();
   const rows = decision === 'approved'
-    ? await sql`WITH reviewed AS (UPDATE appointment_payment_proofs AS proof SET review_status = 'approved', reviewed_at = now() FROM appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), saved AS (UPDATE appointments AS appointment SET payment_status = 'approved' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN saved ON saved.id = reviewed.appointment_id`
-    : await sql`WITH reviewed AS (UPDATE appointment_payment_proofs AS proof SET review_status = 'rejected', reviewed_at = now() FROM appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), released AS (UPDATE appointments AS appointment SET payment_status = 'rejected', status = 'cancelled' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN released ON released.id = reviewed.appointment_id`;
+    ? await sql`WITH reviewed AS (UPDATE tele_appointment_payment_proofs AS proof SET review_status = 'approved', reviewed_at = now() FROM tele_appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), saved AS (UPDATE tele_appointments AS appointment SET payment_status = 'approved' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN saved ON saved.id = reviewed.appointment_id`
+    : await sql`WITH reviewed AS (UPDATE tele_appointment_payment_proofs AS proof SET review_status = 'rejected', reviewed_at = now() FROM tele_appointments AS appointment WHERE proof.site_id = ${SITE_ID} AND proof.id = ${id}::uuid AND proof.review_status = 'pending_review' AND appointment.site_id = proof.site_id AND appointment.id = proof.appointment_id AND appointment.status <> 'cancelled' RETURNING proof.id, proof.appointment_id), released AS (UPDATE tele_appointments AS appointment SET payment_status = 'rejected', status = 'cancelled' FROM reviewed WHERE appointment.site_id = ${SITE_ID} AND appointment.id = reviewed.appointment_id RETURNING appointment.id) SELECT reviewed.id FROM reviewed JOIN released ON released.id = reviewed.appointment_id`;
   if (!rows.length) return res.status(409).json({ error: 'This payment proof was already reviewed or the consultation is no longer active.' });
   res.json({ proof: { id: rows[0].id, status: decision }, slotReleased: decision === 'rejected' });
 }));
@@ -779,14 +939,14 @@ app.patch('/api/admin/appointments/:id', csrfGuard, adminGuard, asyncRoute(async
   if (!/^[0-9a-f-]{36}$/i.test(id) || !['requested', 'confirmed', 'cancelled'].includes(status)) return res.status(400).json({ error: 'Invalid appointment update.' });
   const sql = getDb();
   if (status === 'cancelled') {
-    const rows = await sql`UPDATE appointments SET status = 'cancelled' WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND (appointment_date + appointment_time) AT TIME ZONE ${siteTimeZone} > now() + interval '24 hours' RETURNING id, status`;
+    const rows = await sql`UPDATE tele_appointments SET status = 'cancelled' WHERE site_id = ${SITE_ID} AND id = ${id}::uuid AND (appointment_date + appointment_time) AT TIME ZONE ${siteTimeZone} > now() + interval '24 hours' RETURNING id, status`;
     if (!rows.length) {
-      const exists = await sql`SELECT id FROM appointments WHERE site_id = ${SITE_ID} AND id = ${id}::uuid LIMIT 1`;
+      const exists = await sql`SELECT id FROM tele_appointments WHERE site_id = ${SITE_ID} AND id = ${id}::uuid LIMIT 1`;
       return exists.length ? res.status(409).json({ error: 'Owner cancellations must be made at least 24 hours before the appointment.' }) : res.status(404).json({ error: 'That appointment was not found.' });
     }
     return res.json({ appointment: rows[0] });
   }
-  const rows = await sql`UPDATE appointments SET status = ${status} WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id, status`;
+  const rows = await sql`UPDATE tele_appointments SET status = ${status} WHERE site_id = ${SITE_ID} AND id = ${id}::uuid RETURNING id, status`;
   if (!rows.length) return res.status(404).json({ error: 'That appointment was not found.' });
   res.json({ appointment: rows[0] });
 }));
@@ -795,10 +955,10 @@ app.put('/api/admin/appointments/:id/note', csrfGuard, adminGuard, asyncRoute(as
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid appointment id.' });
   const sql = getDb();
   if (!noteBody) {
-    await sql`DELETE FROM consultation_notes WHERE site_id = ${SITE_ID} AND appointment_id = ${id}::uuid`;
+    await sql`DELETE FROM tele_consultation_notes WHERE site_id = ${SITE_ID} AND appointment_id = ${id}::uuid`;
     return res.json({ note: null });
   }
-  const rows = await sql`INSERT INTO consultation_notes (site_id, appointment_id, client_account_id, note_body) SELECT ${SITE_ID}, appointment.id, appointment.client_account_id, ${noteBody} FROM appointments AS appointment WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.client_account_id IS NOT NULL ON CONFLICT (site_id, appointment_id) DO UPDATE SET client_account_id = EXCLUDED.client_account_id, note_body = EXCLUDED.note_body, updated_at = now() RETURNING note_body AS "noteBody", updated_at AS "noteUpdatedAt"`;
+  const rows = await sql`INSERT INTO tele_consultation_notes (site_id, appointment_id, client_account_id, note_body) SELECT ${SITE_ID}, appointment.id, appointment.client_account_id, ${noteBody} FROM tele_appointments AS appointment WHERE appointment.site_id = ${SITE_ID} AND appointment.id = ${id}::uuid AND appointment.client_account_id IS NOT NULL ON CONFLICT (site_id, appointment_id) DO UPDATE SET client_account_id = EXCLUDED.client_account_id, note_body = EXCLUDED.note_body, updated_at = now() RETURNING note_body AS "noteBody", updated_at AS "noteUpdatedAt"`;
   if (!rows.length) return res.status(400).json({ error: 'This older appointment has no linked client account, so it cannot receive a private account note.' });
   res.json({ note: rows[0] });
 }));
@@ -806,7 +966,7 @@ app.put('/api/site', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
   const config = cleanSiteConfig(req.body || {});
   if (!config.businessName || (config.email && !/^\S+@\S+\.\S+$/.test(config.email))) return res.status(400).json({ error: 'Check the practice name and contact email.' });
   const sql = getDb();
-  const rows = await sql`INSERT INTO sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(config)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now() RETURNING config`;
+  const rows = await sql`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(config)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now() RETURNING config`;
   res.json({ config: rows[0].config });
 }));
 
