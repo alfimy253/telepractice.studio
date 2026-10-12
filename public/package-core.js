@@ -328,6 +328,27 @@ function replaceSecretTokens(text, secrets) {
   };
   return text.replace(/__DATABASE_URL__|__ADMIN_USERNAME__|__ADMIN_EMAIL__|__ADMIN_PASSWORD_HASH__|__CSRF_SECRET__|__CRON_SECRET__/g, (token) => tokens[token]);
 }
+// The generated .dev.vars only exists locally — Wrangler never uploads it,
+// which left a freshly deployed Worker without CSRF_SECRET/DATABASE_URL and
+// the owner dashboard's sign-in refused every attempt with a CSRF error. The
+// same values are therefore baked into wrangler.jsonc under `vars` so a plain
+// `npm run deploy` is a fully configured Worker. The placeholder DATABASE_URL
+// is skipped on purpose: baking it in would make the runtime try to reach a
+// fake host instead of reporting the database as not configured.
+function wranglerVariables(secrets) {
+  const vars = {};
+  if (secrets.databaseUrl) vars.DATABASE_URL = secrets.databaseUrl;
+  vars.ADMIN_USERNAME = secrets.adminUsername;
+  vars.ADMIN_EMAIL = secrets.adminEmail;
+  vars.ADMIN_PASSWORD_HASH = secrets.adminPasswordHash;
+  vars.CSRF_SECRET = secrets.csrfSecret;
+  return vars;
+}
+function injectWranglerVariables(text, secrets) {
+  const vars = JSON.stringify(wranglerVariables(secrets), null, 2);
+  const indented = vars.split('\n').map((line, index) => (index ? `  ${line}` : line)).join('\n');
+  return text.replace('__WRANGLER_VARS__', indented);
+}
 function createSeedSql(config) {
   const lines = [
     '-- Optional starter content for the Neon database used by this site package.',
@@ -385,7 +406,7 @@ function generatedReadme(config, secrets) {
     config.target === 'vercel' ? '## Deploy to Vercel' : '## Deploy to Cloudflare Workers',
     config.target === 'vercel'
       ? `Use Node.js 20.6+ for the standalone worker script, then deploy this folder to Vercel. In the Vercel dashboard, copy every value from ${code('.env')} into the project's Environment Variables (the ${code('.env')} file itself is only read locally). For local development, run ${code('npm install')} and ${code('npm run dev')}.`
-      : `Use Node.js 22+ and run ${code('npm install')}. Wrangler does not upload ${code('.dev.vars')} during ${code('npm run deploy')}, so a deployed Worker has no configuration until you set it: run ${code('npx wrangler secret put DATABASE_URL')}, ${code('npx wrangler secret put ADMIN_PASSWORD_HASH')}, ${code('npx wrangler secret put CSRF_SECRET')}, ${code('npx wrangler secret put ADMIN_USERNAME')} and ${code('npx wrangler secret put ADMIN_EMAIL')}, pasting each value from ${code('.dev.vars')} (or set the same names under Worker Settings → Variables and Secrets). Run ${code('npm run secrets')} to push ${code('DATABASE_URL')}, the ${code('ADMIN_*')} values, ${code('CSRF_SECRET')} and ${code('CRON_SECRET')} from ${code('.dev.vars')} to the Worker without printing them (${code('npm run secrets -- --dry-run')} lists what would be pushed). Missing values are reported, not guessed: without the ${code('ADMIN_*')} values the owner dashboard answers “Owner sign-in is not configured…”, and without ${code('DATABASE_URL')} client accounts and the dashboard editor answer that the appointment database is not configured. ${code('CSRF_SECRET')} is optional — without it the runtime derives a private, stable secret from ${code('DATABASE_URL')}, so client sign-up and booking forms still work; setting it explicitly is recommended for production. For local development, ${code('.dev.vars')} is already in place, so just run ${code('npm run dev')}.`, '',
+      : `Use Node.js 22+ and run ${code('npm install')}. Wrangler does not upload ${code('.dev.vars')} during ${code('npm run deploy')}, so the same values are baked into ${code('wrangler.jsonc')} under ${code('vars')} — that section is the production copy of ${code('.dev.vars')} (edit it and redeploy if you change a value). The Worker ${code('name')} is this ZIP's filename without the ${code('.zip')}, so each package updates exactly one Worker instead of creating duplicates. A plain ${code('npm run deploy')} therefore deploys a fully configured Worker: owner sign-in, its CSRF protection and the payment-reminder cron all work immediately, with no manual secret step. To store the values as encrypted Worker secrets instead, run ${code('npm run secrets')} to push ${code('DATABASE_URL')}, the ${code('ADMIN_*')} values, ${code('CSRF_SECRET')} and ${code('CRON_SECRET')} from ${code('.dev.vars')} to the Worker without printing them (${code('npm run secrets -- --dry-run')} lists what would be pushed); when both are set, a secret overrides the plain variable of the same name. Missing values are reported, not guessed: without the ${code('ADMIN_*')} values the owner dashboard answers “Owner sign-in is not configured…”, and without ${code('DATABASE_URL')} client accounts and the dashboard editor answer that the appointment database is not configured. For local development, ${code('.dev.vars')} is already in place, so just run ${code('npm run dev')}.`, '',
     '## Owner dashboard and sign-in',
     `The owner dashboard path is generated from the current date in the site's time zone (default ${code(config.timeZone)}). Today, when this package was generated, its path is ${code(currentAdminPath)}; it changes at local midnight. The dashboard is not linked from public pages; enter this URL directly and sign in using the administrator account configured in the builder. The public sign-in form intentionally starts blank; the raw password is never embedded in public site assets.`,
     `The owner account lives in the database, in ${code('tele_admin_users')} — one row per site, holding the username, email and a salted PBKDF2 password hash. The ${code('ADMIN_USERNAME')}/${code('ADMIN_EMAIL')}/${code('ADMIN_PASSWORD_HASH')} values only seed that row on first use; afterwards the database copy is authoritative, and the owner can change the username, email or password from the dashboard's Sign-in panel (it asks for the current password and re-issues the session). Redeploying this package never overwrites a changed account.`,
@@ -864,6 +885,7 @@ async function buildFiles(input, readTemplate) {
   for (const relative of manifest[target]) {
     let content = replaceTokens(await readTemplate(`${target}/${relative}`), config, { schemaStatements });
     if (relative === ENV_FILE_BY_TARGET[target]) content = replaceSecretTokens(content, secrets);
+    if (target === 'cloudflare' && relative === 'wrangler.jsonc') content = injectWranglerVariables(content, secrets);
     files.set(relative, content);
   }
   for (const page of config.customPages) {

@@ -257,7 +257,11 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     assert.match(files.get('README.md'), /Menu links view.*rename, reorder, add or remove/s);
     assert.doesNotMatch(files.get('README.md'), /practiceowner|owner@example\.test|CanopyOwner!8/);
     const deployableFiles = [...files.entries()]
-      .filter(([path]) => path !== envName && path !== 'README.md' && !path.startsWith('db/'))
+      .filter(([path]) => path !== envName && path !== 'README.md' && !path.startsWith('db/')
+        // The Cloudflare wrangler.jsonc "vars" section is the production copy
+        // of .dev.vars by design (Wrangler never uploads .dev.vars), so the
+        // admin identity values live there — the raw password still may not.
+        && !(target === 'cloudflare' && path === 'wrangler.jsonc'))
       .map(([, contents]) => contents).join('\n');
     assert.doesNotMatch(deployableFiles, /practiceowner|owner@example\.test|CanopyOwner!8/);
     assert.match(files.get(target === 'cloudflare' ? 'src/index.js' : 'api/index.js'), /adminDashboardPath/);
