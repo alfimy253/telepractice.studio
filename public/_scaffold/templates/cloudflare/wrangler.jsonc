@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "__SITE_ID__-practice-site",
+  "name": "__SITE_ID__-cloudflare",
   "main": "src/index.js",
   "compatibility_date": "2025-10-08",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
@@ -10,6 +10,11 @@
     "directory": "./public",
     "run_worker_first": true
   },
+  // The production copy of .dev.vars. Wrangler never uploads .dev.vars during
+  // deploy, so the same values are baked in here instead: `npm run deploy` is
+  // a fully configured Worker and the owner dashboard's CSRF protection works
+  // immediately after deploy.
+  "vars": __WRANGLER_VARS__,
   "observability": {
     "enabled": true
   }

@@ -123,6 +123,78 @@ test('packaged manifest describes the chosen target without claiming a different
   }
 });
 
+// Strips // and /* */ comments outside of string literals so the generated
+// wrangler.jsonc can be validated as plain JSON.
+function stripJsoncComments(text) {
+  let out = '';
+  let inString = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    const next = text[index + 1];
+    if (inString) {
+      out += character;
+      if (character === '\\') { out += next ?? ''; index += 1; continue; }
+      if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') { inString = true; out += character; continue; }
+    if (character === '/' && next === '/') {
+      while (index < text.length && text[index] !== '\n') index += 1;
+      out += '\n';
+      continue;
+    }
+    if (character === '/' && next === '*') {
+      index += 2;
+      while (index < text.length && !(text[index] === '*' && text[index + 1] === '/')) index += 1;
+      index += 1;
+      continue;
+    }
+    out += character;
+  }
+  return out;
+}
+function devVarValue(envText, name) {
+  const match = new RegExp(`^${name}="([^"]*)"$`, 'm').exec(envText);
+  return match ? match[1] : null;
+}
+
+test('the Cloudflare package bakes .dev.vars into wrangler.jsonc so a plain deploy is configured', async () => {
+  const input = { ...baseInput, databaseUrl: 'postgres://user:pass@pooler.neon.tech/dbname?sslmode=require' };
+  const { buffer, filename } = await generateBundle(input, readTemplate);
+  const files = zipEntries(buffer);
+  const config = JSON.parse(stripJsoncComments(files.get('wrangler.jsonc')));
+  // The Worker name is the ZIP filename minus .zip, so each package updates
+  // exactly one Worker instead of creating duplicate deployments.
+  assert.equal(config.name, filename.replace(/\.zip$/, ''), 'worker name must equal the zip filename minus .zip');
+  assert.match(config.name, /^[a-z][a-z0-9-]{0,127}$/, 'worker name must satisfy the Cloudflare naming rules');
+  const env = files.get('.dev.vars');
+  for (const name of ['DATABASE_URL', 'ADMIN_USERNAME', 'ADMIN_EMAIL', 'ADMIN_PASSWORD_HASH', 'CSRF_SECRET']) {
+    const expected = devVarValue(env, name);
+    assert.ok(expected, `.dev.vars carries no ${name}`);
+    assert.equal(config.vars?.[name], expected, `wrangler.jsonc vars.${name} must mirror .dev.vars`);
+  }
+  assert.equal(config.vars.ADMIN_USERNAME, 'practiceowner');
+  assert.equal(config.vars.ADMIN_EMAIL, 'owner@example.test');
+  assert.match(config.vars.ADMIN_PASSWORD_HASH, /^pbkdf2\$/);
+  assert.equal(config.vars.CSRF_SECRET.length, 64, 'CSRF_SECRET must be the freshly generated 64-hex secret');
+  assert.match(config.vars.DATABASE_URL, /^postgres:\/\/user:pass@pooler\.neon\.tech\/dbname$/, 'sslmode must be normalized out');
+  // The raw password must never be baked into the deployable configuration.
+  assert.doesNotMatch(files.get('wrangler.jsonc'), /CanopyOwner!8/, 'raw password leaked into wrangler.jsonc');
+  assert.match(JSON.parse(files.get('package.json')).name, /^[a-z0-9][a-z0-9._-]*$/, 'package name must be a valid npm name');
+  assert.equal(JSON.parse(files.get('package.json')).name, config.name, 'package.json name should match the worker name');
+});
+
+test('the Cloudflare package omits a placeholder DATABASE_URL from wrangler.jsonc vars', async () => {
+  const files = await packageFiles('cloudflare');
+  const config = JSON.parse(stripJsoncComments(files.get('wrangler.jsonc')));
+  assert.ok(config.vars, 'wrangler.jsonc must carry a vars section');
+  assert.equal(config.vars.DATABASE_URL, undefined, 'the placeholder URL must not be baked into the deploy');
+  assert.match(files.get('.dev.vars'), /DATABASE_URL="postgresql:\/\/USER:PASSWORD@HOST\.neon\.tech\/DB"/,
+    '.dev.vars keeps the placeholder for local development');
+  assert.equal(config.vars.ADMIN_USERNAME, 'practiceowner');
+  assert.ok(config.vars.CSRF_SECRET, 'CSRF_SECRET must always be baked in so forms work after deploy');
+});
+
 test('every packaged runtime ships the shared libraries it imports', async () => {
   for (const target of ['cloudflare', 'vercel']) {
     const files = await packageFiles(target);
@@ -150,8 +222,11 @@ test('packages are reproducible: the payload timestamp anchors every generated d
     const b = zipEntries(second.buffer);
     assert.deepEqual([...a.keys()], [...b.keys()], `${target}: entry lists differ between builds`);
     // Only the env file may differ: each build mints fresh secrets and a fresh
-    // PBKDF2 salt. Every other entry must be byte-identical.
-    const differing = [...a.keys()].filter((name) => name !== envFile && a.get(name) !== b.get(name));
+    // PBKDF2 salt. For Cloudflare, wrangler.jsonc differs as well because its
+    // "vars" section carries the same freshly minted production values. Every
+    // other entry must be byte-identical.
+    const mintedEntries = new Set([envFile, ...(target === 'cloudflare' ? ['wrangler.jsonc'] : [])]);
+    const differing = [...a.keys()].filter((name) => !mintedEntries.has(name) && a.get(name) !== b.get(name));
     assert.deepEqual(differing, [], `${target}: these entries changed between identical builds`);
     const manifest = JSON.parse(a.get('manifest.json'));
     assert.equal(manifest.generatedAt, stamp, `${target}: the manifest stamp is not the payload stamp`);

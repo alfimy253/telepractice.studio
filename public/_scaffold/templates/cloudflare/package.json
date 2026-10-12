@@ -1,5 +1,5 @@
 {
-  "name": "__SITE_ID__-practice-site-cloudflare",
+  "name": "__SITE_ID__-cloudflare",
   "version": "1.0.0",
   "private": true,
   "type": "module",

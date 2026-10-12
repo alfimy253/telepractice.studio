@@ -98,8 +98,17 @@ test('browser-side package build through served templates matches the worker ZIP
       assert.equal(locally.get(name).size, entry.size, `${target}: ${name} size diverged`);
     }
     // Deterministic files must be byte-identical between both build paths.
-    for (const name of ['.gitignore', target === 'cloudflare' ? 'wrangler.jsonc' : 'vercel.json', 'db/schema.sql']) {
+    for (const name of ['.gitignore', 'db/schema.sql']) {
       assert.equal(locally.get(name).text, viaWorker.get(name).text, `${target}: ${name} content diverged`);
+    }
+    if (target === 'cloudflare') {
+      // wrangler.jsonc mints fresh "vars" secrets per build, so compare with
+      // that block masked — everything else must be byte-identical.
+      const withoutVars = (text) => text.replace(/"vars": \{[\s\S]*?\n  \},/, '"vars": {},');
+      assert.equal(withoutVars(locally.get('wrangler.jsonc').text), withoutVars(viaWorker.get('wrangler.jsonc').text),
+        `${target}: wrangler.jsonc content diverged outside the freshly minted vars values`);
+    } else {
+      assert.equal(locally.get('vercel.json').text, viaWorker.get('vercel.json').text, `${target}: vercel.json content diverged`);
     }
   }
 });
