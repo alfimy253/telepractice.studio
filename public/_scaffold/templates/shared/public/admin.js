@@ -9,13 +9,38 @@
   const $ = (id) => document.getElementById(id);
   const isSignedIn = () => signedIn;
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+  // Pages that should be hidden when the corresponding feature is off.
+  // Without this, the dashboard would show the blog, gallery, availability,
+  // appointments, and payments pages even on a build that disabled them —
+  // every write would still 404 from the server, but the operator would
+  // never see why.
+  const FEATURE_PAGE_IDS = { blog: 'blog', gallery: 'gallery', availability: 'availability', appointments: 'appointments', payments: 'payments' };
+  function pagesDisabledByFeatures(features = site.features) {
+    const disabled = new Set();
+    if (!features?.blog) disabled.add(FEATURE_PAGE_IDS.blog);
+    if (!features?.gallery) disabled.add(FEATURE_PAGE_IDS.gallery);
+    if (!features?.scheduling) {
+      disabled.add(FEATURE_PAGE_IDS.availability);
+      disabled.add(FEATURE_PAGE_IDS.appointments);
+      disabled.add(FEATURE_PAGE_IDS.payments);
+    }
+    return disabled;
+  }
   function showAdminPage(pageId) {
-    const activePage = ADMIN_PAGE_IDS.has(pageId) ? pageId : 'identity';
-    document.querySelectorAll('[data-admin-page]').forEach((page) => { page.hidden = page.dataset.adminPage !== activePage; });
+    const disabled = pagesDisabledByFeatures();
+    const fallback = ADMIN_PAGE_IDS.has(pageId) ? pageId : 'identity';
+    const requested = ADMIN_PAGE_IDS.has(fallback) ? fallback : 'identity';
+    const activePage = disabled.has(requested) ? 'identity' : requested;
+    document.querySelectorAll('[data-admin-page]').forEach((page) => {
+      const isActive = page.dataset.adminPage === activePage;
+      page.hidden = !isActive;
+    });
     document.querySelectorAll('[data-admin-page-link]').forEach((button) => {
-      const active = button.dataset.adminPageLink === activePage;
-      button.classList.toggle('active', active);
-      if (active) button.setAttribute('aria-current', 'page');
+      const isFeaturePage = button.dataset.adminPageLink in FEATURE_PAGE_IDS;
+      if (isFeaturePage) button.hidden = disabled.has(button.dataset.adminPageLink);
+      const isActive = button.dataset.adminPageLink === activePage;
+      button.classList.toggle('active', isActive);
+      if (isActive) button.setAttribute('aria-current', 'page');
       else button.removeAttribute('aria-current');
     });
     return activePage;
@@ -145,6 +170,12 @@
     });
     updateMenuLinkPositions();
   }
+  // Browser copy of `cleanMenuHref` from `lib/menu-links.js`, returning a
+  // boolean for the form-validity check. The two copies must stay
+  // byte-for-byte identical (only the return type differs) so an href that
+  // passes the server-side `cleanMenuLinks` check also passes the form
+  // validation here. The browser cannot import the lib because the
+  // generated ZIP ships `public/*.js` as static files.
   function safeMenuDestination(value) {
     const raw = String(value ?? '').trim();
     if (!raw || raw.length > 2048 || /[\u0000-\u001f\u007f]/.test(raw)) return false;
@@ -192,6 +223,9 @@
       if (response.ok) { const data = await response.json(); if (data.config) site = { ...site, ...data.config, features: { ...site.features, ...(data.config.features || {}) } }; }
     } catch (_) {}
     applyToForm(); previewTheme(); renderMenuLinks(site.menuLinks);
+    // Re-render the nav so disabled-feature pages disappear and the active
+    // page can fall back to "identity" if the URL still names a hidden one.
+    showAdminPage(window.location.hash.slice(1) || 'identity');
   }
   function fillOwnerAccount(session = {}) {
     const form = $('accountForm'); if (!form) return;
@@ -612,12 +646,45 @@
     try { const data = await api('/api/admin/payments'); renderPayments(data.payments || []); }
     catch (error) { $('paymentsCount').textContent = '0'; list.innerHTML = `<p class="empty-posts">${esc(error.message)} — refresh to try again.</p>`; }
   }
+  // Owner notification for cron drops: the sweep cancels the booking and
+  // stamps it in the same statement, so this list (fed by
+  // /api/admin/payments/dropped) is the owner's "a booking was just dropped"
+  // surface. The count badge doubles as the unread-style notification.
+  function renderDroppedBookings(bookings) {
+    const list = $('droppedBookingsList'); list.replaceChildren();
+    $('droppedBookingsCount').textContent = String(bookings.length);
+    if (!bookings.length) { const empty = document.createElement('p'); empty.className = 'empty-posts'; empty.textContent = 'No bookings have been dropped.'; list.appendChild(empty); return; }
+    bookings.forEach((booking) => {
+      const item = document.createElement('article'); item.className = 'payment-review-item';
+      const summary = document.createElement('div'); summary.className = 'payment-review-summary';
+      const person = document.createElement('span'); person.className = 'payment-review-person';
+      const name = document.createElement('strong'); name.textContent = `${booking.clientName || booking.name || 'Client'} · ${booking.username || 'Email unavailable'}`;
+      const detail = document.createElement('small');
+      const slotDate = booking.date ? new Date(`${String(booking.date).slice(0, 10)}T12:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }) : '';
+      detail.textContent = [slotDate, booking.timeLabel || booking.time, booking.service || 'Consultation', booking.phone].filter(Boolean).join(' · ');
+      person.append(name, detail);
+      const meta = document.createElement('div'); meta.className = 'payment-review-meta';
+      const method = document.createElement('span'); method.className = 'payment-review-status'; method.textContent = booking.paymentMethod === 'maya' ? 'Maya' : 'GCash';
+      const dropped = document.createElement('span'); dropped.className = 'payment-review-status payment-time-left needs-owner-review';
+      dropped.textContent = booking.droppedAt ? `Dropped ${new Date(booking.droppedAt).toLocaleString()} · no proof in 15 min` : 'Dropped · no proof in 15 min';
+      meta.append(method, dropped);
+      summary.append(person, meta);
+      item.appendChild(summary);
+      list.appendChild(item);
+    });
+  }
+  async function loadDroppedBookings() {
+    const list = $('droppedBookingsList');
+    if (!isSignedIn()) return;
+    try { const data = await api('/api/admin/payments/dropped'); renderDroppedBookings(data.bookings || []); }
+    catch (error) { $('droppedBookingsCount').textContent = '0'; list.innerHTML = `<p class="empty-posts">${esc(error.message)} — refresh to try again.</p>`; }
+  }
   async function loadPayments() {
     if (!isSignedIn()) return;
-    await Promise.all([loadUnpaidBookings(), loadPaymentsWithProof()]);
+    await Promise.all([loadUnpaidBookings(), loadPaymentsWithProof(), loadDroppedBookings()]);
   }
   function showPaymentTab(tab) {
-    const activeTab = tab === 'payments' ? 'payments' : 'unpaid';
+    const activeTab = ['payments', 'dropped'].includes(tab) ? tab : 'unpaid';
     document.querySelectorAll('[data-payment-tab]').forEach((button) => {
       const active = button.dataset.paymentTab === activeTab;
       button.classList.toggle('active', active); button.setAttribute('aria-selected', String(active));
@@ -812,6 +879,7 @@
       loadPayments();
     }));
     $('refreshUnpaidBookings').addEventListener('click', loadUnpaidBookings);
+    $('refreshDroppedBookings').addEventListener('click', loadDroppedBookings);
     $('refreshPayments').addEventListener('click', loadPaymentsWithProof);
     showPaymentTab('unpaid');
     $('availabilityMonth').addEventListener('change', loadAvailabilitySchedule);

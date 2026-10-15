@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
 import { createNeonClient } from '../db/connection.js';
-import { createAdminSession, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
+import { createAdminSession, PASSWORD_MAX, PASSWORD_MIN, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
 import { adminDashboardPath } from '../lib/admin-url.js';
 import { cleanMenuLinks } from '../lib/menu-links.js';
 import { normalizeSiteTheme } from '../lib/site-theme.js';
@@ -81,7 +81,15 @@ function ensureSiteRow() {
 // The owner account lives in tele_admin_users. The ADMIN_* environment values
 // seed that row on first use; after that the database copy is authoritative, so
 // the owner can change the username, email or password in the dashboard without
-// touching the deployment environment. An existing row is never overwritten.
+// touching the deployment environment.
+//
+// A redeploy refreshes the row only while it is still the untouched seed, which
+// is what `updated_at = created_at` identifies: the dashboard's account panel
+// stamps `updated_at = now()` on every owner change. Without that, regenerating
+// the package with a new builder password (the builder clears the field after
+// each download, so a second ZIP always carries a different one) left the first
+// build's hash in place and the owner's new password was rejected as wrong.
+// Once the owner has changed anything, the seed never overwrites it again.
 let adminUserReady = null;
 function ensureAdminUser() {
   if (!adminUserReady) {
@@ -89,8 +97,8 @@ function ensureAdminUser() {
     adminUserReady = (async () => {
       await ensureSiteRow();
       if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD_HASH) return;
-      await client`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${String(process.env.ADMIN_USERNAME).trim()}, ${String(process.env.ADMIN_EMAIL).trim()}, ${String(process.env.ADMIN_PASSWORD_HASH)}) ON CONFLICT (site_id) DO NOTHING`;
-    })().catch((cause) => { adminUserReady = null; throw cause; });
+      await client`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${String(process.env.ADMIN_USERNAME).trim()}, ${String(process.env.ADMIN_EMAIL).trim()}, ${String(process.env.ADMIN_PASSWORD_HASH)}) ON CONFLICT (site_id) DO UPDATE SET username = EXCLUDED.username, email = EXCLUDED.email, password_hash = EXCLUDED.password_hash WHERE tele_admin_users.updated_at = tele_admin_users.created_at`;
+    })().catch((cause) => { adminUserReady = null; debugError('owner account seed failed', cause); throw cause; });
   }
   return adminUserReady;
 }
@@ -123,6 +131,17 @@ const clientSessionTtlSeconds = 30 * 24 * 60 * 60;
 const passwordIterations = 210000;
 const siteTimeZone = DEFAULT_CONFIG.timeZone || 'Asia/Manila';
 const b64url = (value) => Buffer.from(value).toString('base64url');
+// Diagnostic logging. The default behaviour prints a single short label
+// (category + safe error name) so a server log never carries a raw password or
+// a hash. Set `DEBUG_OWNER=1` (or `WORKER_DEBUG=1`) in the Vercel environment
+// to dump the full cause object, which is useful in local development or when
+// an operator needs the stack trace to fix an issue.
+function debugError(label, cause) {
+  const flag = String(process.env.DEBUG_OWNER || process.env.WORKER_DEBUG || '').toLowerCase();
+  const verbose = flag === '1' || flag === 'true' || flag === 'yes';
+  if (verbose) console.error(label, cause);
+  else console.error(label, cause?.name || cause?.code || 'unknown');
+}
 function makeCsrfToken() {
   const nonce = b64url(randomBytes(24));
   const secret = csrfSecret();
@@ -148,10 +167,33 @@ function cookieValue(header, name) {
   }
   return '';
 }
+// PASSWORD_MIN / PASSWORD_MAX are imported from lib/admin-security.js so this
+// file, the Cloudflare runtime and verifyPasswordHash() all read the same two
+// numbers. Password length is 8–25 for every sign-in form in this app: the
+// owner sign-in, the owner's "change password" panel, the public client
+// sign-up, and the client sign-in. The owner policy still demands one lowercase
+// letter, one uppercase letter, one number and one symbol; the client policy
+// only enforces length.
 function ownerPasswordProblem(value) {
-  if (value.length < 12 || value.length > 128) return 'The password must be 12–128 characters long.';
+  if (value.length < PASSWORD_MIN || value.length > PASSWORD_MAX) return `The password must be ${PASSWORD_MIN}–${PASSWORD_MAX} characters long.`;
   if (!/[a-z]/.test(value) || !/[A-Z]/.test(value) || !/[0-9]/.test(value) || !/[^A-Za-z0-9\s]/.test(value)) {
     return 'The password must include a lowercase letter, an uppercase letter, a number and a symbol.';
+  }
+  return '';
+}
+// Client sign-up validation, one message per field. Returns '' when the form is
+// complete. Client passwords follow the same policy as the owner's: 8–25
+// characters with one lowercase letter, one uppercase letter, one number
+// and one symbol.
+function registerProblem(name, email, phone, password) {
+  if (!name) return 'Enter your name so the practice knows who the consultation is for.';
+  if (!email) return 'Enter an email address — it is how you sign in to your account.';
+  if (!/^\S+@\S+\.\S+$/.test(email)) return 'That email address looks incomplete. Include the full domain, for example name@example.com.';
+  if (!phone) return 'Enter a phone number the practice can reach you on.';
+  if (password.length < PASSWORD_MIN) return `Choose a password of at least ${PASSWORD_MIN} characters (yours has ${password.length}).`;
+  if (password.length > PASSWORD_MAX) return `Choose a password of ${PASSWORD_MAX} characters or fewer.`;
+  if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/[0-9]/.test(password) || !/[^A-Za-z0-9\s]/.test(password)) {
+    return 'Choose a password with at least one lowercase letter, one uppercase letter, one number and one symbol.';
   }
   return '';
 }
@@ -168,7 +210,7 @@ async function adminCredentials() {
     await ensureAdminUser();
     const rows = await getDb()`SELECT username, email, password_hash AS "passwordHash" FROM tele_admin_users WHERE site_id = ${SITE_ID} LIMIT 1`;
     if (rows[0]) return { username: String(rows[0].username), email: String(rows[0].email), passwordHash: String(rows[0].passwordHash), source: 'database' };
-  } catch (cause) { console.error('owner account read failed', cause); }
+  } catch (cause) { debugError('owner account read failed', cause); }
   return environmentComplete ? fromEnvironment : null;
 }
 async function adminConfigured() {
@@ -197,14 +239,26 @@ async function makePasswordHash(password) {
   const salt = randomBytes(16).toString('base64url');
   return `pbkdf2$${passwordIterations}$${salt}$${await passwordDigest(password, salt)}`;
 }
+// Verified against when a sign-in email has no account, so the login route
+// always pays the PBKDF2 cost and response timing cannot reveal whether an
+// account exists for that email. It is not a credential: the comparison
+// result is ANDed with the account lookup before any session is issued.
+const DUMMY_PASSWORD_HASH = `pbkdf2$${passwordIterations}$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`;
 async function passwordMatches(password, encoded) {
   const [algorithm, roundsText, salt, expectedText, ...rest] = String(encoded || '').split('$');
   const rounds = Number(roundsText);
-  if (algorithm !== 'pbkdf2' || rest.length || !salt || !expectedText || !Number.isInteger(rounds) || rounds < 100000 || rounds > 1000000) return false;
+  const hashWellFormed = algorithm === 'pbkdf2' && !rest.length && Boolean(salt) && Boolean(expectedText)
+    && Number.isInteger(rounds) && rounds >= 100000 && rounds <= 1000000;
+  // Constant-time discipline: always derive and always run timingSafeEqual,
+  // even for a malformed stored hash. Dummy parameters stand in when the
+  // real ones are unusable; the guard still decides the result. The digest
+  // length is fixed at 32 bytes, so the length pre-check leaks nothing about
+  // the stored hash — it only keeps timingSafeEqual from throwing.
   try {
-    const actual = Buffer.from(await passwordDigest(password, salt, rounds), 'base64url');
-    const expected = Buffer.from(expectedText, 'base64url');
-    return actual.length === expected.length && timingSafeEqual(actual, expected);
+    const actual = Buffer.from(await passwordDigest(password, hashWellFormed ? salt : 'AAAAAAAAAAAAAAAAAAAAAA', hashWellFormed ? rounds : passwordIterations), 'base64url');
+    const expected = hashWellFormed ? Buffer.from(expectedText, 'base64url') : Buffer.alloc(0);
+    const matches = actual.length === expected.length && timingSafeEqual(actual, expected);
+    return hashWellFormed && matches;
   } catch (_) { return false; }
 }
 async function sessionTokenHash(token) {
@@ -551,7 +605,11 @@ app.post('/api/auth/register', csrfGuard, asyncRoute(async (req, res) => {
   const email = cleanText(value.email, 120).toLowerCase();
   const phone = cleanText(value.phone, 30);
   const password = String(value.password || '');
-  if (!name || !/^\S+@\S+\.\S+$/.test(email) || !phone || password.length < 12 || password.length > 128) return res.status(400).json({ error: 'Enter your name, a valid email, phone number, and a password of at least 12 characters.' });
+  // One message per rejected field. A single combined message naming every
+  // field made a blank phone number or an email without a domain read as a
+  // password problem, which sent people re-typing a password that was fine.
+  const signupProblem = registerProblem(name, email, phone, password);
+  if (signupProblem) return res.status(400).json({ error: signupProblem });
   const passwordHash = await makePasswordHash(password);
   try {
     const sql = getDb();
@@ -569,10 +627,13 @@ app.post('/api/auth/login', csrfGuard, asyncRoute(async (req, res) => {
   if (!process.env.DATABASE_URL) return res.status(503).json({ error: 'Client accounts need a configured appointment database.' });
   const value = req.body || {};
   const email = cleanText(value.email, 120).toLowerCase(); const password = String(value.password || '');
-  if (!/^\S+@\S+\.\S+$/.test(email) || !password || password.length > 128) return res.status(400).json({ error: 'Enter a valid email and password.' });
+  if (!/^\S+@\S+\.\S+$/.test(email) || !password || password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) return res.status(400).json({ error: 'Enter a valid email and password.' });
   const sql = getDb();
   const rows = await sql`SELECT id, full_name AS name, email, phone, password_hash AS "passwordHash" FROM tele_client_accounts WHERE site_id = ${SITE_ID} AND email = ${email} LIMIT 1`;
-  if (!rows.length || !await passwordMatches(password, rows[0].passwordHash)) return res.status(401).json({ error: 'Email or password is incorrect.' });
+  // Always run the verification — against the dummy hash when the email is
+  // unknown — so login timing does not reveal whether an account exists.
+  const passwordOk = await passwordMatches(password, rows[0]?.passwordHash || DUMMY_PASSWORD_HASH);
+  if (!rows.length || !passwordOk) return res.status(401).json({ error: 'Email or password is incorrect.' });
   await createClientSession(req, res, rows[0]);
   res.json({ client: clientSummary(rows[0]) });
 }));
@@ -640,6 +701,10 @@ async function availabilityForMonth(month, filterDate = '') {
   return { month, published, hasTimes: slotRows.length > 0, totalSlots, bookedSlots, days: [...dayMap.values()], slots: upcomingRows.filter((row) => !row.booked).map((row) => ({ id: row.id, date: row.date, time: row.time, label: displayTime(row.time) })) };
 }
 app.get('/api/availability', asyncRoute(async (req, res) => {
+  // The appointment calendar is account-only: guests never see open slots
+  // (or, through the booking form, the GCash/Maya payment options).
+  const calendarClient = await currentClient(req);
+  if (!calendarClient) return res.status(401).json({ error: 'Sign in or create a client account to view the appointment calendar.' });
   const date = String(req.query.date || '');
   const month = String(req.query.month || (date ? date.slice(0, 7) : localToday().slice(0, 7)));
   if (!monthStart(month)) return res.status(400).json({ error: 'Choose a valid month.' });
@@ -711,10 +776,14 @@ app.post('/api/appointments', csrfGuard, asyncRoute(async (req, res) => {
   const value = req.body || {};
   const slotId = String(value.slotId || ''); const service = cleanText(value.service, 120); const context = cleanText(value.context, 100);
   const paymentMethod = ['gcash', 'maya'].includes(value.paymentMethod) ? value.paymentMethod : '';
-  if (!/^[0-9a-f-]{36}$/i.test(slotId) || !DEFAULT_CONFIG.services.includes(service) || !paymentMethod) return res.status(400).json({ error: 'Choose a valid open time, visit type and GCash or Maya payment method.' });
+    // The booking phone is required: it is the practice's fallback number
+    // if the video call or internet drops mid-consultation. The form
+    // sends it explicitly; the account phone is the fallback value.
+    const phone = cleanText(value.phone, 30) || String(client.phone || '').trim();
+  if (!/^[0-9a-f-]{36}$/i.test(slotId) || !DEFAULT_CONFIG.services.includes(service) || !paymentMethod || !phone) return res.status(400).json({ error: 'Choose a valid open time, visit type and GCash or Maya payment method, and enter a phone number for this consultation.' });
   try {
     const sql = getDb();
-    const rows = await sql`INSERT INTO tele_appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status, payment_method, payment_status, payment_due_at) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${client.phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed', ${paymentMethod}, 'awaiting_proof', now() + interval '15 minutes' FROM tele_consultation_slots AS slot JOIN tele_monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${siteTimeZone} > now() AND NOT EXISTS (SELECT 1 FROM tele_appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time, payment_due_at AS "paymentDueAt"`;
+    const rows = await sql`INSERT INTO tele_appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status, payment_method, payment_status, payment_due_at) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed', ${paymentMethod}, 'awaiting_proof', now() + interval '15 minutes' FROM tele_consultation_slots AS slot JOIN tele_monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${siteTimeZone} > now() AND NOT EXISTS (SELECT 1 FROM tele_appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time, payment_due_at AS "paymentDueAt"`;
     if (!rows.length) return res.status(409).json({ error: 'That time was just taken or is no longer available. Refresh the calendar and choose another.' });
     res.status(201).json({ ok: true, appointment: { ...rows[0], timeLabel: displayTime(rows[0].time), status: 'confirmed', paymentStatus: 'awaiting_proof', paymentMethod } });
   } catch (error) {
@@ -794,11 +863,13 @@ app.patch('/api/client/appointments/:id', csrfGuard, asyncRoute(async (req, res)
   res.json({ appointment: rows[0] });
 }));
 app.get('/api/admin/posts', adminGuard, asyncRoute(async (_req, res) => {
+  if (!DEFAULT_CONFIG.features?.blog) return res.status(404).json({ error: 'Blog is not enabled for this site.' });
   const sql = getDb();
   const rows = await sql`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.status, post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM tele_blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} ORDER BY post.created_at DESC LIMIT 100`;
   res.json({ posts: rows });
 }));
 app.post('/api/admin/posts', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.blog) return res.status(404).json({ error: 'Blog is not enabled for this site.' });
   const post = articlePostPayload(req.body || {});
   if (!post) return res.status(400).json({ error: 'Add a title and article body, plus a valid feature image. If you leave the feature image blank, add a gallery image with a URL and alt text.' });
   try {
@@ -812,6 +883,7 @@ app.post('/api/admin/posts', csrfGuard, adminGuard, asyncRoute(async (req, res) 
   }
 }));
 app.put('/api/admin/posts/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.blog) return res.status(404).json({ error: 'Blog is not enabled for this site.' });
   const id = String(req.params.id || '');
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid post id.' });
   const post = articlePostPayload(req.body || {});
@@ -828,6 +900,7 @@ app.put('/api/admin/posts/:id', csrfGuard, adminGuard, asyncRoute(async (req, re
   }
 }));
 app.delete('/api/admin/posts/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.blog) return res.status(404).json({ error: 'Blog is not enabled for this site.' });
   const id = String(req.params.id || '');
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid post id.' });
   const sql = getDb();
@@ -836,11 +909,13 @@ app.delete('/api/admin/posts/:id', csrfGuard, adminGuard, asyncRoute(async (req,
   res.json({ ok: true });
 }));
 app.get('/api/admin/gallery', adminGuard, asyncRoute(async (_req, res) => {
+  if (!DEFAULT_CONFIG.features?.gallery) return res.status(404).json({ error: 'Gallery is not enabled for this site.' });
   const sql = getDb();
   const rows = await sql`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM tele_gallery_items WHERE site_id = ${SITE_ID} ORDER BY sort_order ASC, created_at DESC LIMIT 100`;
   res.json({ items: rows });
 }));
 app.post('/api/admin/gallery', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.gallery) return res.status(404).json({ error: 'Gallery is not enabled for this site.' });
   const item = galleryPayload(req.body || {});
   if (!validGalleryPayload(item)) return res.status(400).json({ error: 'Add a title, valid HTTPS or same-site image URL and alternative text. Display order must be from 0 to 9999.' });
   const sql = getDb();
@@ -853,6 +928,7 @@ app.post('/api/admin/gallery', csrfGuard, adminGuard, asyncRoute(async (req, res
   }
 }));
 app.put('/api/admin/gallery/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.gallery) return res.status(404).json({ error: 'Gallery is not enabled for this site.' });
   const id = String(req.params.id || '');
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid gallery item id.' });
   const item = galleryPayload(req.body || {});
@@ -868,6 +944,7 @@ app.put('/api/admin/gallery/:id', csrfGuard, adminGuard, asyncRoute(async (req, 
   }
 }));
 app.delete('/api/admin/gallery/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.gallery) return res.status(404).json({ error: 'Gallery is not enabled for this site.' });
   const id = String(req.params.id || '');
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid gallery item id.' });
   const sql = getDb();
@@ -876,16 +953,29 @@ app.delete('/api/admin/gallery/:id', csrfGuard, adminGuard, asyncRoute(async (re
   res.json({ ok: true });
 }));
 app.get('/api/admin/appointments', adminGuard, asyncRoute(async (_req, res) => {
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.status(404).json({ error: 'Online appointments are not enabled.' });
   const sql = getDb();
   const rows = await sql`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, client.id AS "clientId", note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM tele_appointments AS appointment LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id LEFT JOIN tele_consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= (${localToday()}::date - interval '90 days')::date AND appointment.appointment_date <= (${localToday()}::date + interval '90 days')::date ORDER BY appointment.appointment_date ASC, appointment.appointment_time ASC LIMIT 300`;
   res.json({ appointments: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
 }));
 app.get('/api/admin/payments/unpaid', adminGuard, asyncRoute(async (_req, res) => {
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.status(404).json({ error: 'Online appointments are not enabled.' });
   const sql = getDb();
   const rows = await sql`SELECT appointment.id, appointment.name, client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username, appointment.service, appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.created_at AS "createdAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time FROM tele_appointments AS appointment LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE appointment.site_id = ${SITE_ID} AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM tele_appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) ORDER BY appointment.created_at ASC LIMIT 300`;
   res.json({ bookings: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
 }));
+app.get('/api/admin/payments/dropped', adminGuard, asyncRoute(async (_req, res) => {
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.status(404).json({ error: 'Online appointments are not enabled.' });
+  // Owner notification surface for cron drops: the sweep stamps
+  // payment_owner_attention_at at the moment it cancels, so this list is
+  // current as soon as the drop commits. Includes the booking phone so the
+  // owner can follow up with the client directly.
+  const sql = getDb();
+  const rows = await sql`SELECT appointment.id, appointment.name, client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username, appointment.phone, appointment.service, appointment.payment_method AS "paymentMethod", appointment.payment_owner_attention_at AS "droppedAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time FROM tele_appointments AS appointment LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE appointment.site_id = ${SITE_ID} AND appointment.status = 'cancelled' AND appointment.payment_status = 'expired' ORDER BY appointment.payment_owner_attention_at DESC NULLS LAST, appointment.created_at DESC LIMIT 50`;
+  res.json({ bookings: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
+}));
 app.patch('/api/admin/payments/unpaid/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.status(404).json({ error: 'Online appointments are not enabled.' });
   const id = String(req.params.id || ''); const action = String(req.body?.action || '');
   if (!/^[0-9a-f-]{36}$/i.test(id) || !['received', 'release'].includes(action)) return res.status(400).json({ error: 'Choose whether payment was received or the booking should be released.' });
   const sql = getDb();
@@ -896,6 +986,7 @@ app.patch('/api/admin/payments/unpaid/:id', csrfGuard, adminGuard, asyncRoute(as
   res.json({ appointment: rows[0], slotReleased: action === 'release' });
 }));
 app.get('/api/admin/payments', adminGuard, asyncRoute(async (_req, res) => {
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.status(404).json({ error: 'Online appointments are not enabled.' });
   const sql = getDb();
   const rows = await sql`SELECT proof.id, proof.payment_method AS "paymentMethod", proof.review_status AS status, proof.uploaded_at AS "uploadedAt", appointment.id AS "appointmentId", appointment.name, appointment.service, appointment.status AS "appointmentStatus", appointment.payment_status AS "appointmentPaymentStatus", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, appointment.created_at AS "bookedAt", client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username FROM tele_appointment_payment_proofs AS proof JOIN tele_appointments AS appointment ON appointment.id = proof.appointment_id AND appointment.site_id = proof.site_id LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE proof.site_id = ${SITE_ID} ORDER BY proof.uploaded_at DESC LIMIT 300`;
   res.json({ payments: rows.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
@@ -906,11 +997,26 @@ app.get('/api/internal/payment-sweeps', asyncRoute(async (req, res) => {
   const actual = Buffer.from(String(req.get('authorization') || ''));
   if (!secret || actual.length !== expected.length || !timingSafeEqual(actual, expected)) return res.status(401).json({ error: 'Scheduled payment check is not authorized.' });
   try {
-    const result = await runPaymentReminderChecks(getDb(), SITE_ID);
-    res.json({ ok: true, reminders: result.reminders.length, ownerFollowups: result.ownerFollowups.length });
-  } catch (error) { console.error('payment reminder schedule failed', error); res.status(503).json({ error: 'Could not check pending payment bookings.' }); }
+    // The sweep must not bootstrap the schema — see the comment on the
+    // Cloudflare `scheduled()` handler. `getDb()` wraps every query in
+    // `ensureSiteRow()` → `ensureSchema()`, and a serverless cron invocation is
+    // a cold start whose module-level memo is always empty, so each tick would
+    // re-run all 59 DDL statements in one transaction and hold ACCESS EXCLUSIVE
+    // locks against concurrent client registrations. The two UPDATEs need no
+    // site row, so they run against the raw client.
+    const result = await runPaymentReminderChecks(createNeonClient(process.env.DATABASE_URL), SITE_ID);
+    if (result.dropped.length) console.info(`[payment-reminders] ${result.dropped.length} booking(s) dropped (no payment proof within 15 minutes); owner notified in the dashboard, client notified in their appointment list`);
+    res.json({ ok: true, reminders: result.reminders.length, dropped: result.dropped.length });
+  } catch (error) {
+    // 42P01 = undefined_table: the schema has not been applied yet because no
+    // request has reached this deployment. Report it as an empty, successful
+    // sweep rather than a 503 so the cron dashboard stays green.
+    if (error?.code === '42P01') return res.json({ ok: true, reminders: 0, dropped: 0, skipped: 'schema not applied yet' });
+    console.error('payment reminder schedule failed', error); res.status(503).json({ error: 'Could not check pending payment bookings.' });
+  }
 }));
 app.get('/api/admin/payment-proofs/:id/image', adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.status(404).json({ error: 'Online appointments are not enabled.' });
   const id = String(req.params.id || '');
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid payment proof id.' });
   const sql = getDb();
@@ -924,6 +1030,7 @@ app.get('/api/admin/payment-proofs/:id/image', adminGuard, asyncRoute(async (req
   res.status(200).end(Buffer.from(paymentProofFromBase64(rows[0].image)));
 }));
 app.patch('/api/admin/payment-proofs/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.status(404).json({ error: 'Online appointments are not enabled.' });
   const id = String(req.params.id || ''); const decision = String(req.body?.status || '');
   if (!/^[0-9a-f-]{36}$/i.test(id) || !['approved', 'rejected'].includes(decision)) return res.status(400).json({ error: 'Choose whether to approve or reject this payment proof.' });
   const sql = getDb();
@@ -934,6 +1041,7 @@ app.patch('/api/admin/payment-proofs/:id', csrfGuard, adminGuard, asyncRoute(asy
   res.json({ proof: { id: rows[0].id, status: decision }, slotReleased: decision === 'rejected' });
 }));
 app.patch('/api/admin/appointments/:id', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.status(404).json({ error: 'Online appointments are not enabled.' });
   const id = String(req.params.id || '');
   const status = String(req.body?.status || '');
   if (!/^[0-9a-f-]{36}$/i.test(id) || !['requested', 'confirmed', 'cancelled'].includes(status)) return res.status(400).json({ error: 'Invalid appointment update.' });
@@ -951,6 +1059,7 @@ app.patch('/api/admin/appointments/:id', csrfGuard, adminGuard, asyncRoute(async
   res.json({ appointment: rows[0] });
 }));
 app.put('/api/admin/appointments/:id/note', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
+  if (!DEFAULT_CONFIG.features?.scheduling) return res.status(404).json({ error: 'Online appointments are not enabled.' });
   const id = String(req.params.id || ''); const noteBody = cleanText(req.body?.noteBody, 12000);
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid appointment id.' });
   const sql = getDb();

@@ -165,8 +165,8 @@
             <article class="panel feature-panel">
               <div class="feature-row">
                 <span class="feature-icon"><svg><use href="#i-file"/></svg></span>
-                <span class="feature-copy"><strong>Blog & updates</strong><small>A fixed, simple CMS for posts, tips and clinic news.</small></span>
-                <label class="switch"><input id="blogToggle" type="checkbox" checked><span class="switch-track"></span><span class="sr-only">Enable blog and updates</span></label>
+                <span class="feature-copy"><strong>Blog & updates</strong><small>A fixed, simple CMS for posts, tips and clinic news. Always included in every site package.</small></span>
+                <label class="switch"><input id="blogToggle" type="checkbox" checked disabled><span class="switch-track"></span><span class="sr-only">Blog and updates (always on)</span></label>
               </div>
               <div class="feature-divider"></div>
               <div class="feature-row" id="gallery">
@@ -206,8 +206,8 @@
               <div class="form-grid admin-credentials-grid">
                 <label class="form-field"><span>Admin username</span><input id="adminUsername" type="text" minlength="3" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,63}" autocomplete="username" placeholder="e.g. practiceowner" required></label>
                 <label class="form-field"><span>Admin email</span><input id="adminEmail" type="email" maxlength="254" autocomplete="email" placeholder="owner@example.com" required></label>
-                <label class="form-field env-field"><span>Admin password <small>(12–128 characters)</small></span><div class="secret-input-row"><input id="adminPassword" type="password" minlength="12" maxlength="128" autocomplete="new-password" aria-describedby="adminPasswordRules" required><button type="button" class="icon-button secret-toggle" id="toggleAdminPassword" aria-label="Show admin password">Show</button></div><small id="adminPasswordRules">Include at least one lowercase letter, uppercase letter, number and symbol.</small></label>
-                <label class="form-field env-field"><span>Confirm admin password</span><div class="secret-input-row"><input id="adminPasswordConfirm" type="password" minlength="12" maxlength="128" autocomplete="new-password" required><button type="button" class="icon-button secret-toggle" id="toggleAdminPasswordConfirm" aria-label="Show password confirmation">Show</button></div><small>Passwords are used only to create this ZIP and are never saved in builder storage.</small></label>
+                <label class="form-field env-field"><span>Admin password <small>(8–25 characters)</small></span><div class="secret-input-row"><input id="adminPassword" type="password" minlength="8" maxlength="25" autocomplete="new-password" aria-describedby="adminPasswordRules" required><button type="button" class="icon-button secret-toggle" id="toggleAdminPassword" aria-label="Show admin password">Show</button></div><small id="adminPasswordRules">Use 8–25 characters with at least one lowercase letter, uppercase letter, number and symbol.</small></label>
+                <label class="form-field env-field"><span>Confirm admin password</span><div class="secret-input-row"><input id="adminPasswordConfirm" type="password" minlength="8" maxlength="25" autocomplete="new-password" required><button type="button" class="icon-button secret-toggle" id="toggleAdminPasswordConfirm" aria-label="Show password confirmation">Show</button></div><small>Passwords are used only to create this ZIP and are never saved in builder storage.</small></label>
               </div>
               <p class="env-helper">The generated site uses these credentials at its date-based owner dashboard. The password is salted and hashed before it is put in the environment file. It is never embedded in the public website.</p>
 

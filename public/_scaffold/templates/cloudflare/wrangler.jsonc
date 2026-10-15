@@ -10,10 +10,34 @@
     "directory": "./public",
     "run_worker_first": true
   },
-  // The production copy of .dev.vars. Wrangler never uploads .dev.vars during
-  // deploy, so the same values are baked in here instead: `npm run deploy` is
-  // a fully configured Worker and the owner dashboard's CSRF protection works
-  // immediately after deploy.
+  // The `vars` block is the production copy of `.dev.vars`. Wrangler never
+  // uploads `.dev.vars` during deploy, so the same values are baked in here
+  // instead: `npm run deploy` is a fully configured Worker and the owner
+  // dashboard's CSRF protection works immediately after deploy.
+  //
+  // Why this is intentional (and why the generated `.gitignore` ignores this
+  // file even though it carries the production DATABASE_URL, ADMIN_USERNAME,
+  // ADMIN_PASSWORD_HASH, ADMIN_EMAIL and CSRF_SECRET):
+  //   1. Cloudflare Workers need real values at deploy time — `wrangler
+  //      deploy` does not read `.dev.vars`, and `wrangler secret put` is a
+  //      separate step that asks the operator to type the value into the
+  //      terminal. Baking the values into `vars` makes the first deploy
+  //      zero-config and keeps the owner dashboard functional.
+  //   2. The values are the same ones the operator already typed into the
+  //      builder. Treating them as "secrets" only at deploy time and then
+  //      committing them to a public repo would be a worse failure mode
+  //      than the current one.
+  //   3. The generated `.gitignore` already covers `wrangler.jsonc`, so a
+  //      customer's first `git init && git add . && git push` does NOT commit
+  //      this file. The on-disk file ships only so the Worker can read it.
+  //   4. If the operator ever wants true secret management, they can switch
+  //      to `wrangler secret put DATABASE_URL`, `wrangler secret put
+  //      CSRF_SECRET`, etc., delete the corresponding `vars` entries, and
+  //      push the file. The current scaffolding keeps the simpler path.
+  //
+  // The placeholder value below (the one between the quotes) is replaced at
+  // build time by the builder with the actual JSON object: { DATABASE_URL,
+  // ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD_HASH, CSRF_SECRET }.
   "vars": __WRANGLER_VARS__,
   "observability": {
     "enabled": true

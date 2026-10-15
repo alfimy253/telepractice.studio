@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import worker from '../src/index.js';
 import { generateBundle, buildPreviewDocument, normalizePageEdits, applyPageEdits } from '../public/package-core.js';
-import { loadPageEditsFromDatabase, savePageEditsToDatabase } from '../src/page-edits-store.js';
+import { loadPageEditsFromDatabase, savePageEditsToDatabase, clearPageEditsFromDatabase } from '../src/page-edits-store.js';
 import { normalizeDatabaseUrl } from '../src/database.js';
 
 const origin = 'https://builder.example';
@@ -32,9 +32,14 @@ function databaseStub() {
       });
       return [];
     }
+    if (statement.includes('DELETE FROM tele_builder_page_edits')) {
+      records.delete(values[0]);
+      return [];
+    }
     if (statement.includes('FROM tele_builder_page_edits')) {
       return records.has(values[0]) ? [records.get(values[0])] : [];
     }
+    return [];
     return [];
   };
   return { records, queries, sql };
@@ -215,6 +220,23 @@ test('the server preview route applies page edits from the config query', async 
   assert.doesNotMatch(html, /Thoughtful care, built around the lives you share\./);
 });
 
+test('the preview route accommodates the full MAX_PAGE_EDITS * MAX_PAGE_EDIT_TEXT budget', async () => {
+  // F10 (cap-mismatch): the page editor allows 64 edits × 2000 chars, so
+  // a worst-case config serialises to 128 KB. The preview cap must accept
+  // at least that, otherwise an operator who fills every edit slot hits a
+  // 413 the moment they open the live preview.
+  const env = { ASSETS: assets };
+  const edits = Array.from({ length: 64 }, (_, index) => ({ selector: `#e${index}`, index: 0, text: 'x'.repeat(2000) }));
+  const config = encodeURIComponent(JSON.stringify({ theme: 'canopy', pageEdits: edits }));
+  assert.ok(config.length > 100 * 1024, `expected the worst-case config to exceed 100 KB, got ${config.length}`);
+  const response = await worker.fetch(new Request(`${origin}/api/preview?config=${config}`), env);
+  assert.equal(response.status, 200, await response.clone().text());
+  const html = await response.text();
+  // The cap is large enough for the worst case; the doc is just a preview
+  // so we only check that the page renders, not that it carries every edit.
+  assert.match(html, /<title>/);
+});
+
 test('page edits persist in Neon with CSRF protection and retain the existing API shape', async () => {
   const database = databaseStub();
   // CSRF is required.
@@ -257,4 +279,46 @@ test('GET /api/page-editor reports a missing database configuration', async () =
   const loaded = await worker.fetch(new Request(`${origin}/api/page-editor?siteId=edit-practice`), env);
   assert.equal(loaded.status, 503);
   assert.match((await loaded.json()).error, /database is not configured/);
+});
+
+test('DELETE /api/page-editor removes the saved row and 503s without a database', async () => {
+  const env = { ASSETS: assets };
+  // Missing CSRF → 403.
+  const noCsrf = await worker.fetch(new Request(`${origin}/api/page-editor`, {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ siteId: 'edit-practice' })
+  }), env);
+  assert.equal(noCsrf.status, 403);
+  // Without DATABASE_URL → 503.
+  const auth = await session(env);
+  const noDb = await worker.fetch(new Request(`${origin}/api/page-editor`, {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: auth.cookie, 'X-CSRF-Token': auth.token },
+    body: JSON.stringify({ siteId: 'edit-practice' })
+  }), env);
+  assert.equal(noDb.status, 503);
+  assert.match((await noDb.json()).error, /database is not configured/);
+  // Bad payloads are rejected before the database is needed.
+  assert.equal((await worker.fetch(new Request(`${origin}/api/page-editor`, {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: auth.cookie, 'X-CSRF-Token': auth.token },
+    body: JSON.stringify({ siteId: '../evil' })
+  }), env)).status, 400);
+  assert.equal((await worker.fetch(new Request(`${origin}/api/page-editor`, {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: auth.cookie, 'X-CSRF-Token': auth.token },
+    body: 'not-json'
+  }), env)).status, 400);
+});
+
+test('clearPageEditsFromDatabase removes the row from the tagged-SQL stub', async () => {
+  const database = databaseStub();
+  const edits = [{ selector: '#heroText', index: 0, text: 'Will be cleared' }];
+  await savePageEditsToDatabase(database.sql, 'edit-practice', edits);
+  assert.equal(database.records.has('edit-practice'), true);
+  await clearPageEditsFromDatabase(database.sql, 'edit-practice');
+  console.error('DEBUG queries:', database.queries);
+  console.error('DEBUG records after clear:', [...database.records.keys()]);
+  assert.equal(database.records.has('edit-practice'), false);
+  // Calling again on a missing row is a no-op.
+  await clearPageEditsFromDatabase(database.sql, 'edit-practice');
+  assert.equal(database.records.size, 0);
+  assert.equal(database.queries.filter((query) => query.includes('DELETE FROM tele_builder_page_edits')).length, 2);
 });

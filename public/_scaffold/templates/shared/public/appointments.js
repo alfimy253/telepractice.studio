@@ -128,6 +128,15 @@
     renderCalendar(monthData);
   }
   async function loadMonth(month) {
+    // The calendar and the GCash/Maya payment options are account-only: a
+    // guest (no client session) never loads availability or payment details.
+    // The /api/availability route enforces the same rule server-side.
+    if (!client) {
+      $('calendarMonthLabel').textContent = formatMonth(month);
+      $('calendarStatus').textContent = 'Sign in or create a client account below to view the appointment calendar and payment options.';
+      $('calendarDays').replaceChildren(); $('calendarSlots').replaceChildren();
+      return;
+    }
     if (monthData?.month && monthData.month !== month) { selectedDate = ''; pendingSlot = null; $('reservationCard').hidden = true; }
     $('calendarMonthLabel').textContent = formatMonth(month);
     $('calendarStatus').textContent = 'Checking the practice calendar…';
@@ -157,10 +166,10 @@
   }
   function formatPaymentFollowup(appointment) {
     const dueAt = new Date(appointment.paymentDueAt).getTime();
-    if (!Number.isFinite(dueAt)) return 'Please upload proof when you can. The booking stays scheduled until the practice updates it.';
+    if (!Number.isFinite(dueAt)) return 'Please upload proof when you can. Bookings without proof are released 15 minutes after booking.';
     const remaining = dueAt - Date.now();
-    if (remaining <= 0) return 'The 15-minute check-in has passed. Your appointment remains scheduled while the practice verifies payment or releases the time.';
-    if (remaining <= 3 * 60_000) return 'Please upload your transaction screenshot now. Your appointment remains scheduled while payment is checked.';
+    if (remaining <= 0) return 'The 15-minute payment window has passed. If no proof was uploaded, the booking is released and the time becomes available to others.';
+    if (remaining <= 3 * 60_000) return 'Please upload your transaction screenshot now — bookings without proof are released when the 15-minute window closes.';
     const minutes = Math.ceil((remaining - 3 * 60_000) / 60_000);
     return `Please upload proof within 15 minutes. We’ll remind you in about ${minutes} minute${minutes === 1 ? '' : 's'} if it is still missing.`;
   }
@@ -197,7 +206,7 @@
         const reminder = document.createElement('p'); reminder.className = 'payment-reminder-alert'; reminder.setAttribute('role', 'status');
         reminder.textContent = manuallyReceivedWithoutProof
           ? 'Payment reminder: the practice confirmed receipt, but your screenshot is still missing. Upload the transaction image to attach it to your booking.'
-          : 'Payment reminder: please upload a screenshot of the successful transaction now. Your appointment remains scheduled while the practice checks payment.';
+          : 'Payment reminder: please upload a screenshot of the successful transaction now. Bookings without proof are released 15 minutes after booking.';
         panel.appendChild(reminder);
       }
       if (!manuallyReceivedWithoutProof) {
@@ -285,10 +294,16 @@
     client = account || null;
     $('guestAccountPanel').hidden = Boolean(client);
     $('signedInAccountPanel').hidden = !client;
-    if (!client) return;
+    if (!client) { loadMonth(currentYearMonth()); return; }
     $('clientWelcome').textContent = `Hello, ${client.name}`;
     $('clientEmail').textContent = client.email;
+    // Prefill the booking phone from the account; the client can override it
+    // per consultation. It is the practice's fallback number if the video
+    // call or internet drops mid-consultation.
+    const phoneInput = $('reservationPhone');
+    if (phoneInput && client.phone && !phoneInput.value) phoneInput.value = client.phone;
     loadClientAppointments();
+    loadMonth(monthData?.month || currentYearMonth());
     if (pendingSlot) setMessage('reservationMessage', 'You are signed in. Choose a visit type and confirm your selected time.');
   }
   async function submitAuth(event, endpoint, formId, messageId) {
@@ -312,7 +327,7 @@
     if (!paymentAccountDetails(selectedPaymentMethod)) { setMessage('reservationMessage', `The practice has not added ${selectedPaymentMethod === 'maya' ? 'Maya' : 'GCash'} payment details yet. Please contact the practice before booking.`, true); return; }
     const button = $('reserveButton'); button.disabled = true; setMessage('reservationMessage', 'Reserving your consultation…');
     try {
-      await api('/api/appointments', { method: 'POST', body: { slotId: pendingSlot.id, service: $('reservationService').value, context: $('reservationContext').value.trim(), paymentMethod: $('reservationPaymentMethod').value } });
+      await api('/api/appointments', { method: 'POST', body: { slotId: pendingSlot.id, service: $('reservationService').value, context: $('reservationContext').value.trim(), paymentMethod: $('reservationPaymentMethod').value, phone: $('reservationPhone').value.trim() } });
       setMessage('reservationMessage', 'Your appointment is scheduled. Upload the successful payment screenshot from your account; we will remind you after 12 minutes if proof is missing.');
       toast('Appointment scheduled · payment proof reminder after 12 minutes'); pendingSlot = null; $('reservationCard').hidden = true; form.reset();
       await loadMonth(monthData?.month || currentYearMonth()); await loadClientAppointments();
@@ -350,13 +365,16 @@
       $('calendarStatus').textContent = 'Online appointments are not enabled for this practice. Please contact the team.';
       $('reservationCard').hidden = true; $('clientAccountSection').classList.add('hidden');
     }
-    await Promise.all([getCsrf().catch(() => {}), loadMonth(month)]);
-    try { const result = await api('/api/auth/me'); if (result.client) showClient(result.client); }
-    catch (_) { /* A visitor can still view published availability without signing in. */ }
+    await getCsrf().catch(() => {});
+    // The calendar is account-only, so resolve the session first: showClient
+    // loads the calendar for a signed-in client and shows the sign-in prompt
+    // to a guest instead.
+    try { const result = await api('/api/auth/me'); showClient(result.client); }
+    catch (_) { showClient(null); }
     window.setInterval(() => {
-      if (document.visibilityState !== 'visible') return;
+      if (document.visibilityState !== 'visible' || !client) return;
       loadMonth(monthData?.month || currentYearMonth());
-      if (client) loadClientAppointments();
+      loadClientAppointments();
     }, 60_000);
   }
   initialize();

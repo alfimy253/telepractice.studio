@@ -225,9 +225,13 @@ test('package-builder template cache serves warm builds without re-fetching', as
 test('discrete builder controls refresh the preview immediately while typing stays debounced', async () => {
   const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.match(app, /function scheduleLivePreview\(immediate = false\)/);
-  for (const control of ['blogToggle', 'galleryToggle', 'bookingToggle']) {
+  for (const control of ['galleryToggle', 'bookingToggle']) {
     assert.match(app, new RegExp(`\\$\\('${control}'\\)\\.addEventListener\\('change',[^\\n]*updatePreview\\(true\\)`), control);
   }
+  // The blog switch is disabled on purpose (CMS always on): it must be forced
+  // checked+disabled and must NOT carry a change handler that could turn it off.
+  assert.match(app, /\$\('blogToggle'\)\.checked = true; \$\('blogToggle'\)\.disabled = true;/);
+  assert.doesNotMatch(app, /\$\('blogToggle'\)\.addEventListener\('change'/);
   assert.match(app, /function saveConfig\(immediate = false\)/);
   assert.match(app, /function updatePreview\(immediate = false\)/);
   assert.match(app, /livePreviewController\?\.abort\(\)/);

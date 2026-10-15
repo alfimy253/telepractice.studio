@@ -5,7 +5,7 @@
 // a BroadcastChannel. The builder applies them to its preview and persists
 // them server-side; once it acknowledges, this tab closes itself.
 import { buildPreviewLocally } from './package-builder.js';
-import { normalizePageEdits, PAGE_EDIT_EXCLUDED_IDS } from './package-core.js';
+import { normalizePageEdits, slugify, PAGE_EDIT_EXCLUDED_IDS } from './package-core.js';
 import { PAGE_EDITOR_CHANNEL, savePageEditsToServer } from './editor-bridge.js';
 
 const PREVIEW_KEY = 'canopy-preview-html';
@@ -25,10 +25,6 @@ const editCount = $('editCount');
 
 const originals = new Map(); // target key -> text before this session's edits
 const edits = new Map(); // target key -> { selector, index, text }
-
-function slugify(value) {
-  return String(value || '').normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 55) || 'my-practice';
-}
 
 function readJson(key) {
   try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (_) { return null; }

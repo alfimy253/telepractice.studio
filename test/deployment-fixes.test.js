@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { generateBundle } from '../public/package-core.js';
+import { generateBundle, slugify as coreSlugify } from '../public/package-core.js';
 import { DATABASE_ERROR_MESSAGES, databaseErrorCode, databaseErrorMessage } from '../public/_scaffold/templates/shared/lib/db-errors.js';
 
 const readTemplate = (filename) => readFile(new URL(`../public/_scaffold/templates/${filename}`, import.meta.url), 'utf8');
@@ -265,7 +265,11 @@ test('the owner account is stored in the database, not in the environment', asyn
     const files = await packageFiles(target);
     const runtime = files.get(target === 'cloudflare' ? 'src/index.js' : 'api/index.js');
     const label = `${target} runtime`;
-    assert.match(runtime, /INSERT INTO tele_admin_users[\s\S]{0,200}?ON CONFLICT \(site_id\) DO NOTHING/,
+    // The seed must refresh the row only while it is still the untouched seed
+    // (i.e. `updated_at = created_at`). The dashboard's account panel stamps
+    // `updated_at = now()` on every owner change, so the predicate keeps a
+    // changed account safe across redeploys.
+    assert.match(runtime, /INSERT INTO tele_admin_users[\s\S]{0,400}?ON CONFLICT \(site_id\) DO UPDATE SET username = EXCLUDED\.username, email = EXCLUDED\.email, password_hash = EXCLUDED\.password_hash WHERE tele_admin_users\.updated_at = tele_admin_users\.created_at/,
       `${label}: the first boot must seed the admin row without overwriting a changed password`);
     assert.match(runtime, /FROM tele_admin_users WHERE site_id = \$\{SITE_ID\}/, `${label}: sign-in does not read the database`);
     assert.match(runtime, /password_hash = EXCLUDED\.password_hash/, `${label}: the account route cannot store a new password hash`);
@@ -296,10 +300,200 @@ test('no non-signing visitor can read the capacity meter', async () => {
       assert.doesNotMatch(handler, new RegExp(leaked), `${label}: the public handler still answers ${leaked}`);
     }
     assert.match(handler, /hasTimes/, `${label}: the public handler must still say whether times exist`);
+    // The calendar is account-only now: the handler must resolve the client
+    // session and 401 a guest before returning any slot.
+    assert.match(handler, /currentClient/, `${label}: the availability handler must check the client session`);
+    assert.match(handler, /401/, `${label}: the availability handler must reject guests with 401`);
     const page = files.get(target === 'cloudflare' ? 'public/appointments.js' : 'appointments.js');
     assert.doesNotMatch(page, /fillPercent|capacity-meter|renderMeter/, `${target}: the client page still renders the meter`);
     const html = files.get(target === 'cloudflare' ? 'public/appointments.html' : 'appointments.html');
     assert.doesNotMatch(html, /capacity-meter|calendar-capacity-card/, `${target}: the client page still carries meter markup`);
     assert.match(files.get('README.md'), /owner-only/i, `${target}: the README does not say capacity is owner-only`);
   }
+});
+
+test('owner write routes for blog, gallery, and scheduling are gated by their features', async () => {
+  // Every `/api/admin/...` write route must check the matching feature flag
+  // before reading or writing the database; otherwise the dashboard can save
+  // blog posts, gallery items, and appointments on a build that disabled
+  // them, and the public UI then has no way to surface them. The 404 message
+  // identifies the feature for the operator.
+  for (const target of ['cloudflare', 'vercel']) {
+    const files = await packageFiles(target);
+    const runtime = files.get(target === 'cloudflare' ? 'src/index.js' : 'api/index.js');
+    const admin = files.get(target === 'cloudflare' ? 'public/admin.js' : 'admin.js');
+    const label = `${target} runtime`;
+    // Blog: GET, POST, PUT, DELETE all must gate on features.blog.
+    for (const blogRoute of [
+      target === 'cloudflare' ? "path === '/api/admin/posts' && method === 'GET'" : "app.get('/api/admin/posts'",
+      target === 'cloudflare' ? "path === '/api/admin/posts' && method === 'POST'" : "app.post('/api/admin/posts'",
+      target === 'cloudflare' ? "path.startsWith('/api/admin/posts/') && method === 'PUT'" : "app.put('/api/admin/posts/:id'",
+      target === 'cloudflare' ? "path.startsWith('/api/admin/posts/') && method === 'DELETE'" : "app.delete('/api/admin/posts/:id'"
+    ]) {
+      const start = runtime.indexOf(blogRoute);
+      assert.ok(start > 0, `${label}: cannot find blog route ${blogRoute}`);
+      const handler = runtime.slice(start, Math.min(start + 600, runtime.length));
+      assert.match(handler, /features\?\.blog/,
+        `${label}: the blog route (${blogRoute}) does not gate on features.blog`);
+    }
+    // Gallery: GET, POST, PUT, DELETE all must gate on features.gallery.
+    for (const galleryRoute of [
+      target === 'cloudflare' ? "path === '/api/admin/gallery' && method === 'GET'" : "app.get('/api/admin/gallery'",
+      target === 'cloudflare' ? "path === '/api/admin/gallery' && method === 'POST'" : "app.post('/api/admin/gallery'",
+      target === 'cloudflare' ? "path.startsWith('/api/admin/gallery/') && (method === 'PUT' || method === 'DELETE')" : "app.put('/api/admin/gallery/:id'",
+      target === 'cloudflare' ? "path === '/api/admin/gallery' && method === 'GET'" : "app.delete('/api/admin/gallery/:id'"
+    ]) {
+      const start = runtime.indexOf(galleryRoute);
+      assert.ok(start > 0, `${label}: cannot find gallery route ${galleryRoute}`);
+      const handler = runtime.slice(start, Math.min(start + 600, runtime.length));
+      assert.match(handler, /features\?\.gallery/,
+        `${label}: the gallery route does not gate on features.gallery`);
+    }
+    // Scheduling: appointments, payments, payment-proofs all gate on
+    // features.scheduling. Pick a representative handler per group.
+    for (const schedulingRoute of [
+      target === 'cloudflare' ? "path === '/api/admin/appointments' && method === 'GET'" : "app.get('/api/admin/appointments'",
+      target === 'cloudflare' ? "path === '/api/admin/payments/unpaid' && method === 'GET'" : "app.get('/api/admin/payments/unpaid'",
+      target === 'cloudflare' ? "path.startsWith('/api/admin/payment-proofs/') && method === 'PATCH'" : "app.patch('/api/admin/payment-proofs/:id'"
+    ]) {
+      const start = runtime.indexOf(schedulingRoute);
+      assert.ok(start > 0, `${label}: cannot find scheduling route ${schedulingRoute}`);
+      const handler = runtime.slice(start, Math.min(start + 600, runtime.length));
+      assert.match(handler, /features\?\.scheduling/,
+        `${label}: the scheduling route does not gate on features.scheduling`);
+    }
+    // The dashboard hides feature pages on init and falls back to "identity"
+    // when the URL still names a hidden page (e.g. a stale bookmark after a
+    // feature toggle). Both behaviours must be present in admin.js.
+    assert.match(admin, /pagesDisabledByFeatures/,
+      `${target}: admin.js does not compute which pages are disabled by features`);
+    assert.match(admin, /FEATURE_PAGE_IDS/,
+      `${target}: admin.js does not map features to page ids`);
+  }
+});
+
+test('the builder, page editor, runtime validator, and generator share one slugify', async () => {
+  // F6 — for any name whose slug would exceed 45 characters, the four places
+  // that derive a site id (the builder's "Site address", the page-editor
+  // tab, the server-side page-edit validator, and the generator's
+  // `tele_sites.site_id` / wrangler.jsonc name / ZIP filename) must produce
+  // the exact same string. A drift meant the dashboard showed a site address
+  // the generated package never used, and page edits were stored under a key
+  // that could never match the runtime's `SITE_ID`.
+  const longName = 'Harborlight Veterinary Care and Rehabilitation Center Main';
+  const fromCore = coreSlugify(longName);
+  assert.ok(fromCore.length <= 45, `slugify produced ${fromCore.length} chars (${fromCore})`);
+  const { buffer } = await generateBundle({
+    ...baseInput, businessName: longName
+  }, readTemplate);
+  const files = zipEntries(buffer);
+  const runtime = files.get('src/index.js');
+  assert.match(runtime, new RegExp(`const SITE_ID = ['"]${fromCore}['"]`),
+    `the Cloudflare runtime's SITE_ID is not the generator's slugify output`);
+  const builderSource = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
+  assert.match(builderSource, /PAGE_EDIT_SITE_ID = \/\^\[a-z0-9\]\[a-z0-9-\]\{0,44\}\$\//,
+    'the builder validator accepts site ids the runtime cannot produce');
+  const appSource = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  const pageEditorSource = await readFile(new URL('../public/page-editor.js', import.meta.url), 'utf8');
+  assert.match(appSource, /import\s*\{[^}]*\bslugify\b[^}]*\}\s*from\s*['"]\.\/package-core\.js['"]/,
+    'app.js does not import slugify from package-core.js');
+  assert.match(pageEditorSource, /import\s*\{[^}]*\bslugify\b[^}]*\}\s*from\s*['"]\.\/package-core\.js['"]/,
+    'page-editor.js does not import slugify from package-core.js');
+  assert.doesNotMatch(appSource, /function\s+slugify\s*\(\s*value\s*\)\s*\{[^}]*slice\(0,\s*55\)/,
+    'app.js still has the 55-char slice local slugify');
+  assert.doesNotMatch(pageEditorSource, /function\s+slugify\s*\(\s*value\s*\)\s*\{[^}]*slice\(0,\s*55\)/,
+    'page-editor.js still has the 55-char slice local slugify');
+});
+
+test('hero copy and service list can be overridden through the builder payload', async () => {
+  // F10 — `normalizeConfig` used to ignore `heroEyebrow`, `heroHeadline`,
+  // `heroText`, and `services` from the builder payload and re-derive them
+  // from its own `VERTICALS` table. Editing the hero copy in the builder
+  // had zero effect on the preview or the ZIP. The config now flows into
+  // the packaged `public/site-config.js` and the `__SITE_CONFIG_JSON__`
+  // embedded in the runtime's compiled-in defaults.
+  const { buffer } = await generateBundle({
+    ...baseInput,
+    heroEyebrow: 'A QUIET PLACE FOR EVERY VISIT',
+    heroHeadline: 'Good care|good neighbors.',
+    heroText: 'A small neighborhood practice with a calm waiting room.',
+    services: ['First visit', 'Wellness plans', 'Senior care', 'Travel certificates']
+  }, readTemplate);
+  const files = zipEntries(buffer);
+  const siteConfig = files.get('public/site-config.js');
+  assert.match(siteConfig, /A QUIET PLACE FOR EVERY VISIT/,
+    'the hero eyebrow override is not in the packaged site-config.js');
+  assert.match(siteConfig, /Good care[\\n]+good neighbors/,
+    'the hero headline override is not in the packaged site-config.js');
+  assert.match(siteConfig, /A small neighborhood practice with a calm waiting room/,
+    'the hero text override is not in the packaged site-config.js');
+  assert.match(siteConfig, /First visit/,
+    'the service list override is not in the packaged site-config.js');
+  // When the input omits the fields, the vertical defaults are used.
+  // `baseInput` is a dental practice, so the default eyebrow is the dental
+  // vertical's copy, not the veterinary one.
+  const { buffer: defaultBuffer } = await generateBundle({ ...baseInput }, readTemplate);
+  const defaultFiles = zipEntries(defaultBuffer);
+  const defaultSiteConfig = defaultFiles.get('public/site-config.js');
+  assert.match(defaultSiteConfig, /A BRIGHTER KIND OF DENTAL CARE/,
+    'the hero eyebrow default is not the vertical default for the dental practice');
+  const { buffer: vetBuffer } = await generateBundle({ ...baseInput, specialty: 'veterinary' }, readTemplate);
+  const vetFiles = zipEntries(vetBuffer);
+  const vetSiteConfig = vetFiles.get('public/site-config.js');
+  assert.match(vetSiteConfig, /A LITTLE MORE CARE, EVERY DAY/,
+    'the hero eyebrow default is not the vertical default for the veterinary practice');
+});
+
+test('Brivon font stack is loaded on functional pages where the Brivon continuity CSS targets them', async () => {
+  // F9 — `brivon.css` sets `font-family: 'Boldonse', 'Inter Tight', …` and
+  // `font-family: 'Inter Tight', …` on `body.theme-brivon-*:not(.brivon-shell)`,
+  // so the appointments, owner dashboard, and custom pages need the
+  // matching Google Fonts stack loaded — without it every heading silently
+  // falls through to a generic sans-serif.
+  const { buffer } = await generateBundle({ ...baseInput, theme: 'brivon-dark' }, readTemplate);
+  const files = zipEntries(buffer);
+  // The packaged manifest.json is generated by package-core.js (it only
+  // describes the build), so the source manifest in templates/ is what
+  // decides which files go into the ZIP. Read it directly.
+  const sourceManifest = JSON.parse(await readFile(new URL('../public/_scaffold/templates/manifest.json', import.meta.url), 'utf8'));
+  assert.ok(sourceManifest.sharedPublic.includes('public/brivon-fonts.js'),
+    'manifest.json does not list public/brivon-fonts.js');
+  const appointments = files.get('public/appointments.html');
+  const admin = files.get('public/admin.html');
+  assert.match(appointments, /<script src="\/brivon-fonts\.js" defer>/,
+    'appointments.html does not load /brivon-fonts.js');
+  assert.match(admin, /<script src="\/brivon-fonts\.js" defer>/,
+    'admin.html does not load /brivon-fonts.js');
+  // The font helper itself is a single-file module that injects the
+  // preconnect + stylesheet only when site.theme is brivon-dark or
+  // brivon-light; for an Illustration theme no remote font is requested.
+  const brivonFonts = files.get('public/brivon-fonts.js');
+  assert.match(brivonFonts, /window\.SITE_CONFIG/,
+    'brivon-fonts.js does not read window.SITE_CONFIG');
+  assert.match(brivonFonts, /fonts\.googleapis\.com/,
+    'brivon-fonts.js does not reference the Google Fonts URL');
+  assert.match(brivonFonts, /brivon-dark|brivon-light/,
+    'brivon-fonts.js does not gate on the Brivon theme name');
+});
+
+test('the generated .gitignore covers the secret-bearing wrangler.jsonc', async () => {
+  // F7 — the Cloudflare package bakes DATABASE_URL, ADMIN_* and CSRF_SECRET
+  // into `wrangler.jsonc vars` so a plain `wrangler deploy` works. Without
+  // gitignoring that file, a customer's first `git init && git add . &&
+  // git push` would commit their production database password and admin
+  // hash to a public repo. The Vercel package has no equivalent: `vercel.json`
+  // is purely declarative configuration, no secrets.
+  const cf = await packageFiles('cloudflare');
+  const vercel = await packageFiles('vercel');
+  assert.match(cf.get('.gitignore'), /wrangler\.jsonc/,
+    'the Cloudflare .gitignore does not cover wrangler.jsonc');
+  assert.doesNotMatch(vercel.get('.gitignore'), /wrangler\.jsonc/,
+    'the Vercel .gitignore must not mention wrangler.jsonc');
+  assert.match(cf.get('.gitignore'), /\.dev\.vars/,
+    'the Cloudflare .gitignore does not cover .dev.vars');
+  assert.match(vercel.get('.gitignore'), /^\.env$/m,
+    'the Vercel .gitignore does not cover .env');
+  // The generated README must spell out the new gitignore behaviour.
+  assert.match(cf.get('README.md'), /wrangler\.jsonc[\s\S]{0,200}\.gitignore/,
+    'the Cloudflare README does not explain the wrangler.jsonc gitignore rule');
 });

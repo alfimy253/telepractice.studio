@@ -63,7 +63,11 @@ test('both generated runtimes preserve bookings and support the 12/15-minute rem
   assert.match(reminders, /payment_owner_attention_at = now\(\)/);
   assert.match(reminders, /payment_due_at <= now\(\)/);
   assert.match(reminders, /payment_status = 'approved' AND appointment\.payment_manual_received_at IS NOT NULL/);
-  assert.doesNotMatch(reminders, /SET status = 'cancelled'/);
+  // Since 2026-10-15 the second sweep drops unpaid bookings at 15 minutes,
+  // stamping the owner-notification marker in the same statement.
+  assert.match(reminders, /SET status = 'cancelled',\s*payment_status = 'expired',\s*payment_owner_attention_at = now\(\)/);
+  assert.match(reminders, /markDroppedBookings/);
+  assert.doesNotMatch(reminders, /DELETE FROM/);
   assert.match(worker, /90_000/);
   assert.match(worker, /180_000/);
   assert.match(wranglerConfig, /\"crons\": \[\"\* \* \* \* \*\"\]/);
@@ -84,8 +88,10 @@ test('both generated runtimes preserve bookings and support the 12/15-minute rem
   assert.match(clientScript, /paymentReminderSentAt/);
   assert.match(clientScript, /manuallyReceivedWithoutProof/);
   assert.match(clientScript, /Payment received · proof reminder/);
-  assert.match(clientScript, /remains scheduled/);
+  assert.match(clientScript, /released 15 minutes after booking/);
   assert.match(adminHtml, /Bookings Without Payments/);
+  assert.match(adminHtml, /Dropped Bookings/);
+  assert.match(adminScript, /\/api\/admin\/payments\/dropped/);
   assert.match(adminHtml, /data-payment-tab="payments">Payments/);
   assert.match(adminScript, /relativeElapsed\(payment\.uploadedAt\)/);
   assert.match(adminScript, /togglePaymentPreview/);

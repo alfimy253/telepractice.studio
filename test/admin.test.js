@@ -9,7 +9,7 @@ import {
   verifyAdminSession,
   verifyPasswordHash
 } from '../public/_scaffold/templates/shared/lib/admin-security.js';
-import { cleanMenuLinks, DEFAULT_MENU_LINKS, MAX_MENU_LINKS, menuLinksForPages } from '../public/_scaffold/templates/shared/lib/menu-links.js';
+import { cleanMenuLinks, cleanMenuHref, DEFAULT_MENU_LINKS, MAX_MENU_LINKS, menuLinksForPages } from '../public/_scaffold/templates/shared/lib/menu-links.js';
 import { normalizeAdminAccount, normalizeConfig } from '../src/generator.js';
 
 const validAccount = {
@@ -100,12 +100,13 @@ test('builder validates administrator username, email, and all password requirem
     password: validAccount.adminPassword
   });
   for (const adminPassword of [
-    'Abcdef1!234',
-    'ABCDEFGHIJ1!',
-    'abcdefghij1!',
-    'Abcdefghij!!',
-    'Abcdefghij12',
-    `${'A'.repeat(126)}a1!`
+    'Aa1!',                  // 4 chars — too short
+    'Abc1!',                 // 5 chars — too short
+    `${'A'.repeat(26)}a1!`,  // 29 chars — too long
+    'ABCDEFGHIJ1!',          // 12 chars, no lowercase
+    'abcdefghij1!',          // 12 chars, no uppercase
+    'Abcdefghij!!',          // 12 chars, no number
+    'Abcdefghij12'           // 12 chars, no symbol
   ]) {
     assert.throws(() => normalizeAdminAccount({ ...validAccount, adminPassword }), /administrator password/i);
   }
@@ -126,4 +127,72 @@ test('generated administrator password hash verifies and session expires or inva
   assert.equal(await verifyAdminSession(session, 'someoneelse', passwordHash, secret, now), false);
   assert.equal(await verifyAdminSession(session, validAccount.adminUsername, passwordHash, 'wrong-secret', now), false);
   assert.equal(await verifyAdminSession(session, validAccount.adminUsername, passwordHash, secret, now + ADMIN_SESSION_TTL_SECONDS * 1000), false);
+});
+
+test('cleanMenuHref sanitises same-origin paths and https absolute URLs and rejects everything else', () => {
+  // Same-origin paths round-trip through the URL parser and lose the
+  // protocol + host (server's "https://menu.invalid" base does not leak
+  // into the output).
+  assert.equal(cleanMenuHref('/about'), '/about');
+  assert.equal(cleanMenuHref('/#services'), '/#services');
+  assert.equal(cleanMenuHref('/appointments.html?x=1&y=2#hero'), '/appointments.html?x=1&y=2#hero');
+  // Protocol-relative and backslash-relative look like cross-origin attempts.
+  assert.equal(cleanMenuHref('//evil.com/x'), '');
+  assert.equal(cleanMenuHref('/\\evil.com/x'), '');
+  // Absolute URLs must be https with no embedded credentials.
+  assert.equal(cleanMenuHref('https://partner.example.com/path'), 'https://partner.example.com/path');
+  assert.equal(cleanMenuHref('http://partner.example.com/path'), '');
+  assert.equal(cleanMenuHref('javascript:alert(1)'), '');
+  assert.equal(cleanMenuHref('data:text/html,<script>alert(1)</script>'), '');
+  assert.equal(cleanMenuHref('https://user:pass@partner.example.com/'), '');
+  assert.equal(cleanMenuHref('https://'), '');
+  // Empty, control characters, oversize payloads are dropped.
+  assert.equal(cleanMenuHref(''), '');
+  assert.equal(cleanMenuHref('   '), '');
+  // A control character inside the path (not at the trailing edge) survives
+  // the trim and trips the regex. `/about\n` becomes `/about` because trim
+  // eats the trailing newline; the embedded null byte stays in the string.
+  assert.equal(cleanMenuHref('/about\n'), '/about');
+  assert.equal(cleanMenuHref('/about\u0000'), '');
+  assert.equal(cleanMenuHref('/' + 'a'.repeat(3000)), '');
+  // `null` / `undefined` / numbers coerce to the empty string.
+  assert.equal(cleanMenuHref(null), '');
+  assert.equal(cleanMenuHref(undefined), '');
+  assert.equal(cleanMenuHref(42), '');
+});
+
+test('cleanMenuLinks uses cleanMenuHref to drop bad hrefs but keeps well-formed entries', () => {
+  const links = cleanMenuLinks([
+    { id: 'home', label: 'Home', href: '/#home' },
+    { id: 'bad-relative', label: 'Bad relative', href: '//evil.example.com/x' },
+    { id: 'bad-js', label: 'JS link', href: 'javascript:alert(1)' },
+    { id: 'partner', label: 'Partner', href: 'https://partner.example.com/x' },
+    { id: 'no-href', label: 'No href', href: '' }
+  ]);
+  assert.deepEqual(links.map((link) => link.id), ['home', 'partner']);
+});
+
+test('the browser copies of the menu-href sanitizer stay in sync with the server', async () => {
+  // The browser files (`site.js`, `admin.js`) are static and cannot import
+  // the lib helper. The audit pinned a regression here — make sure the
+  // three copies still agree on the cases that matter.
+  const siteSource = await readFile(new URL('../public/_scaffold/templates/shared/public/site.js', import.meta.url), 'utf8');
+  const adminSource = await readFile(new URL('../public/_scaffold/templates/shared/public/admin.js', import.meta.url), 'utf8');
+  // 1) The trimmed, length-bounded, control-char gate must be present.
+  const gatePattern = /length > 2048[\s\S]{0,200}\\[\\u0000-\\u001f\\u007f\\]/;
+  assert.match(siteSource, gatePattern, 'site.js lost the safeMenuNavigationHref gate');
+  assert.match(adminSource, gatePattern, 'admin.js lost the safeMenuDestination gate');
+  // 2) The protocol-relative and backslash-relative check must precede the
+  //    URL parse so `//evil.com/x` and `/\evil.com/x` are rejected. Match
+  //    the start of each branch and the literal `||` between them.
+  const relativeCheck = /raw\.startsWith\('\/[\s\S]{0,4}'\)\s*\|\|\s*raw\.startsWith\('\/[\s\S]{0,4}'\)/;
+  assert.match(siteSource, relativeCheck, 'site.js lost the protocol-relative guard');
+  assert.match(adminSource, relativeCheck, 'admin.js lost the protocol-relative guard');
+  // 3) The https absolute-URL guard must require a hostname and forbid
+  //    embedded credentials. The three copies differ in return type
+  //    (`!== 'https:'` returns ''; `=== 'https:'` returns boolean), so we
+  //    match the same four conditions in any order.
+  const absoluteCheck = /url\.protocol[\s\S]{0,30}'https:'[\s\S]{0,200}url\.hostname[\s\S]{0,200}url\.username[\s\S]{0,100}url\.password/;
+  assert.match(siteSource, absoluteCheck, 'site.js lost the https absolute-URL guard');
+  assert.match(adminSource, absoluteCheck, 'admin.js lost the https absolute-URL guard');
 });

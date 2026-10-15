@@ -81,6 +81,12 @@ class StubElement extends Element {
   reportValidity() {}
   setCustomValidity() {}
   click() { return this.doc.dispatchClick(this); }
+  // The tests use `textContent` to assert what the user sees. The builder
+  // sets `innerHTML` to a string of markup, so derive a flat textContent
+  // whenever the markup changes; the simple stripper covers the small set
+  // of tags the app actually emits.
+  set innerHTML(value) { this._innerHTML = value; this.textContent = String(value).replace(/<[^>]+>/g, ''); }
+  get innerHTML() { return this._innerHTML ?? ''; }
 }
 
 function makeDocument() {
@@ -126,7 +132,7 @@ function makeDocument() {
 const TEMPLATE_ROOT = new URL('../public/_scaffold/templates/', import.meta.url);
 const readTemplateFile = (filename) => readFile(new URL(filename, TEMPLATE_ROOT), 'utf8');
 
-function installDom() {
+function installDom({ serverPageEdits = { edits: [], updatedAt: '1970-01-01T00:00:00.000Z' } } = {}) {
   StubBroadcastChannel.reset();
   const doc = makeDocument();
   const storage = new Map([['canopy-tour-complete', 'true']]);
@@ -141,6 +147,7 @@ function installDom() {
     Element: globalThis.Element
   };
   const saves = [];
+  const getPageEditorCalls = [];
   globalThis.document = doc;
   globalThis.window = {
     setTimeout: () => 0, clearTimeout: () => {}, addEventListener: () => {}, innerWidth: 1280,
@@ -165,6 +172,12 @@ function installDom() {
         status: 200, headers: { 'Content-Type': 'application/json' }
       });
     }
+    if (path === '/api/page-editor' && options.method === 'GET') {
+      const siteId = new URL(String(input), 'https://builder.test').searchParams.get('siteId');
+      getPageEditorCalls.push({ siteId });
+      const body = typeof serverPageEdits === 'function' ? serverPageEdits(siteId) : { siteId, ...serverPageEdits };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
     if (path.startsWith('/_scaffold/templates/')) {
       const filename = decodeURIComponent(path.slice('/_scaffold/templates/'.length));
       return new Response(await readTemplateFile(filename), { status: 200 });
@@ -176,6 +189,7 @@ function installDom() {
     storage,
     opened,
     saves,
+    getPageEditorCalls,
     restore() {
       for (const [name, value] of Object.entries(previous)) {
         if (value === undefined) delete globalThis[name];
@@ -298,6 +312,105 @@ test('the "Clear edits" button removes the page edits and hides the status', asy
     // Let the cleared preview re-render finish before the stubs are removed.
     assert.ok(await waitFor(() => !(dom.storage.get('canopy-preview-html') || '').includes('To be cleared')), 'cleared preview was not re-rendered');
     editorTab.close();
+  } finally {
+    dom.restore();
+  }
+});
+
+test('a server save failure surfaces as a builder toast instead of a silent success', async () => {
+  // The merge round-trip in test 5 already covers a successful server save.
+  // Here we force the POST to return 503 (no database) so the bridge's
+  // never-throws contract kicks in and the notify callback must report the
+  // failure. The user has to know the preview is local-only.
+  const dom = await bootBuilder();
+  // Replace the global fetch with one that returns 503 on the POST.
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (input, options = {}) => {
+    const path = new URL(String(input), 'https://builder.test').pathname;
+    if (path === '/api/csrf') return new Response(JSON.stringify({ token: 'test-csrf-token' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (path === '/api/page-editor' && options.method === 'POST') {
+      return new Response(JSON.stringify({ error: 'Page editor database is not configured on this deployment.' }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+    }
+    return previousFetch(input, options);
+  };
+  try {
+    const editorTab = new BroadcastChannel('canopy-page-editor');
+    const acks = [];
+    editorTab.addEventListener('message', (event) => acks.push(event.data));
+    const edits = [{ selector: '#heroText', index: 0, text: 'Will save locally only' }];
+    editorTab.postMessage({ type: 'export', siteId: 'harborlight-veterinary-care', edits });
+    assert.ok(await waitFor(() => acks.length > 0), 'the builder never acknowledged the export');
+    // The ack tells the editor tab the save failed.
+    assert.equal(acks[0].ok, true);
+    assert.equal(acks[0].saved, false);
+    // The builder config still has the edits (local preview is the offline cache).
+    assert.deepEqual(savedConfig(dom).pageEdits, edits);
+    // The notify callback called the toast with the error path.
+    const region = dom.doc.getElementById('toastRegion');
+    const latestToast = () => region.children[region.children.length - 1];
+    assert.ok(await waitFor(() => latestToast() && /server save failed/.test(latestToast().textContent || '')),
+      'the builder never toasted the server save failure');
+    const errorToast = latestToast();
+    assert.match(errorToast.className, /error/);
+    assert.match(errorToast.textContent, /Page edits applied/);
+    assert.match(errorToast.textContent, /server save failed/);
+    editorTab.close();
+  } finally {
+    globalThis.fetch = previousFetch;
+    dom.restore();
+  }
+});
+
+test('the builder fetches the saved page edits at startup and merges them when the server is newer', async () => {
+  const serverEdits = [
+    { selector: '#heroText', index: 0, text: 'Server-sourced hero text' },
+    { selector: 'h3.service-title', index: 0, text: 'Server-sourced service' }
+  ];
+  const dom = installDom({
+    serverPageEdits: { edits: serverEdits, updatedAt: '2030-01-01T00:00:00.000Z' }
+  });
+  try {
+    await import(`../public/app.js?editor-bridge-merge-${Date.now()}`);
+    // Wait for the merge round-trip to complete and the local config to update.
+    assert.ok(await waitFor(() => savedConfig(dom).pageEdits.length === 2),
+      'the builder did not merge the server edits into the local config');
+    const config = savedConfig(dom);
+    assert.deepEqual(config.pageEdits, serverEdits);
+    // The merge asks for the builder's own site id.
+    assert.equal(dom.getPageEditorCalls.length, 1);
+    assert.equal(dom.getPageEditorCalls[0].siteId, 'harborlight-veterinary-care');
+    // The merged timestamp is recorded so a subsequent load does not re-fetch.
+    assert.equal(dom.storage.get('canopy-page-edits-updated-at'), String(Date.parse('2030-01-01T00:00:00.000Z')));
+    // The preview re-render fires after the merge and writes the new HTML;
+    // wait for it before tearing the stubs down.
+    assert.ok(await waitFor(() => (dom.storage.get('canopy-preview-html') || '').includes('Server-sourced hero text')),
+      'the preview was not re-rendered with the merged server edits');
+  } finally {
+    dom.restore();
+  }
+});
+
+test('the builder keeps the local copy when the server record is older than localStorage', async () => {
+  // Simulate a builder that already cached a fresher record from a previous
+  // session. The server returns a 2025 timestamp; localStorage has 2030.
+  const dom = installDom({
+    serverPageEdits: { edits: [{ selector: '#heroText', index: 0, text: 'Old server text' }], updatedAt: '2025-01-01T00:00:00.000Z' }
+  });
+  try {
+    dom.storage.set('canopy-page-edits-updated-at', String(Date.parse('2030-06-15T00:00:00.000Z')));
+    dom.storage.set('canopy-site-config', JSON.stringify({
+      businessName: 'Harborlight Veterinary Care',
+      pageEdits: [{ selector: '#heroText', index: 0, text: 'Newer local edit' }]
+    }));
+    await import(`../public/app.js?editor-bridge-merge-older-${Date.now()}`);
+    // Wait for the merge round-trip to settle, then assert the local copy won.
+    assert.ok(await waitFor(() => dom.getPageEditorCalls.length === 1),
+      'the builder never called the page-editor endpoint');
+    // Give any in-flight preview re-render a chance to run before tearing down.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const config = savedConfig(dom);
+    assert.equal(config.pageEdits.length, 1);
+    assert.equal(config.pageEdits[0].text, 'Newer local edit');
   } finally {
     dom.restore();
   }

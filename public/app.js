@@ -1,7 +1,7 @@
 import { requestGeneratedPackage } from './download.js';
 import { buildPackageLocally, buildPreviewLocally } from './package-builder.js';
-import { normalizePageEdits } from './package-core.js';
-import { initPageEditorBridge, openPageEditor, savePageEditsToServer } from './editor-bridge.js';
+import { normalizePageEdits, slugify } from './package-core.js';
+import { initPageEditorBridge, openPageEditor, savePageEditsToServer, clearPageEditsOnServer, loadPageEditsFromServer } from './editor-bridge.js';
 
 const DEFAULT_CONFIG = {
   specialty: 'veterinary',
@@ -53,6 +53,33 @@ const VERTICALS = {
   }
 };
 let config = loadConfig();
+// Pull any page edits the server has for this site and merge them over the
+// local copy when the server is newer. The local copy is the offline cache;
+// the server is the source of truth across browsers and devices. The merge
+// runs after `loadConfig()` so the rest of the builder starts with the most
+// recent record available.
+async function mergePageEditsFromServer() {
+  const siteId = slugify(config.businessName);
+  if (!siteId) return;
+  // Read the cached timestamp before the network round-trip. The merge runs
+  // at startup; reading localStorage after an await risks racing with the
+  // test harness teardown in unit tests, and it would also mean we have to
+  // hit the network before deciding whether anything is worth replacing.
+  const localUpdatedAt = Number(localStorage.getItem('canopy-page-edits-updated-at') || 0);
+  const record = await loadPageEditsFromServer(siteId);
+  if (!record || !Array.isArray(record.edits)) return;
+  const serverUpdatedAt = Date.parse(record.updatedAt || '') || 0;
+  if (serverUpdatedAt <= localUpdatedAt) return;
+  const next = pageEditsFrom(record.edits);
+  if (next.length === config.pageEdits.length && next.every((edit, index) => edit.selector === config.pageEdits[index]?.selector && edit.index === config.pageEdits[index]?.index && edit.text === config.pageEdits[index]?.text)) return;
+  config.pageEdits = next;
+  localStorage.setItem('canopy-page-edits-updated-at', String(serverUpdatedAt));
+  saveConfig(true);
+  syncInputs();
+  updatePreview(true);
+  toast('Page edits restored', `Loaded ${next.length} saved edit${next.length === 1 ? '' : 's'} from the page editor.`);
+}
+mergePageEditsFromServer();
 let nameTouched = Boolean(localStorage.getItem('canopy-name-touched'));
 let wizardStep = 0;
 let activePageId = '';
@@ -64,7 +91,13 @@ const LIVE_PREVIEW_DEBOUNCE_MS = 280;
 let livePreviewTimer = 0;
 let livePreviewRequestId = 0;
 let livePreviewController = null;
-const ADMIN_PASSWORD_POLICY = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).{12,128}$/;
+// Builder-side owner password rule. Must match the runtime's
+// `ownerPasswordProblem` (server-side validation in both runtimes) and the
+// `minlength`/`maxlength` attributes on the new-password input.
+// Owner passwords are 8–25 characters with at least one lowercase letter, one
+// uppercase letter, one number and one symbol. (Client sign-up passwords use
+// the same 8–25 length rule but drop the complexity requirement.)
+const ADMIN_PASSWORD_POLICY = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).{8,25}$/;
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
@@ -118,9 +151,9 @@ function saveConfig(immediate = false) {
   // stays debounced so the preview does not rebuild on every keystroke.
   scheduleLivePreview(immediate);
 }
-function slugify(value) {
-  return String(value || '').normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 55) || 'my-practice';
-}
+// `slugify` comes from `./package-core.js` so the builder slug, the page-editor
+// tab slug, and the generated `tele_sites.site_id` / `wrangler.jsonc` name are
+// always the same string.
 function vertical() { return VERTICALS[config.specialty] || VERTICALS.veterinary; }
 function syncInputs() {
   $('practiceName').value = config.businessName;
@@ -135,7 +168,7 @@ function syncInputs() {
   $('brandColor').value = config.primaryColor;
   $('brandColorLabel').textContent = config.primaryColor.toUpperCase();
   $('fontStyle').value = config.fontStyle;
-  $('blogToggle').checked = config.features.blog;
+  $('blogToggle').checked = true; $('blogToggle').disabled = true; // blog CMS is always on
   $('galleryToggle').checked = config.features.gallery !== false;
   $('bookingToggle').checked = config.features.scheduling;
   document.querySelectorAll('[data-specialty]').forEach((button) => button.classList.toggle('selected', button.dataset.specialty === config.specialty));
@@ -179,7 +212,7 @@ function livePreviewConfig() {
     accentColor: safeColor(config.accentColor, preset.accentColor),
     paperColor: safeColor(config.paperColor, preset.paperColor),
     fontStyle: config.fontStyle === 'sans' ? 'sans' : 'serif',
-    features: { blog: Boolean(config.features.blog), gallery: config.features.gallery !== false, scheduling: Boolean(config.features.scheduling) },
+    features: { blog: true, gallery: config.features.gallery !== false, scheduling: Boolean(config.features.scheduling) },
     payments: {
       gcashName: String(config.payments.gcashName || '').trim(), gcashNumber: String(config.payments.gcashNumber || '').trim(),
       mayaName: String(config.payments.mayaName || '').trim(), mayaNumber: String(config.payments.mayaNumber || '').trim()
@@ -277,7 +310,7 @@ function updatePreview(immediate = false) {
   const shortTheme = THEMES[config.theme]?.label || 'Custom';
   $('summarySpecialty').textContent = kind.label;
   $('summaryTheme').textContent = `${shortTheme} · ${config.fontStyle === 'serif' ? 'editorial serif' : 'modern sans'}`;
-  $('summaryModules').textContent = [config.features.blog && 'Blog', config.features.gallery !== false && 'Gallery', config.features.scheduling && 'Scheduling'].filter(Boolean).join(' + ') || 'Core pages only';
+  $('summaryModules').textContent = ['Blog', config.features.gallery !== false && 'Gallery', config.features.scheduling && 'Scheduling'].filter(Boolean).join(' + ') || 'Core pages only';
   saveConfig(immediate);
 }
 function setSpecialty(specialty) {
@@ -379,7 +412,7 @@ function validateAdminAccount() {
   if (!username.checkValidity()) { username.reportValidity(); return false; }
   if (!email.checkValidity()) { email.reportValidity(); return false; }
   if (!ADMIN_PASSWORD_POLICY.test(password.value)) {
-    password.setCustomValidity('Use 12–128 characters with at least one lowercase letter, uppercase letter, number and symbol.');
+    password.setCustomValidity('Use 8–25 characters with at least one lowercase letter, uppercase letter, number and symbol.');
     password.reportValidity();
     return false;
   }
@@ -419,7 +452,7 @@ function configForPackage() {
     accentColor: safeColor(config.accentColor, '#e9b36e'),
     paperColor: safeColor(config.paperColor, '#fbf8f1'),
     fontStyle: config.fontStyle === 'sans' ? 'sans' : 'serif',
-    features: { blog: Boolean(config.features.blog), gallery: config.features.gallery !== false, scheduling: Boolean(config.features.scheduling) },
+    features: { blog: true, gallery: config.features.gallery !== false, scheduling: Boolean(config.features.scheduling) },
     payments: {
       gcashName: String(config.payments.gcashName || '').trim(), gcashNumber: String(config.payments.gcashNumber || '').trim(),
       mayaName: String(config.payments.mayaName || '').trim(), mayaNumber: String(config.payments.mayaNumber || '').trim()
@@ -601,7 +634,7 @@ function renderWizard() {
       $('wizardPageList').querySelector(`details[data-page-id="${page.id}"] [data-page-field="menuName"]`)?.focus();
     });
   } else {
-    content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Keep the essentials close.</h1><p class="wizard-lede">Choose the practical features most local practices need. No custom CMS blocks or plugin maze.</p><div class="wizard-feature-list"><div class="wizard-feature-card"><span class="feature-icon"><svg><use href="#i-file"/></svg></span><span class="feature-copy"><strong>Blog & updates</strong><small>Fixed post fields for helpful articles and clinic news.</small></span><label class="switch"><input id="wizardBlog" type="checkbox" ${config.features.blog ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable blog</span></label></div><div class="wizard-feature-card"><span class="feature-icon feature-icon-gallery"><svg><use href="#i-image"/></svg></span><span class="feature-copy"><strong>Work & gallery</strong><small>Fixed image, caption, category and visibility fields.</small></span><label class="switch"><input id="wizardGallery" type="checkbox" ${config.features.gallery !== false ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable gallery</span></label></div><div class="wizard-feature-card"><span class="feature-icon feature-icon-book"><svg><use href="#i-calendar"/></svg></span><span class="feature-copy"><strong>Appointment requests</strong><small>Request a real time slot and collect contact details.</small></span><label class="switch"><input id="wizardBooking" type="checkbox" ${config.features.scheduling ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable appointment requests</span></label></div></div><div class="wizard-finish-card"><span><svg><use href="#i-check"/></svg></span><span><strong>Your package is ready to download.</strong><small>Choose Vercel or Cloudflare on the builder and download that code package. No deployment happens automatically.</small></span></div>`;
+    content.innerHTML = `<h1 class="wizard-title" id="wizardTitle">Keep the essentials close.</h1><p class="wizard-lede">Choose the practical features most local practices need. No custom CMS blocks or plugin maze.</p><div class="wizard-feature-list"><div class="wizard-feature-card"><span class="feature-icon"><svg><use href="#i-file"/></svg></span><span class="feature-copy"><strong>Blog & updates</strong><small>Fixed post fields for helpful articles and clinic news.</small></span><label class="switch"><input id="wizardBlog" type="checkbox" checked disabled><span class="switch-track"></span><span class="sr-only">Enable blog</span></label></div><div class="wizard-feature-card"><span class="feature-icon feature-icon-gallery"><svg><use href="#i-image"/></svg></span><span class="feature-copy"><strong>Work & gallery</strong><small>Fixed image, caption, category and visibility fields.</small></span><label class="switch"><input id="wizardGallery" type="checkbox" ${config.features.gallery !== false ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable gallery</span></label></div><div class="wizard-feature-card"><span class="feature-icon feature-icon-book"><svg><use href="#i-calendar"/></svg></span><span class="feature-copy"><strong>Appointment requests</strong><small>Request a real time slot and collect contact details.</small></span><label class="switch"><input id="wizardBooking" type="checkbox" ${config.features.scheduling ? 'checked' : ''}><span class="switch-track"></span><span class="sr-only">Enable appointment requests</span></label></div></div><div class="wizard-finish-card"><span><svg><use href="#i-check"/></svg></span><span><strong>Your package is ready to download.</strong><small>Choose Vercel or Cloudflare on the builder and download that code package. No deployment happens automatically.</small></span></div>`;
     $('wizardBlog').addEventListener('change', (event) => { config.features.blog = event.target.checked; syncInputs(); updatePreview(true); });
     $('wizardGallery').addEventListener('change', (event) => { config.features.gallery = event.target.checked; syncInputs(); updatePreview(true); });
     $('wizardBooking').addEventListener('change', (event) => { config.features.scheduling = event.target.checked; syncInputs(); updatePreview(true); });
@@ -824,7 +857,8 @@ function bindEvents() {
   [['gcashName','gcashName'],['gcashNumber','gcashNumber'],['mayaName','mayaName'],['mayaNumber','mayaNumber']].forEach(([id, field]) => $(id).addEventListener('input', (event) => { config.payments[field] = event.target.value; saveConfig(); }));
   $('brandColor').addEventListener('input', (event) => { config.primaryColor = event.target.value; syncInputs(); updatePreview(); });
   $('fontStyle').addEventListener('change', (event) => { config.fontStyle = event.target.value; updatePreview(true); });
-  $('blogToggle').addEventListener('change', (event) => { config.features.blog = event.target.checked; updatePreview(true); });
+  // The blog switch is intentionally disabled: every generated site ships
+  // with the basic CMS on, so there is no change event to handle.
   $('galleryToggle').addEventListener('change', (event) => { config.features.gallery = event.target.checked; updatePreview(true); });
   $('bookingToggle').addEventListener('change', (event) => { config.features.scheduling = event.target.checked; updatePreview(true); });
   document.querySelectorAll('.theme-template-card[data-theme]').forEach((button) => button.addEventListener('click', () => setTheme(button.dataset.theme)));
@@ -833,22 +867,35 @@ function bindEvents() {
   $('resetTheme').addEventListener('click', resetTheme);
   $('resetPreview').addEventListener('click', resetCopy);
   $('openPageEditor').addEventListener('click', openPageEditor);
-  $('clearPageEdits').addEventListener('click', () => {
+  $('clearPageEdits').addEventListener('click', async () => {
     config.pageEdits = [];
+    localStorage.removeItem('canopy-page-edits-updated-at');
     syncInputs();
     updatePreview(true);
     toast('Page edits cleared', 'The preview and the next ZIP use the generated copy again.');
+    // Mirror the clear to the server so a different device, profile or fresh
+    // browser session does not resurrect the cleared edits on the next load.
+    const siteId = slugify(config.businessName);
+    const outcome = await clearPageEditsOnServer(siteId);
+    if (!outcome.cleared) {
+      toast('Server clear failed', outcome.message || 'The local edits were cleared; the server row may still hold them.', true);
+    }
   });
   // The page editor tab posts its edits here on "Export to builder". They are
   // applied to the config (preview + next ZIP) and persisted server-side.
+  // The `notify` callback lets the bridge tell the user whether the server
+  // save succeeded; without it the builder always reports success even when
+  // `POST /api/page-editor` returned 503 (no DATABASE_URL) or 403.
   initPageEditorBridge({
     applyEdits: async (edits) => {
       config.pageEdits = edits;
+      localStorage.setItem('canopy-page-edits-updated-at', String(Date.now()));
       saveConfig(true);
       syncInputs();
       const siteId = slugify(config.businessName);
       return savePageEditsToServer(siteId, edits);
-    }
+    },
+    notify: (title, body, isError) => toast(title, body, Boolean(isError))
   });
   $('generateButton').addEventListener('click', downloadPackage);
   $('topGenerate').addEventListener('click', downloadPackage);

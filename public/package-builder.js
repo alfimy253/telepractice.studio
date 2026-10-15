@@ -45,4 +45,4 @@ async function buildPreviewLocally(input) {
   return buildPreviewDocument(input, fetchTemplate);
 }
 
-export { buildPackageLocally, buildPreviewLocally, fetchTemplate };
+export { buildPackageLocally, buildPreviewLocally };

@@ -4,7 +4,7 @@
 // passes a fetch-backed reader). Keeping one implementation guarantees that a
 // browser-built ZIP is identical to a server-built one.
 import { createZip } from './zip.js';
-import { createPasswordHash } from './_scaffold/templates/shared/lib/admin-security.js';
+import { createPasswordHash, PASSWORD_MAX, PASSWORD_MIN } from './_scaffold/templates/shared/lib/admin-security.js';
 import { adminDashboardPath } from './_scaffold/templates/shared/lib/admin-url.js';
 import { menuLinksForPages } from './_scaffold/templates/shared/lib/menu-links.js';
 
@@ -152,10 +152,10 @@ function normalizeAdminAccount(input = {}) {
     throw new Error('Enter a valid administrator email address.');
   }
   const passwordLength = password.length;
-  if (passwordLength < 12 || passwordLength > 128
+  if (passwordLength < PASSWORD_MIN || passwordLength > PASSWORD_MAX
     || !/[a-z]/.test(password) || !/[A-Z]/.test(password)
     || !/[0-9]/.test(password) || !/[^A-Za-z0-9\s]/.test(password)) {
-    throw new Error('The administrator password must be 12–128 characters and include a lowercase letter, uppercase letter, number and symbol.');
+    throw new Error(`The administrator password must be ${PASSWORD_MIN}–${PASSWORD_MAX} characters and include a lowercase letter, uppercase letter, number and symbol.`);
   }
   return { username, email, password };
 }
@@ -200,7 +200,7 @@ function normalizeConfig(input = {}) {
     phone: clean(input.phone, 30, '+1 555 010 0000') || '+1 555 010 0000', timeZone: validTimeZone(input.timeZone), theme, editorialAccent,
     primaryColor: validColor(input.primaryColor, defaultPrimary), accentColor: validColor(input.accentColor, preset.accentColor),
     paperColor: validColor(input.paperColor, preset.paperColor), fontStyle: input.fontStyle === 'sans' ? 'sans' : 'serif',
-    features: { blog: input.features?.blog !== false, gallery: input.features?.gallery !== false, scheduling: input.features?.scheduling !== false },
+    features: { blog: true, gallery: input.features?.gallery !== false, scheduling: input.features?.scheduling !== false }, // blog (the basic CMS) is always on in every package; the builder switch is disabled
     payments: {
       gcashName: clean(input.payments?.gcashName, 80, businessName) || businessName,
       gcashNumber: clean(input.payments?.gcashNumber, 40, '+63 917 555 0134'),
@@ -208,8 +208,18 @@ function normalizeConfig(input = {}) {
       mayaNumber: clean(input.payments?.mayaNumber, 40, '+63 918 555 0142')
     },
     customPages, menuLinks: menuLinksForPages(customPages),
-    heroEyebrow: vertical.eyebrow, heroHeadline: vertical.headline, heroText: vertical.heroText,
-    services: vertical.services, demoPosts, demoGallery: DEMO_GALLERY.map((item) => ({ ...item })),
+    // The hero copy and service list can be overridden through the builder.
+    // When the operator leaves the field empty (or omits the key entirely),
+    // the vertical's defaults take over. The vertical headline is a single
+    // string with a `\n` between the two visual lines; the builder splits
+    // `|` into a newline so the two templates stay compatible.
+    heroEyebrow: clean(input.heroEyebrow, 80, vertical.eyebrow) || vertical.eyebrow,
+    heroHeadline: clean(input.heroHeadline, 200, vertical.headline).replace(/\|/g, '\n') || vertical.headline,
+    heroText: clean(input.heroText, 500, vertical.heroText) || vertical.heroText,
+    services: Array.isArray(input.services) && input.services.length
+      ? input.services.map((entry) => clean(entry, 80)).filter(Boolean).slice(0, 12)
+      : vertical.services,
+    demoPosts, demoGallery: DEMO_GALLERY.map((item) => ({ ...item })),
     createdAt
   };
 }
@@ -406,7 +416,7 @@ function generatedReadme(config, secrets) {
     config.target === 'vercel' ? '## Deploy to Vercel' : '## Deploy to Cloudflare Workers',
     config.target === 'vercel'
       ? `Use Node.js 20.6+ for the standalone worker script, then deploy this folder to Vercel. In the Vercel dashboard, copy every value from ${code('.env')} into the project's Environment Variables (the ${code('.env')} file itself is only read locally). For local development, run ${code('npm install')} and ${code('npm run dev')}.`
-      : `Use Node.js 22+ and run ${code('npm install')}. Wrangler does not upload ${code('.dev.vars')} during ${code('npm run deploy')}, so the same values are baked into ${code('wrangler.jsonc')} under ${code('vars')} — that section is the production copy of ${code('.dev.vars')} (edit it and redeploy if you change a value). The Worker ${code('name')} is this ZIP's filename without the ${code('.zip')}, so each package updates exactly one Worker instead of creating duplicates. A plain ${code('npm run deploy')} therefore deploys a fully configured Worker: owner sign-in, its CSRF protection and the payment-reminder cron all work immediately, with no manual secret step. To store the values as encrypted Worker secrets instead, run ${code('npm run secrets')} to push ${code('DATABASE_URL')}, the ${code('ADMIN_*')} values, ${code('CSRF_SECRET')} and ${code('CRON_SECRET')} from ${code('.dev.vars')} to the Worker without printing them (${code('npm run secrets -- --dry-run')} lists what would be pushed); when both are set, a secret overrides the plain variable of the same name. Missing values are reported, not guessed: without the ${code('ADMIN_*')} values the owner dashboard answers “Owner sign-in is not configured…”, and without ${code('DATABASE_URL')} client accounts and the dashboard editor answer that the appointment database is not configured. For local development, ${code('.dev.vars')} is already in place, so just run ${code('npm run dev')}.`, '',
+      : `Use Node.js 22+ and run ${code('npm install')}. Wrangler does not upload ${code('.dev.vars')} during ${code('npm run deploy')}, so the same values are baked into ${code('wrangler.jsonc')} under ${code('vars')} — that section is the production copy of ${code('.dev.vars')} (edit it and redeploy if you change a value). The generated ${code('.gitignore')} already covers ${code('wrangler.jsonc')}, so a fresh ${code('git init && git add . && git push')} will not commit your database password and admin hash. The Worker ${code('name')} is this ZIP's filename without the ${code('.zip')}, so each package updates exactly one Worker instead of creating duplicates. A plain ${code('npm run deploy')} therefore deploys a fully configured Worker: owner sign-in, its CSRF protection and the payment-reminder cron all work immediately, with no manual secret step. To store the values as encrypted Worker secrets instead, run ${code('npm run secrets')} to push ${code('DATABASE_URL')}, the ${code('ADMIN_*')} values, ${code('CSRF_SECRET')} and ${code('CRON_SECRET')} from ${code('.dev.vars')} to the Worker without printing them (${code('npm run secrets -- --dry-run')} lists what would be pushed); when both are set, a secret overrides the plain variable of the same name. Missing values are reported, not guessed: without the ${code('ADMIN_*')} values the owner dashboard answers “Owner sign-in is not configured…”, and without ${code('DATABASE_URL')} client accounts and the dashboard editor answer that the appointment database is not configured. For local development, ${code('.dev.vars')} is already in place, so just run ${code('npm run dev')}.`, '',
     '## Owner dashboard and sign-in',
     `The owner dashboard path is generated from the current date in the site's time zone (default ${code(config.timeZone)}). Today, when this package was generated, its path is ${code(currentAdminPath)}; it changes at local midnight. The dashboard is not linked from public pages; enter this URL directly and sign in using the administrator account configured in the builder. The public sign-in form intentionally starts blank; the raw password is never embedded in public site assets.`,
     `The owner account lives in the database, in ${code('tele_admin_users')} — one row per site, holding the username, email and a salted PBKDF2 password hash. The ${code('ADMIN_USERNAME')}/${code('ADMIN_EMAIL')}/${code('ADMIN_PASSWORD_HASH')} values only seed that row on first use; afterwards the database copy is authoritative, and the owner can change the username, email or password from the dashboard's Sign-in panel (it asks for the current password and re-issues the session). Redeploying this package never overwrites a changed account.`,
@@ -441,6 +451,7 @@ function generatedCustomPageHtml(config, page) {
   <link rel="stylesheet" href="/site.css">
   <link rel="stylesheet" href="/brivon.css">
   <script src="/site-config.js" defer></script>
+  <script src="/brivon-fonts.js" defer></script>
   <script src="/site.js" defer></script>
 </head>
 <body class="custom-page">
@@ -862,7 +873,18 @@ async function buildFiles(input, readTemplate) {
   const schemaStatements = splitSqlStatements(await readTemplate('shared/db/schema.sql'));
   const files = new Map();
   const publicPath = (relative) => target === 'vercel' ? relative.replace(/^public\//, '') : relative;
-  files.set('.gitignore', `node_modules/\n${ENV_FILE_BY_TARGET[target]}\n`);
+  // The generated `.gitignore` covers both the env file and `wrangler.jsonc`.
+  // The Cloudflare package bakes real secrets (DATABASE_URL, ADMIN_*,
+  // CSRF_SECRET) into `wrangler.jsonc` so a plain `wrangler deploy` works,
+  // but the customer's first `git init && git add . && git push` would
+  // otherwise commit those secrets to a public repo. `wrangler.jsonc` is
+  // shipped on disk (the Worker reads it) — it is just not committed.
+  // The Vercel package has no equivalent; `vercel.json` carries no secrets.
+  const envFile = ENV_FILE_BY_TARGET[target];
+  const extraIgnore = target === 'cloudflare'
+    ? '\n# wrangler.jsonc carries the same values as .dev.vars in vars; keep it out of source control and use wrangler secret put or this package\'s npm run secrets instead.\nwrangler.jsonc\n'
+    : '';
+  files.set('.gitignore', `node_modules/\n${envFile}${extraIgnore}\n`);
 
   for (const relative of manifest.sharedPublic) {
     let content = replaceTokens(await readTemplate(`shared/${relative}`), config);
@@ -924,4 +946,4 @@ async function generateBundle(input, readTemplate) {
   const buffer = createZip([...files.entries()]);
   return { config, buffer, filename: `${config.siteId}-${config.target}.zip` };
 }
-export { buildPreviewDocument, generateBundle, normalizeAdminAccount, normalizeConfig, normalizePageEdits, applyPageEdits, splitSqlStatements, PAGE_EDIT_EXCLUDED_IDS };
+export { buildPreviewDocument, generateBundle, normalizeAdminAccount, normalizeConfig, normalizePageEdits, applyPageEdits, slugify, PAGE_EDIT_EXCLUDED_IDS };

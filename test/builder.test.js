@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { verifyPasswordHash } from '../public/_scaffold/templates/shared/lib/admin-security.js';
+import { PASSWORD_MAX as sharedPasswordMax, PASSWORD_MIN as sharedPasswordMin, verifyPasswordHash } from '../public/_scaffold/templates/shared/lib/admin-security.js';
 import { normalizeSiteTheme } from '../public/_scaffold/templates/shared/lib/site-theme.js';
 import worker from '../src/index.js';
 import { requestGeneratedPackage } from '../public/download.js';
@@ -321,7 +321,9 @@ test('configured practice settings are preserved in both generated ZIP targets',
     assert.equal(generatedConfig.accentColor, settings.accentColor);
     assert.equal(generatedConfig.paperColor, settings.paperColor);
     assert.equal(generatedConfig.fontStyle, settings.fontStyle);
-    assert.deepEqual(generatedConfig.features, settings.features);
+    // The blog CMS is always on: even a request with blog: false ships with
+    // it enabled. Every other feature flag is preserved exactly as sent.
+    assert.deepEqual(generatedConfig.features, { ...settings.features, blog: true });
     assert.deepEqual(generatedConfig.payments, settings.payments);
     assert.match(files.get('README.md'), /default `America\/Los_Angeles`/);
 
@@ -333,11 +335,13 @@ test('builder rejects weak or incomplete administrator credentials before creati
   const env = { ASSETS: assets };
   const auth = await session(env);
   const invalidAccounts = [
-    { adminPassword: 'Abcdef1!234' },
-    { adminPassword: 'ABCDEFGHIJ1!' },
-    { adminPassword: 'abcdefghij1!' },
-    { adminPassword: 'Abcdefghij!!' },
-    { adminPassword: 'Abcdefghij12' },
+    { adminPassword: 'Aa1!' },              // too short (4 chars)
+    { adminPassword: 'Ab1!aa' },            // too short (6 chars)
+    { adminPassword: `${'A'.repeat(26)}a1!` }, // too long
+    { adminPassword: 'ABCDEFGHIJ1!' },      // 12 chars, no lowercase
+    { adminPassword: 'abcdefghij1!' },      // 12 chars, no uppercase
+    { adminPassword: 'Abcdefghij!!' },      // 12 chars, no number
+    { adminPassword: 'Abcdefghij12' },      // 12 chars, no symbol
     { adminUsername: 'x' },
     { adminEmail: 'bad-address' }
   ];
@@ -599,7 +603,9 @@ test('builder live preview follows the specialty, features and contact details',
   });
   assert.match(html, /id="heroHeadline">A reason to<br><em>smile easier\.<\/em>/);
   assert.match(html, /<h3 class="service-title">Preventive care<\/h3>/);
-  assert.match(html, /<section id="journal" class="hidden">/);
+  // The blog (journal) is always on now, so it renders even when the input
+  // asked for blog: false; scheduling remains genuinely optional.
+  assert.doesNotMatch(html, /<section[^>]*id="journal"[^>]*\bhidden\b/);
   assert.match(html, /<section id="book" class="closing-cta hidden">/);
   assert.doesNotMatch(html, /Wellness &amp; prevention/);
   assert.match(html, /Brightside Dental Studio/);
@@ -615,7 +621,7 @@ test('builder live preview rejects missing, invalid or oversized configurations'
   const call = (query) => worker.fetch(new Request(`${origin}/api/preview${query}`), { ASSETS: assets });
   assert.equal((await call('')).status, 400);
   assert.equal((await call('?config=%7Bbroken')).status, 400);
-  assert.equal((await call(`?config=${encodeURIComponent(JSON.stringify({ businessName: 'a'.repeat(17 * 1024) }))}`)).status, 413);
+  assert.equal((await call(`?config=${encodeURIComponent(JSON.stringify({ businessName: 'a'.repeat(130 * 1024) }))}`)).status, 413);
 });
 
 test('builder preview uses one scrollable iframe for the selected full homepage', async () => {
@@ -679,4 +685,125 @@ test('builder live preview accepts menu-only custom pages and stays within its l
   // And the builder really does trim page bodies out of the preview request.
   const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.match(app, /customPages: normalizeSavedPages\(config\.customPages\)\.map\(\(\{ menuName, url \}\) => \(\{ menuName, url \}\)\)/);
+});
+
+// The 8-25 password policy is enforced across three runtimes (builder client,
+// builder worker, generated Cloudflare worker, generated Vercel function,
+// shared hash verifier) plus the HTML `minlength` / `maxlength` attributes on
+// every password field. Native HTML validation runs BEFORE any JS, so a stale
+// attribute silently overrides the newer rule: the builder form used to carry
+// minlength="12" maxlength="128" long after the JS moved on, which made a
+// valid minimum-length password impossible to submit through the UI. Both
+// generated runtimes now import PASSWORD_MIN/PASSWORD_MAX from
+// lib/admin-security.js instead of declaring their own copies, so there is one
+// definition to change. These assertions pin every remaining site to it.
+const PASSWORD_MIN = 8;
+const PASSWORD_MAX = 25;
+
+function passwordInputs(html) {
+  const inputs = [];
+  for (const match of html.matchAll(/<input\b[^>]*>/g)) {
+    const tag = match[0];
+    if (!/type="password"/.test(tag)) continue;
+    // The DATABASE_URL field is type="password" purely to mask a connection
+    // string; it is not subject to the password policy.
+    const id = /id="([^"]*)"/.exec(tag)?.[1] ?? '';
+    const name = /name="([^"]*)"/.exec(tag)?.[1] ?? '';
+    if (id === 'databaseUrl' || name === 'databaseUrl') continue;
+    inputs.push({
+      id, name, tag,
+      minlength: /minlength="(\d+)"/.exec(tag)?.[1],
+      maxlength: /maxlength="(\d+)"/.exec(tag)?.[1]
+    });
+  }
+  return inputs;
+}
+
+test('every password field in the builder and the generated site enforces the 8-25 policy', async () => {
+  const files = {
+    'public/index.html': await readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+    'admin.html': await readFile(new URL('../public/_scaffold/templates/shared/public/admin.html', import.meta.url), 'utf8'),
+    'appointments.html': await readFile(new URL('../public/_scaffold/templates/shared/public/appointments.html', import.meta.url), 'utf8')
+  };
+  let checked = 0;
+  for (const [filename, html] of Object.entries(files)) {
+    const inputs = passwordInputs(html);
+    assert.ok(inputs.length >= 2, `${filename} should carry at least two password inputs, found ${inputs.length}`);
+    for (const input of inputs) {
+      const label = `${filename} <input id="${input.id}" name="${input.name}">`;
+      // A field that only re-types an existing password (current-password) may
+      // omit minlength so the server, not the browser, reports "wrong
+      // password"; it must still cap the length.
+      const isCurrentPassword = /autocomplete="current-password"/.test(input.tag)
+        && !/autocomplete="new-password"/.test(input.tag);
+      assert.equal(input.maxlength, String(PASSWORD_MAX), `${label} maxlength must be ${PASSWORD_MAX}`);
+      if (!isCurrentPassword) {
+        assert.equal(input.minlength, String(PASSWORD_MIN), `${label} minlength must be ${PASSWORD_MIN}`);
+      } else if (input.minlength !== undefined) {
+        assert.equal(input.minlength, String(PASSWORD_MIN), `${label} minlength must be ${PASSWORD_MIN} when present`);
+      }
+      checked += 1;
+    }
+  }
+  assert.ok(checked >= 6, `expected at least six password inputs across the three forms, checked ${checked}`);
+  // The visible helper text must not contradict the enforced range.
+  assert.match(files['public/index.html'], /\(8–25 characters\)/, 'the builder label still advertises a stale range');
+  assert.doesNotMatch(files['public/index.html'], /12–128 characters|minlength="12"|maxlength="128"/, 'the builder form still carries the retired 12-128 policy');
+});
+
+test('the 8-25 password bounds agree across every runtime that validates them', async () => {
+  const appJs = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(appJs, new RegExp(String.raw`ADMIN_PASSWORD_POLICY\s*=\s*/\^\(\?=\.\*\[a-z\]\)\(\?=\.\*\[A-Z\]\)\(\?=\.\*\[0-9\]\)\(\?=\.\*\[\^A-Za-z0-9\\s\]\)\.\{${PASSWORD_MIN},${PASSWORD_MAX}\}\$/`),
+    'app.js ADMIN_PASSWORD_POLICY must encode 8-25');
+
+  const packageCore = await readFile(new URL('../public/package-core.js', import.meta.url), 'utf8');
+  assert.match(packageCore, /passwordLength < PASSWORD_MIN \|\| passwordLength > PASSWORD_MAX/,
+    'package-core.js must reject outside the shared PASSWORD_MIN/PASSWORD_MAX bounds');
+  assert.match(packageCore, /import \{[^}]*PASSWORD_MAX[^}]*PASSWORD_MIN[^}]*\} from '\.\/_scaffold\/templates\/shared\/lib\/admin-security\.js';/,
+    'package-core.js must import the shared password constants');
+  assert.doesNotMatch(packageCore, /must be 12–128 characters/, 'package-core.js error text still advertises 12-128');
+
+  // The shared verifier is the single source of truth: it defines the two
+  // constants, uses them in verifyPasswordHash(), and exports them.
+  assert.equal(sharedPasswordMin, PASSWORD_MIN, 'admin-security.js PASSWORD_MIN must be 7');
+  assert.equal(sharedPasswordMax, PASSWORD_MAX, 'admin-security.js PASSWORD_MAX must be 25');
+  const adminSecurity = await readFile(new URL('../public/_scaffold/templates/shared/lib/admin-security.js', import.meta.url), 'utf8');
+  assert.match(adminSecurity, /password\.length < PASSWORD_MIN \|\| password\.length > PASSWORD_MAX/,
+    'verifyPasswordHash must use the constants, not literals, so a stored hash can never be checked against a retired range');
+  assert.match(adminSecurity, /export \{[\s\S]*?PASSWORD_MAX,[\s\S]*?PASSWORD_MIN,[\s\S]*?\};/,
+    'admin-security.js must export both constants');
+
+  for (const relative of ['cloudflare/src/index.js', 'vercel/api/index.js']) {
+    const runtime = await readFile(new URL(`../public/_scaffold/templates/${relative}`, import.meta.url), 'utf8');
+    // Both runtimes must import the shared constants and must not shadow them
+    // with a local copy — a local copy is exactly how the builder form drifted
+    // to 12-128 while the JS moved to 7-25.
+    assert.match(runtime, /import \{[^}]*PASSWORD_MAX[^}]*PASSWORD_MIN[^}]*\} from '\.\.\/lib\/admin-security\.js';/,
+      `${relative} must import PASSWORD_MIN/PASSWORD_MAX from lib/admin-security.js`);
+    assert.doesNotMatch(runtime, /const PASSWORD_(MIN|MAX) =/, `${relative} must not re-declare the password bounds locally`);
+    // Owner sign-in and client sign-up must both route through the constants
+    // rather than re-typing the numbers.
+    const hardCoded = runtime.match(/\b(password|value)\.length [<>]=? \d+/gi) ?? [];
+    assert.deepEqual(hardCoded, [], `${relative} compares a password against a literal; use PASSWORD_MIN/PASSWORD_MAX: ${hardCoded.join(', ')}`);
+    assert.match(runtime, /value\.length < PASSWORD_MIN \|\| value\.length > PASSWORD_MAX/, `${relative} ownerPasswordProblem must use the constants`);
+    assert.match(runtime, /password\.length < PASSWORD_MIN/, `${relative} registerProblem must use the constants`);
+  }
+});
+
+test('the builder accepts passwords at both 8-25 boundaries and rejects 7 and 26', async () => {
+  const env = { CSRF_SECRET: 'test-only-secret', ASSETS: assets };
+  const auth = await session(env);
+  const build = (adminPassword) => generate(env, auth, {}, 'cloudflare', { adminPassword });
+  // Exactly PASSWORD_MIN characters, one of each required class.
+  const atMin = await build('Abcdef1!');
+  assert.equal(atMin.status, 200, `a ${PASSWORD_MIN}-character password must build: ${await atMin.clone().text()}`);
+  // Exactly PASSWORD_MAX characters.
+  const atMax = await build(`A${'b'.repeat(PASSWORD_MAX - 3)}1!`);
+  assert.equal(atMax.status, 200, `a ${PASSWORD_MAX}-character password must build: ${await atMax.clone().text()}`);
+  const tooShort = await build('Abcde1!');
+  assert.equal(tooShort.status, 400, 'a 7-character password must be rejected');
+  assert.match(await tooShort.text(), /8–25 characters/, 'the rejection must name the current range');
+  const tooLong = await build(`A${'b'.repeat(PASSWORD_MAX - 2)}1!`);
+  assert.equal(tooLong.status, 400, `a ${PASSWORD_MAX + 1}-character password must be rejected`);
+  assert.match(await tooLong.text(), /8–25 characters/, 'the rejection must name the current range');
 });

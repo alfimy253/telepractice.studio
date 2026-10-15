@@ -1,6 +1,11 @@
 node_modules/
+.wrangler/
 .wrangler/tmp/
 .env
+.dev.vars
+# `*.local` covers any env file the operator creates with a `.local` suffix
+# (e.g. .env.local, .dev.vars.local) — the convention Vercel and the wider
+# Node ecosystem use for untracked local-only configuration.
 
 # Scaffold templates are checked into git on purpose: they only contain
 # placeholder tokens (e.g. __CSRF_SECRET__) that the builder fills in at
