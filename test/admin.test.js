@@ -55,7 +55,10 @@ test('generated owner path is absent from public entry points and only returned 
   assert.doesNotMatch(cloudflareRuntime, /path === ['"]\/api\/admin\/entry/);
   assert.match(vercelRuntime, /\.\.\.\(authenticated \? \{ dashboardPath: adminDashboardPath/);
   assert.match(cloudflareRuntime, /\.\.\.\(authenticated \? \{ dashboardPath: adminDashboardPath/);
-  assert.match(cloudflareRuntime, /if \(!await adminOk\(request, env\)\) return error\('Not found\.', 404\)/);
+  assert.match(vercelRuntime, /authenticated: true/);
+  assert.match(cloudflareRuntime, /authenticated: true/);
+  assert.match(cloudflareRuntime, /url\.pathname !== expectedPath && await adminOk\(request, env\)/);
+  assert.doesNotMatch(cloudflareRuntime, /if \(!await adminOk\(request, env\)\) return error\('Not found\.', 404\)/);
   assert.match(vercelConfig, /"source": "\/admin\.html", "destination": "\/"/);
   assert.match(cloudflareAdminUi, /if \(!session\.authenticated \|\| !session\.dashboardPath/);
   assert.match(cloudflareAdminUi, /followDashboardPath\(session\)/);

@@ -21,8 +21,10 @@ import { readFile } from 'node:fs/promises';
 import {
   constantEqual,
   createPasswordHash,
+  normalizePasswordHash,
   PASSWORD_MAX,
   PASSWORD_MIN,
+  passwordHashWellFormed,
   verifyPasswordHash
 } from '../public/_scaffold/templates/shared/lib/admin-security.js';
 
@@ -41,6 +43,17 @@ test('the shared constants define 8-25', () => {
 test('verifyPasswordHash accepts the correct password at both boundaries', async () => {
   assert.equal(await verifyPasswordHash(MIN_PASSWORD, await createPasswordHash(MIN_PASSWORD)), true);
   assert.equal(await verifyPasswordHash(MAX_PASSWORD, await createPasswordHash(MAX_PASSWORD)), true);
+});
+
+test('quoted or padded hashes still verify and malformed hashes are detected', async () => {
+  const hash = await createPasswordHash(MIN_PASSWORD);
+  assert.equal(normalizePasswordHash(`"${hash}"`), hash);
+  assert.equal(normalizePasswordHash(`'${hash}'`), hash);
+  assert.equal(passwordHashWellFormed(hash), true);
+  assert.equal(passwordHashWellFormed(`"${hash}"`), true);
+  assert.equal(passwordHashWellFormed(`"${hash}`), false);
+  assert.equal(await verifyPasswordHash(MIN_PASSWORD, `"${hash}"`), true);
+  assert.equal(await verifyPasswordHash(MIN_PASSWORD, `'${hash}'`), true);
 });
 
 test('verifyPasswordHash rejects wrong passwords of any length', async () => {

@@ -29,22 +29,24 @@ practice **owner** and public **clients**, plus unauthenticated visitors.
    block, which is intentional (Rule G2) — the deploy-time copy of
    `.dev.vars`, which Wrangler never uploads.
 3. **First contact (automatic).** The first real request creates the schema
-   (all 59 statements), inserts the site's `tele_sites` row, and seeds the
-   owner account from the `ADMIN_*` values. From then on the database owner
-   row is authoritative; the seed can never overwrite an owner-edited
-   account.
+   (all 59 statements), upserts the site's `tele_sites` row (an untouched
+   seed with `updated_at = created_at` is refreshed from the compiled
+   package; an owner-edited row is kept), and seeds the owner account from
+   the `ADMIN_*` values. From then on the database owner row is
+   authoritative; the seed can never overwrite an owner-edited account.
 4. **Owner setup.** The owner signs in at a date-rotating dashboard URL
    (Rule A3), publishes the monthly schedule and open slots, edits content.
-5. **Visitor browsing (no account).** Public pages, blog, gallery and the
-   open calendar are readable by anyone; reserving a slot requires a client
-   account.
+5. **Visitor browsing (no account).** Public pages, blog and gallery are
+   readable by anyone. The appointments page shows an empty calendar and
+   `#guestWhatWeDo` (Brivon “What we do” copy on Illustration `.service-card` markup); booking controls stay hidden
+   until the visitor signs in as a client (Rule E5).
 6. **Client booking.** Register (email + password, same 8–25 complexity
    policy as the owner), sign in, pick an open slot and GCash or Maya, and
    enter a **required consultation phone number** (the internet-outage
    fallback). One atomic insert creates the booking as `confirmed` /
    `awaiting_proof` with a payment window of booking time + 15 minutes
-   (Rule E1). Guests see neither the calendar nor the payment details
-   (Rule E5).
+   (Rule E1). Guests see an empty calendar chrome and no payment numbers
+   or slot data (Rule E5).
 7. **Client payment.** Pay off-platform, then click **Upload payment proof**
    to attach the transaction screenshot; the booking flips to
    `pending_review` and can no longer be dropped. The 15-minute window **is**
@@ -80,7 +82,7 @@ practice **owner** and public **clients**, plus unauthenticated visitors.
 | E2 | The 15-minute payment window **is the deadline for bookings without proof**: reminder at 12, automatic drop at 15, both sides notified on site. |
 | E3 | Proof upload: one per appointment, PNG/JPEG/WebP by magic bytes, ≤ 3 MB; accepted any time **before** the drop, 409 after it. |
 | E4 | Cancellation/rejection are **deliberate human actions** with their own guards (owner cancel only > 24 h out). |
-| E5 | **Guests see no calendar and no GCash/Maya details** — both are account-only; `/api/availability` 401s without a client session. |
+| E5 | **Guests get no slot data and no GCash/Maya details** — empty calendar chrome + `#guestWhatWeDo`; `/api/availability` 401s without a client session. |
 | F1 | Menu hrefs pass **one canonical sanitizer**, copied byte-for-byte to the browser. |
 | G1 | Scaffold **`__TOKEN__` placeholders** only where the builder substitutes them — never in comments or prose. |
 | G2 | The `wrangler.jsonc` **`vars` block is intentional**; do not remove it or "move it to secrets" by default. |
@@ -121,14 +123,18 @@ bounds.
     (e.g. `Abcdef1!` passes, `Abcde1!` is now too short at 7).
 - **Related code:**
   - `public/_scaffold/templates/shared/lib/admin-security.js` —
-    `PASSWORD_MIN = 7`, `PASSWORD_MAX = 25` (the single source of truth),
+    `PASSWORD_MIN = 8`, `PASSWORD_MAX = 25` (the single source of truth),
     `verifyPasswordHash()`.
   - Generated runtimes import them: `cloudflare/src/index.js` and
     `vercel/api/index.js` (`import { PASSWORD_MAX, PASSWORD_MIN, … }`),
     used by the owner validator, client register route
     (`password.length < PASSWORD_MIN || password.length > PASSWORD_MAX`),
-    and the builder form validation.
-  - Tests: `test/builder.test.js` (password boundaries at 7 and 25).
+    and the builder form validation. Client sign-up (`registerProblem()`)
+    also enforces the four character classes; `verifyPasswordHash()` itself
+    only checks length.
+  - Tests: `test/builder.test.js` and `test/password-security.test.js`
+    (password boundaries at 8 and 25). Re-verified 2026-10-16: `npm test`
+    **135/135**.
 
 ### Rule A2 — Passwords are stored only as PBKDF2 hashes; sessions are HMAC-signed and credential-bound
 
@@ -186,15 +192,26 @@ authoritative.
 The owner sign-in/dashboard is not at `/admin`; its path rotates daily and is
 derived from the date in the site's time zone.
 
-- **Technical details:** The path is `/<last letter of the day's zodiac
-  animal>admin<day-of-month>/dashboard` (Monday-first animal sequence), e.g.
-  `/tadmin8/dashboard`. Login responses return the current path; a request to
-  a stale path does not authenticate.
+- **Technical details:** The path is
+  `/<last letter of the day's weekday animal>admin<day-of-month>/dashboard`
+  from the Monday-first list dog / rat / ant / fish / fly / cat / cockroach
+  (not the zodiac), e.g. `/tadmin8/dashboard`. Computed in the site time zone
+  (`adminDashboardPath` in `shared/lib/admin-url.js`). Cloudflare serves
+  `admin.html` on **any** `*adminN/dashboard` path so a yesterday bookmark
+  still shows the sign-in form; a signed-in owner hitting a stale path is
+  302'd to today. Vercel rewrites **any** `/:adminSegment/dashboard` to
+  `/admin.html` with no same-day check (`vercel.json`). Direct `/admin.html`
+  is 404 (Cloudflare) or redirected to `/` (Vercel). `GET /api/admin/session`
+  omits `dashboardPath` when the caller is not authenticated.
+  `POST /api/admin/login` returns `authenticated: true` plus `dashboardPath`;
+  `admin.js` `followDashboardPath()` then replaces the URL with today's path.
 - **Implementation rules:** Always generate the path through the shared helper
   with the site's configured time zone — never hard-code a path, and never
   compute it in UTC when the site runs on another zone.
 - **Related code:** `shared/lib/admin-url.js` — `adminDashboardPath(date,
-  timeZone)`; used by both runtimes' login handlers and admin-page guard.
+  timeZone)`, `isAdminDashboardPath()`; Cloudflare `fetch()` admin-page
+  guard; Vercel `vercel.json` rewrites; `shared/public/admin.js`
+  `followDashboardPath()`.
 
 ---
 
@@ -220,17 +237,22 @@ reject requests without a valid CSRF token before doing any work.
 ### Rule B2 — Cookies are HttpOnly + SameSite=Strict; responses carry the full security-header set
 
 - **Technical details:** Session and CSRF cookies are `HttpOnly`,
-  `SameSite=Strict`, `Secure` on HTTPS (with the `__Host-` prefix where
-  applicable in the builder). Every response passes through
-  `headersWithSecurity()`: a restrictive CSP (`default-src 'self'`, no
-  objects, `frame-ancestors 'none'`), `nosniff`, `X-Frame-Options: DENY`,
+  `SameSite=Strict`, `Secure` on HTTPS. Generated-site owner cookies use the
+  `__Host-canopy_owner` name when the runtime thinks the request is HTTPS
+  (`request.url` protocol on Cloudflare, `req.secure` on Vercel with
+  `trust proxy`), otherwise `canopy_owner`. `ownerSessionToken()` reads
+  either name. CSP is `default-src 'self'`, no objects,
+  `frame-ancestors 'none'`, plus `nosniff`, `X-Frame-Options: DENY`,
   referrer and permissions policies. API/JSON responses are `no-store`.
 - **Implementation rules:** Never set a session cookie by hand outside the
   existing cookie helpers; never weaken the CSP for one route — inline assets
   needed by a page belong in the packaged static files.
-- **Related code:** `cloudflare/src/index.js` — `headersWithSecurity()`,
-  `json()`, `clientSessionCookie()`, `ownerSessionCookie()` (mirrored in
-  `vercel/api/index.js`); builder equivalents in `src/index.js`.
+- **Related code:** Cloudflare `headersWithSecurity()`, `json()`,
+  `ownerSessionCookie()` in `cloudflare/src/index.js`. Vercel applies the
+  same CSP through `helmet({ contentSecurityPolicy: … })` in
+  `vercel/api/index.js` (there is no `headersWithSecurity` helper there)
+  and `Cache-Control: no-store` middleware. Builder equivalents in
+  `src/index.js`.
 
 ### Rule B3 — Error logs never carry credentials; full causes are DEBUG-gated
 
@@ -275,19 +297,29 @@ or write rows belonging to another site.
 
 ### Rule C2 — Request handlers use the bootstrapping client; the schema must exist before the first real query
 
-A fresh deployment creates its own schema and site row on first contact;
-handlers never assume an operator ran SQL manually.
+A fresh deployment creates its own schema, site row, and owner login row on
+first contact; handlers never assume an operator ran SQL manually.
 
 - **Technical details:** `sql(env)` (Cloudflare) / `getDb()` (Vercel) await
-  `ensureSiteRow()` → `ensureSchema()` before every query. `ensureSchema()`
-  runs all 59 statements of `schema.sql` (~16 KB: 12 `CREATE TABLE`, 17
-  `ALTER TABLE`, 14 `CREATE INDEX`, `DO $$` guards) inside **one transaction**,
-  memoised per isolate (`schemaReady`); it gives up after two failures
-  (`schemaFailures > 1`) so a misconfigured database fails fast with the real
-  query error. `ensureSiteRow()` then inserts the `tele_sites` row
-  (`ON CONFLICT DO NOTHING`) — without it, every FK-referencing insert (client
-  signup first) fails on a fresh deploy. No `lock_timeout`/`statement_timeout`
-  is configured anywhere, which is exactly why Rule D2 exists.
+  `ensureSiteRow()` → `ensureSchema()` and `ensureAdminUser()` before every
+  query. The first live page GET (homepage, `*.html`, or the rotating
+  dashboard URL) also seeds `tele_admin_users` so owner credentials land in
+  the same Neon database as `tele_client_accounts` without waiting for a
+  login POST. `ensureSchema()`
+  runs all **59** statements of `schema.sql` (~16.3 KB) inside **one
+  transaction**, memoised per isolate (`schemaReady`); it gives up after two
+  failures (`schemaFailures > 1`) so a misconfigured database fails fast with
+  the real query error. After `splitSqlStatements()` those 59 are mixed
+  `CREATE TABLE` / `ALTER TABLE` / `CREATE INDEX` / `DO $$` (the file *text*
+  contains 12 `CREATE TABLE` lines; several sit inside `DO` bodies and count
+  as `DO`, not as top-level `CREATE TABLE`). `ensureSiteRow()` then
+  `INSERT … ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config
+  WHERE tele_sites.updated_at = tele_sites.created_at` so an untouched seed
+  picks up a rebuilt package theme and an owner-stamped row is kept.
+  Optional `db/seed.sql` remains `ON CONFLICT DO NOTHING`. Without the site
+  row, every FK-referencing insert (client signup first) fails on a fresh
+  deploy. No `lock_timeout`/`statement_timeout` is configured anywhere, which
+  is exactly why Rule D2 exists.
 - **Implementation rules:**
   - Ordinary routes must keep using `sql(env)` / `getDb()` — bypassing the
     bootstrap reintroduces fresh-deploy failures.
@@ -501,21 +533,36 @@ Schedulers run against the **raw** client. They must not call `sql(env)` /
 
 ### Rule E5 — The calendar and payment details are account-only (guests see neither)
 
-- **Technical details:** A visitor without a client session gets: no
-  appointment calendar (the calendar area shows "Sign in to view appointment
-  availability and booking." and `/api/availability` answers 401), and no
-  GCash/Maya account details (the footer payment block shows a sign-in note;
-  `site.js` only fills the numbers after `/api/auth/me` confirms a client).
-  Reading published journal posts stays public (Rule G4). Known limit: the
-  compiled `site-config.js` shipped in the package still embeds the payment
-  account strings — the UI and API hide them from guests, but they are not a
-  secret from someone who reads the file. Treat the numbers as "unlisted",
-  and see *To Be Implemented* for removing them from the public config.
+- **Technical details:** A visitor without a client session never receives
+  slot data or GCash/Maya account details. `/api/availability` answers 401
+  without a client session. On the appointments page the guest sees an
+  empty month grid (no previous/next buttons, no slot list, no reservation
+  form — those carry `data-booking-control` and are hidden by
+  `body.guest-calendar-view`) and, directly below the empty calendar,
+  `#guestWhatWeDo`. That block uses Brivon welcome copy (“What we do” /
+  “Focused care. Built around you.”) on the Illustration `.service-grid` /
+  `.service-card` markup. The Illustration homepage `#care` section is
+  titled “MADE FOR REAL LIFE”; the Brivon homepage uses `.tier-grid` /
+  `.tier-card`. The client sign-in / create-account panel stays
+  further down the page. `site.js` only fills payment numbers after
+  `/api/auth/me` confirms a client. Reading published journal posts stays
+  public (Rule G4). Known limit: the compiled `site-config.js` shipped in
+  the package still embeds the payment account strings — the UI and API
+  hide them from guests, but they are not a secret from someone who reads
+  the file. Treat the numbers as "unlisted", and see *To Be Implemented*
+  for removing them from the public config. (Bug Fix No. 204.)
 - **Implementation rules:** Never re-add payment numbers or slot data to a
-  public render path. Guest-facing copies of these blocks must show the
-  sign-in prompt, not empty space.
+  public render path. Do not show booking UI controls (month navigation,
+  legends, slot buttons, reservation form) to a guest. The section
+  immediately below the empty guest calendar is `#guestWhatWeDo` (not the
+  reservation card). `chooseSlot()` must refuse a guest even if markup is
+  forced visible.
 - **Related code:** `/api/availability` in both runtimes;
-  `shared/public/appointments.js` — `loadMonth()` guest branch, `initialize()`;
+  `shared/public/appointments.html` — `guest-calendar-view`,
+  `data-booking-control`, `#guestWhatWeDo`;
+  `shared/public/appointments.js` — `renderEmptyGuestCalendar()`,
+  `setGuestBookingView()`, `loadMonth()` guest branch, `chooseSlot()`;
+  `shared/public/site.css` — `body.guest-calendar-view [data-booking-control]`;
   `shared/public/site.js` — `renderPaymentDetails()`.
 
 ---

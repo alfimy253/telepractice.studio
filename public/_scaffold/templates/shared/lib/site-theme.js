@@ -8,4 +8,8 @@ function normalizeSiteTheme(theme, generatedTheme) {
   return selectedTheme.startsWith('brivon-') === isBrivonPackage ? selectedTheme : generatedTheme;
 }
 
-export { normalizeSiteTheme };
+function packageThemeClass(theme) {
+  return SITE_THEMES.includes(theme) ? `theme-${theme}` : 'theme-canopy';
+}
+
+export { normalizeSiteTheme, packageThemeClass, SITE_THEMES };

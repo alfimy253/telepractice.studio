@@ -1,14 +1,13 @@
 const ADMIN_PASSWORD_ITERATIONS = 210000;
 const ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60;
 // Single source of truth for the password length rule. Password length is 8–25
-// characters for every sign-in form in a generated site: the owner sign-in, the
-// owner's "change password" panel, the public client sign-up and the client
-// sign-in. The owner policy additionally demands one lowercase letter, one
-// uppercase letter, one number and one symbol; the client policy enforces
-// length only. Both generated runtimes (Cloudflare `src/index.js` and Vercel
-// `api/index.js`) import these two constants instead of re-typing the numbers,
-// so the owner validation, the client validation and verifyPasswordHash() below
-// can never drift apart. Changing the rule means changing it here once.
+// characters for every user type: the builder admin password, the owner
+// sign-in, the owner's "change password" panel, public client sign-up, and
+// client sign-in. Creation (owner and client sign-up) also requires one
+// lowercase letter, one uppercase letter, one number and one symbol.
+// verifyPasswordHash() below checks length only, so verification stays
+// constant-time. Both generated runtimes import these two constants instead of
+// re-typing the numbers. Changing the rule means changing it here once.
 const PASSWORD_MIN = 8;
 const PASSWORD_MAX = 25;
 const encoder = new TextEncoder();
@@ -62,8 +61,23 @@ async function createPasswordHash(password) {
   return `pbkdf2$${ADMIN_PASSWORD_ITERATIONS}$${salt}$${digest}`;
 }
 
+function normalizePasswordHash(value) {
+  let hash = String(value ?? '').trim();
+  if (hash.length >= 2 && ((hash.startsWith('"') && hash.endsWith('"')) || (hash.startsWith("'") && hash.endsWith("'")))) {
+    hash = hash.slice(1, -1).trim();
+  }
+  return hash;
+}
+
+function passwordHashWellFormed(encoded) {
+  const [algorithm, roundsText, salt, expected, ...rest] = normalizePasswordHash(encoded).split('$');
+  const rounds = Number(roundsText);
+  return algorithm === 'pbkdf2' && rest.length === 0 && Boolean(salt) && Boolean(expected)
+    && Number.isInteger(rounds) && rounds >= 100000 && rounds <= 1000000;
+}
+
 async function verifyPasswordHash(password, encoded) {
-  const [algorithm, roundsText, salt, expected, ...rest] = String(encoded || '').split('$');
+  const [algorithm, roundsText, salt, expected, ...rest] = normalizePasswordHash(encoded).split('$');
   const rounds = Number(roundsText);
   const hashWellFormed = algorithm === 'pbkdf2' && !rest.length && Boolean(salt) && Boolean(expected)
     && Number.isInteger(rounds) && rounds >= 100000 && rounds <= 1000000;
@@ -123,6 +137,17 @@ async function verifyAdminSession(token, username, passwordHash, secret, now = D
   }
 }
 
+// Bug Fix No. 204: owner sign-in names the failing field. Both checks still
+// run (username compare is constant-time; password always pays PBKDF2) so the
+// message does not change the crypto cost. When the username is wrong the
+// username error wins even if the password happened to match, so a guesser
+// is not told "that password belongs to someone".
+function ownerLoginError(usernameMatches, passwordMatches) {
+  if (usernameMatches && passwordMatches) return '';
+  if (!usernameMatches) return 'The username is incorrect.';
+  return 'The password is incorrect.';
+}
+
 export {
   ADMIN_PASSWORD_ITERATIONS,
   ADMIN_SESSION_TTL_SECONDS,
@@ -131,6 +156,9 @@ export {
   constantEqual,
   createAdminSession,
   createPasswordHash,
+  normalizePasswordHash,
+  ownerLoginError,
+  passwordHashWellFormed,
   verifyAdminSession,
   verifyPasswordHash
 };

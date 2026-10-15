@@ -205,7 +205,7 @@ test('generated Vercel and Cloudflare packages include private admin login setti
     const passwordHash = variables.match(/^ADMIN_PASSWORD_HASH="?([^\r\n"]+)"?$/m)?.[1];
     assert.ok(passwordHash, 'expected an administrator password hash in the environment file');
     assert.equal(await verifyPasswordHash(adminInput.adminPassword, passwordHash), true);
-    if (target === 'vercel') assert.match(variables, /^CRON_SECRET=[A-Za-z0-9]+$/m);
+    if (target === 'vercel') assert.match(variables, /^CRON_SECRET="?[A-Za-z0-9]+"?$/m);
     assert.doesNotMatch(variables, /ADMIN_API_KEY=/);
     assert.doesNotMatch(variables, new RegExp(adminInput.adminPassword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.match(files.get('.gitignore'), new RegExp(`^${envName.replace('.', '\\.')}\\n`, 'm'));
@@ -765,7 +765,7 @@ test('the 8-25 password bounds agree across every runtime that validates them', 
 
   // The shared verifier is the single source of truth: it defines the two
   // constants, uses them in verifyPasswordHash(), and exports them.
-  assert.equal(sharedPasswordMin, PASSWORD_MIN, 'admin-security.js PASSWORD_MIN must be 7');
+  assert.equal(sharedPasswordMin, PASSWORD_MIN, 'admin-security.js PASSWORD_MIN must be 8');
   assert.equal(sharedPasswordMax, PASSWORD_MAX, 'admin-security.js PASSWORD_MAX must be 25');
   const adminSecurity = await readFile(new URL('../public/_scaffold/templates/shared/lib/admin-security.js', import.meta.url), 'utf8');
   assert.match(adminSecurity, /password\.length < PASSWORD_MIN \|\| password\.length > PASSWORD_MAX/,
@@ -777,7 +777,7 @@ test('the 8-25 password bounds agree across every runtime that validates them', 
     const runtime = await readFile(new URL(`../public/_scaffold/templates/${relative}`, import.meta.url), 'utf8');
     // Both runtimes must import the shared constants and must not shadow them
     // with a local copy — a local copy is exactly how the builder form drifted
-    // to 12-128 while the JS moved to 7-25.
+    // to 12-128 while the JS moved to 8-25.
     assert.match(runtime, /import \{[^}]*PASSWORD_MAX[^}]*PASSWORD_MIN[^}]*\} from '\.\.\/lib\/admin-security\.js';/,
       `${relative} must import PASSWORD_MIN/PASSWORD_MAX from lib/admin-security.js`);
     assert.doesNotMatch(runtime, /const PASSWORD_(MIN|MAX) =/, `${relative} must not re-declare the password bounds locally`);

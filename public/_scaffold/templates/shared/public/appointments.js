@@ -120,23 +120,63 @@
     selectedDate = date; renderCalendar(monthData); renderSlots();
   }
   function chooseSlot(slot) {
+    // Bug Fix No. 204: booking controls are account-only.
+    if (!client) return;
     pendingSlot = slot;
     $('reservationCard').hidden = false;
     $('selectedSlotLabel').textContent = `${formatDate(slot.date)} · ${slot.label}`;
-    setMessage('reservationMessage', client ? '' : 'Sign in or create a client account below, then confirm this selected time.');
+    setMessage('reservationMessage', '');
     $('reservationCard').scrollIntoView({ behavior: 'smooth', block: 'center' });
     renderCalendar(monthData);
   }
+  function renderEmptyGuestCalendar(month) {
+    // Guests see the empty month grid so the page still reads as a calendar,
+    // but none of the booking controls (month buttons, slots, reservation
+    // form) are shown. The welcome "What we do" section sits below it.
+    $('calendarMonthLabel').textContent = formatMonth(month);
+    $('calendarStatus').textContent = 'This calendar is empty until you sign in. Create a client account below to reserve a consultation.';
+    const grid = $('calendarDays');
+    grid.replaceChildren();
+    const { year, month: monthNumber } = monthParts(month);
+    const offset = (new Date(Date.UTC(year, monthNumber - 1, 1)).getUTCDay() + 6) % 7;
+    const dayCount = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+    for (let i = 0; i < offset; i++) {
+      const blank = document.createElement('span');
+      blank.className = 'calendar-blank';
+      blank.setAttribute('aria-hidden', 'true');
+      grid.appendChild(blank);
+    }
+    for (let day = 1; day <= dayCount; day++) {
+      const cell = document.createElement('span');
+      cell.className = 'calendar-day calendar-day-empty';
+      cell.setAttribute('role', 'gridcell');
+      const numeral = document.createElement('strong');
+      numeral.textContent = String(day);
+      cell.appendChild(numeral);
+      grid.appendChild(cell);
+    }
+    $('calendarSlots').replaceChildren();
+  }
+  function setGuestBookingView(isGuest) {
+    document.body.classList.toggle('guest-calendar-view', isGuest);
+    const whatWeDo = $('guestWhatWeDo');
+    if (whatWeDo) whatWeDo.hidden = !isGuest;
+    const reservation = $('reservationArea');
+    if (reservation && isGuest) {
+      $('reservationCard').hidden = true;
+    }
+  }
   async function loadMonth(month) {
-    // The calendar and the GCash/Maya payment options are account-only: a
-    // guest (no client session) never loads availability or payment details.
+    // The calendar data and the GCash/Maya payment options are account-only:
+    // a guest never loads availability. They still see an empty calendar
+    // chrome plus the welcome "What we do" section (Bug Fix No. 204).
     // The /api/availability route enforces the same rule server-side.
     if (!client) {
-      $('calendarMonthLabel').textContent = formatMonth(month);
-      $('calendarStatus').textContent = 'Sign in or create a client account below to view the appointment calendar and payment options.';
-      $('calendarDays').replaceChildren(); $('calendarSlots').replaceChildren();
+      setGuestBookingView(true);
+      renderEmptyGuestCalendar(month);
       return;
     }
+    setGuestBookingView(false);
     if (monthData?.month && monthData.month !== month) { selectedDate = ''; pendingSlot = null; $('reservationCard').hidden = true; }
     $('calendarMonthLabel').textContent = formatMonth(month);
     $('calendarStatus').textContent = 'Checking the practice calendar…';
@@ -294,6 +334,7 @@
     client = account || null;
     $('guestAccountPanel').hidden = Boolean(client);
     $('signedInAccountPanel').hidden = !client;
+    setGuestBookingView(!client);
     if (!client) { loadMonth(currentYearMonth()); return; }
     $('clientWelcome').textContent = `Hello, ${client.name}`;
     $('clientEmail').textContent = client.email;

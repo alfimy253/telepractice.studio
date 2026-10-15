@@ -31,9 +31,10 @@ CREATE TABLE IF NOT EXISTS tele_sites (
 );
 
 -- Owner sign-in accounts. The owner username, email and salted PBKDF2 password
--- hash live here; the generated runtime seeds the row from its ADMIN_* secrets
--- on first use and then keeps using the database copy. No raw password is ever
--- stored, and the hash is never returned by an API.
+-- hash live here, in the same Neon database as tele_client_accounts. The
+-- generated runtime inserts the row from its ADMIN_* values on the first live
+-- request after deploy, then keeps using the database copy. No raw password is
+-- ever stored, and the hash is never returned by an API.
 CREATE TABLE IF NOT EXISTS tele_admin_users (
   site_id text PRIMARY KEY REFERENCES tele_sites(site_id) ON DELETE CASCADE,
   username varchar(64) NOT NULL,

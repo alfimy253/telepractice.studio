@@ -51,8 +51,8 @@ test('deployed packages create their own site record so client signup works afte
 
     assert.ok(files.has('lib/db-errors.js'), `${label}: actionable database errors library missing`);
     assert.match(runtime, /function ensureSiteRow/, `${label}: no site-record bootstrap`);
-    assert.match(runtime, /INSERT INTO tele_sites \(site_id, config\) VALUES \([\s\S]*?ON CONFLICT \(site_id\) DO NOTHING/,
-      `${label}: the bootstrap must never overwrite owner-edited settings`);
+    assert.match(runtime, /INSERT INTO tele_sites \(site_id, config\) VALUES \([\s\S]*?ON CONFLICT \(site_id\) DO UPDATE SET config = EXCLUDED\.config WHERE tele_sites\.updated_at = tele_sites\.created_at/,
+      `${label}: the bootstrap must refresh an untouched seed without overwriting owner-edited settings`);
     // Every query must run through the wrapper, so no route can skip the record.
     if (target === 'cloudflare') {
       assert.match(runtime, /function sql\(env\) \{\s*const client = rawSql\(env\);\s*return async \(strings, \.\.\.values\) => \{\s*await ensureSiteRow\(env\);/,
@@ -272,15 +272,20 @@ test('the owner account is stored in the database, not in the environment', asyn
     assert.match(runtime, /INSERT INTO tele_admin_users[\s\S]{0,400}?ON CONFLICT \(site_id\) DO UPDATE SET username = EXCLUDED\.username, email = EXCLUDED\.email, password_hash = EXCLUDED\.password_hash WHERE tele_admin_users\.updated_at = tele_admin_users\.created_at/,
       `${label}: the first boot must seed the admin row without overwriting a changed password`);
     assert.match(runtime, /FROM tele_admin_users WHERE site_id = \$\{SITE_ID\}/, `${label}: sign-in does not read the database`);
+    assert.match(runtime, /await ensureAdminUser/, `${label}: the first live request must seed tele_admin_users`);
+    assert.match(runtime, /normalizePasswordHash\((?:env|process\.env)\.ADMIN_PASSWORD_HASH\)/, `${label}: the seed must store a normalized hash, not quoted env text`);
     assert.match(runtime, /password_hash = EXCLUDED\.password_hash/, `${label}: the account route cannot store a new password hash`);
     const schema = files.get('db/schema.sql');
     assert.match(schema, /CREATE TABLE IF NOT EXISTS tele_admin_users/, `${target}: schema.sql has no admin table`);
     assert.match(schema, /password_hash text NOT NULL/, `${target}: the admin table cannot store a password hash`);
     const readme = files.get('README.md');
-    assert.match(readme, /owner account lives in the database, in `tele_admin_users`/i,
+    assert.match(readme, /owner account lives in the same Neon database as client registration, in `tele_admin_users`/i,
       `${target}: the README does not explain where the owner sign-in lives`);
     assert.match(readme, /Sign-in panel/, `${target}: the README does not point at the dashboard sign-in panel`);
     assert.match(readme, /never overwrites a changed account/, `${target}: the README does not state that redeploys keep a changed account`);
+    if (target === 'cloudflare') {
+      assert.match(runtime, /waitUntil\?\.\(ensureAdminUser\(env\)/, `${label}: the first live page GET must seed the owner row`);
+    }
   }
 });
 

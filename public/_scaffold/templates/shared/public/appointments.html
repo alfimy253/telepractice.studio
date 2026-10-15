@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/site.css"><link rel="stylesheet" href="/brivon.css">
   <script src="/site-config.js" defer></script><script src="/brivon-fonts.js" defer></script><script src="/site.js" defer></script><script src="/appointments.js" defer></script>
 </head>
-<body class="appointments-page">
+<body class="appointments-page __THEME_CLASS__ guest-calendar-view">
   <div class="announcement"><span class="announcement-dot"></span><span>Consultations, at your pace</span><span class="announcement-separator">·</span><span id="appointmentAnnouncement">View this practice’s monthly availability</span></div>
   <header class="site-header">
     <a class="site-brand" href="/" aria-label="Home"><span class="brand-symbol" id="brandSymbol">✳</span><span><strong id="brandName">__BRAND_NAME__</strong><small id="brandSubline">CARE THAT FEELS PERSONAL</small></span></a>
@@ -21,15 +21,23 @@
     </section>
     <section class="appointments-dashboard section-wrap" aria-label="Monthly consultation availability">
       <div class="appointments-calendar-card">
-        <div class="calendar-toolbar"><button type="button" id="previousMonth" aria-label="Previous month">←</button><div><span class="calendar-kicker">OWNER-PUBLISHED SCHEDULE</span><h2 id="calendarMonthLabel">Loading month…</h2></div><button type="button" id="nextMonth" aria-label="Next month">→</button></div>
+        <div class="calendar-toolbar"><button type="button" id="previousMonth" data-booking-control aria-label="Previous month">←</button><div><span class="calendar-kicker">OWNER-PUBLISHED SCHEDULE</span><h2 id="calendarMonthLabel">Loading month…</h2></div><button type="button" id="nextMonth" data-booking-control aria-label="Next month">→</button></div>
         <p class="calendar-status" id="calendarStatus" aria-live="polite">Checking the practice calendar…</p>
         <div class="calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
         <div class="calendar-days" id="calendarDays" role="grid" aria-label="Available consultation dates"></div>
-        <div class="calendar-legend"><span><i class="legend-open"></i> Times available</span><span><i class="legend-full"></i> Fully booked</span></div>
-        <div class="calendar-slots" id="calendarSlots"><div class="slot-empty">Choose a highlighted date to see open consultation times.</div></div>
+        <div class="calendar-legend" data-booking-control><span><i class="legend-open"></i> Times available</span><span><i class="legend-full"></i> Fully booked</span></div>
+        <div class="calendar-slots" id="calendarSlots" data-booking-control><div class="slot-empty">Choose a highlighted date to see open consultation times.</div></div>
       </div>
     </section>
-    <section class="reservation-area section-wrap" id="reservationArea">
+    <section class="guest-what-we-do care-section section-wrap" id="guestWhatWeDo" aria-label="What we do">
+      <div class="section-heading"><div><span class="eyebrow"><span></span> What we do</span><h2>Focused care.<br><em>Built around you.</em></h2></div><p>From the first hello to the follow-up, our team makes space for your questions and takes the time to get things right. Each visit is shaped around you, not a schedule.</p></div>
+      <div class="service-grid" id="guestServiceGrid">
+        <article class="service-card"><span class="service-index">01</span><span class="service-mark">✳</span><h3 class="service-title">Wellness & prevention</h3><p>Small, thoughtful check-ins that help you feel confident about the road ahead.</p><a href="#clientAccountSection" class="service-link">Learn about care <span>↗</span></a></article>
+        <article class="service-card service-card-highlight"><span class="service-index">02</span><span class="service-mark">⌁</span><h3 class="service-title">Gentle diagnostics</h3><p>Clear answers, a steady hand, and a plan that makes sense for you.</p><a href="#clientAccountSection" class="service-link">Learn about care <span>↗</span></a></article>
+        <article class="service-card"><span class="service-index">03</span><span class="service-mark">♡</span><h3 class="service-title">Everyday support</h3><p>Practical care and a familiar face when you need a little extra support.</p><a href="#clientAccountSection" class="service-link">Learn about care <span>↗</span></a></article>
+      </div>
+    </section>
+    <section class="reservation-area section-wrap" id="reservationArea" data-booking-control>
       <div class="reservation-card" id="reservationCard" hidden>
         <div><span class="calendar-kicker">YOUR SELECTED TIME</span><h2 id="selectedSlotLabel">Choose a time above</h2><p>Your appointment stays scheduled while the practice verifies payment. Please upload proof within 15 minutes.</p></div>
         <form id="reservationForm" class="reservation-form">

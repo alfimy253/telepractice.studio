@@ -29,8 +29,16 @@
     if (site.paperColor) root.style.setProperty('--paper', site.paperColor);
     document.body.classList.toggle('font-sans', site.fontStyle === 'sans');
     document.body.classList.toggle('dental-site', site.specialty === 'dental');
-    document.body.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air','theme-brivon-dark','theme-brivon-light');
-    if (['canopy','clay','coastal','editorial','neat','launcher','air','brivon-dark','brivon-light'].includes(site.theme)) document.body.classList.add(`theme-${site.theme}`);
+    const themes = ['canopy','clay','coastal','editorial','neat','launcher','air','brivon-dark','brivon-light'];
+    // Bug Fix No. 204: never strip a baked theme class (the generated
+    // homepage ships `theme-brivon-light` on the body) unless we have a
+    // replacement. A missing API theme used to leave Brivon looking dark
+    // because `.brivon-shell` defaults to the dark tokens.
+    const nextTheme = themes.includes(site.theme)
+      ? site.theme
+      : themes.find((name) => document.body.classList.contains(`theme-${name}`));
+    document.body.classList.remove(...themes.map((name) => `theme-${name}`));
+    if (nextTheme) document.body.classList.add(`theme-${nextTheme}`);
   }
   // Browser copy of `cleanMenuHref` from `lib/menu-links.js`. The two copies
   // must stay byte-for-byte identical so a server-cleaned href also passes
