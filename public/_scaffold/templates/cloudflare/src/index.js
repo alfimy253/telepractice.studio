@@ -1,5 +1,5 @@
 import { createNeonClient } from '../db/connection.js';
-import { createAdminSession, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
+import { createAdminSession, PASSWORD_MAX, PASSWORD_MIN, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
 import { adminDashboardPath, isAdminDashboardPath } from '../lib/admin-url.js';
 import { cleanMenuLinks } from '../lib/menu-links.js';
 import { normalizeSiteTheme } from '../lib/site-theme.js';
@@ -21,6 +21,17 @@ const PASSWORD_ITERATIONS = 210000;
 const SITE_TIME_ZONE = DEFAULT_CONFIG.timeZone || 'Asia/Manila';
 const encoder = new TextEncoder();
 const MAX_JSON_BYTES = 256 * 1024;
+// Diagnostic logging. The default behaviour prints a single short label
+// (category + safe error name) so a server log never carries a raw password or
+// a hash. Set `DEBUG_OWNER=1` (or `WORKER_DEBUG=1`) on the Worker to dump the
+// full cause object, which is useful in local development or when an operator
+// needs the stack trace to fix an issue.
+function debugError(env, label, cause) {
+  const flag = String(env?.DEBUG_OWNER || env?.WORKER_DEBUG || '').toLowerCase();
+  const verbose = flag === '1' || flag === 'true' || flag === 'yes';
+  if (verbose) console.error(label, cause);
+  else console.error(label, cause?.name || cause?.code || 'unknown');
+}
 
 function headersWithSecurity(source = {}) {
   const headers = new Headers(source);
@@ -285,7 +296,15 @@ function ensureSiteRow(env) {
 // The owner account lives in tele_admin_users. The ADMIN_* Worker secrets seed
 // that row on first use; after that the database copy is authoritative, so the
 // owner can change the username, email or password in the dashboard without
-// touching Worker secrets. An existing row is never overwritten by a redeploy.
+// touching Worker secrets.
+//
+// A redeploy refreshes the row only while it is still the untouched seed, which
+// is what `updated_at = created_at` identifies: the dashboard's account panel
+// stamps `updated_at = now()` on every owner change. Without that, regenerating
+// the package with a new builder password (the builder clears the field after
+// each download, so a second ZIP always carries a different one) left the first
+// build's hash in place and the owner's new password was rejected as wrong.
+// Once the owner has changed anything, the seed never overwrites it again.
 let adminUserReady = null;
 function ensureAdminUser(env) {
   if (!adminUserReady) {
@@ -293,8 +312,8 @@ function ensureAdminUser(env) {
     adminUserReady = (async () => {
       await ensureSiteRow(env);
       if (!env.ADMIN_USERNAME || !env.ADMIN_EMAIL || !env.ADMIN_PASSWORD_HASH) return;
-      await client`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${String(env.ADMIN_USERNAME).trim()}, ${String(env.ADMIN_EMAIL).trim()}, ${String(env.ADMIN_PASSWORD_HASH)}) ON CONFLICT (site_id) DO NOTHING`;
-    })().catch((cause) => { adminUserReady = null; throw cause; });
+      await client`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${String(env.ADMIN_USERNAME).trim()}, ${String(env.ADMIN_EMAIL).trim()}, ${String(env.ADMIN_PASSWORD_HASH)}) ON CONFLICT (site_id) DO UPDATE SET username = EXCLUDED.username, email = EXCLUDED.email, password_hash = EXCLUDED.password_hash WHERE tele_admin_users.updated_at = tele_admin_users.created_at`;
+    })().catch((cause) => { adminUserReady = null; debugError(env, 'owner account seed failed', cause); throw cause; });
   }
   return adminUserReady;
 }
@@ -359,11 +378,24 @@ async function makePasswordHash(password) {
   const salt = base64url(crypto.getRandomValues(new Uint8Array(16)));
   return `pbkdf2$${PASSWORD_ITERATIONS}$${salt}$${await passwordDigest(password, salt)}`;
 }
+// Verified against when a sign-in email has no account, so the login route
+// always pays the PBKDF2 cost and response timing cannot reveal whether an
+// account exists for that email. It is not a credential: the comparison
+// result is ANDed with the account lookup before any session is issued.
+const DUMMY_PASSWORD_HASH = `pbkdf2$${PASSWORD_ITERATIONS}$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`;
 async function passwordMatches(password, encoded) {
   const [algorithm, roundsText, salt, expected, ...rest] = String(encoded || '').split('$');
   const rounds = Number(roundsText);
-  if (algorithm !== 'pbkdf2' || rest.length || !salt || !expected || !Number.isInteger(rounds) || rounds < 100000 || rounds > 1000000) return false;
-  try { return constantEqual(await passwordDigest(password, salt, rounds), expected); } catch (_) { return false; }
+  const hashWellFormed = algorithm === 'pbkdf2' && !rest.length && Boolean(salt) && Boolean(expected)
+    && Number.isInteger(rounds) && rounds >= 100000 && rounds <= 1000000;
+  // Constant-time discipline: always derive and always run the constant-time
+  // comparison, even for a malformed stored hash. Dummy parameters stand in
+  // when the real ones are unusable; the guard still decides the result.
+  let digest = '';
+  try {
+    digest = await passwordDigest(password, hashWellFormed ? salt : 'AAAAAAAAAAAAAAAAAAAAAA', hashWellFormed ? rounds : PASSWORD_ITERATIONS);
+  } catch (_) { /* a failed derivation is simply a failed verification */ }
+  return hashWellFormed && constantEqual(digest, expected);
 }
 async function sessionTokenHash(token) {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(token)));
@@ -410,10 +442,33 @@ async function csrfOk(request, env) {
   const expected = await hmac(nonce, secret);
   return actual.length === expected.length && constantEqual(base64url(actual), base64url(expected));
 }
+// PASSWORD_MIN / PASSWORD_MAX are imported from lib/admin-security.js so this
+// file, the Vercel runtime and verifyPasswordHash() all read the same two
+// numbers. Password length is 8–25 for every sign-in form in this app: the
+// owner sign-in, the owner's "change password" panel, the public client
+// sign-up, and the client sign-in. The owner policy still demands one lowercase
+// letter, one uppercase letter, one number and one symbol; the client policy
+// only enforces length.
 function ownerPasswordProblem(value) {
-  if (value.length < 12 || value.length > 128) return 'The password must be 12–128 characters long.';
+  if (value.length < PASSWORD_MIN || value.length > PASSWORD_MAX) return `The password must be ${PASSWORD_MIN}–${PASSWORD_MAX} characters long.`;
   if (!/[a-z]/.test(value) || !/[A-Z]/.test(value) || !/[0-9]/.test(value) || !/[^A-Za-z0-9\s]/.test(value)) {
     return 'The password must include a lowercase letter, an uppercase letter, a number and a symbol.';
+  }
+  return '';
+}
+// Client sign-up validation, one message per field. Returns '' when the form is
+// complete. Client passwords follow the same policy as the owner's: 8–25
+// characters with one lowercase letter, one uppercase letter, one number
+// and one symbol.
+function registerProblem(name, email, phone, password) {
+  if (!name) return 'Enter your name so the practice knows who the consultation is for.';
+  if (!email) return 'Enter an email address — it is how you sign in to your account.';
+  if (!/^\S+@\S+\.\S+$/.test(email)) return 'That email address looks incomplete. Include the full domain, for example name@example.com.';
+  if (!phone) return 'Enter a phone number the practice can reach you on.';
+  if (password.length < PASSWORD_MIN) return `Choose a password of at least ${PASSWORD_MIN} characters (yours has ${password.length}).`;
+  if (password.length > PASSWORD_MAX) return `Choose a password of ${PASSWORD_MAX} characters or fewer.`;
+  if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/[0-9]/.test(password) || !/[^A-Za-z0-9\s]/.test(password)) {
+    return 'Choose a password with at least one lowercase letter, one uppercase letter, one number and one symbol.';
   }
   return '';
 }
@@ -430,7 +485,7 @@ async function adminCredentials(env) {
     await ensureAdminUser(env);
     const rows = await sql(env)`SELECT username, email, password_hash AS "passwordHash" FROM tele_admin_users WHERE site_id = ${SITE_ID} LIMIT 1`;
     if (rows[0]) return { username: String(rows[0].username), email: String(rows[0].email), passwordHash: String(rows[0].passwordHash), source: 'database' };
-  } catch (cause) { console.error('owner account read failed', cause); }
+  } catch (cause) { debugError(env, 'owner account read failed', cause); }
   return secretsComplete ? fromSecrets : null;
 }
 async function adminConfigured(env) {
@@ -589,7 +644,11 @@ async function routeApi(request, env) {
     if (!env.DATABASE_URL) return error('Client accounts need a configured appointment database.', 503);
     const value = await readJson(request); if (!value || typeof value !== 'object') return error('Send a valid account form.');
     const name = cleanText(value.name, 100); const email = cleanText(value.email, 120).toLowerCase(); const phone = cleanText(value.phone, 30); const password = String(value.password || '');
-    if (!name || !/^\S+@\S+\.\S+$/.test(email) || !phone || password.length < 12 || password.length > 128) return error('Enter your name, a valid email, phone number, and a password of at least 12 characters.');
+    // One message per rejected field. A single combined message naming every
+    // field made a blank phone number or an email without a domain read as a
+    // password problem, which sent people re-typing a password that was fine.
+    const signupProblem = registerProblem(name, email, phone, password);
+    if (signupProblem) return error(signupProblem);
     const passwordHash = await makePasswordHash(password);
     try {
       const accounts = await sql(env)`INSERT INTO tele_client_accounts (site_id, full_name, email, phone, password_hash) VALUES (${SITE_ID}, ${name}, ${email}, ${phone}, ${passwordHash}) RETURNING id, full_name AS name, email, phone`;
@@ -603,9 +662,12 @@ async function routeApi(request, env) {
     if (!env.DATABASE_URL) return error('Client accounts need a configured appointment database.', 503);
     const value = await readJson(request); if (!value || typeof value !== 'object') return error('Send a valid sign-in form.');
     const email = cleanText(value.email, 120).toLowerCase(); const password = String(value.password || '');
-    if (!/^\S+@\S+\.\S+$/.test(email) || !password || password.length > 128) return error('Enter a valid email and password.');
+    if (!/^\S+@\S+\.\S+$/.test(email) || !password || password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) return error('Enter a valid email and password.');
     const accounts = await sql(env)`SELECT id, full_name AS name, email, phone, password_hash AS "passwordHash" FROM tele_client_accounts WHERE site_id = ${SITE_ID} AND email = ${email} LIMIT 1`;
-    if (!accounts.length || !await passwordMatches(password, accounts[0].passwordHash)) return error('Email or password is incorrect.', 401);
+    // Always run the verification — against the dummy hash when the email is
+    // unknown — so login timing does not reveal whether an account exists.
+    const passwordOk = await passwordMatches(password, accounts[0]?.passwordHash || DUMMY_PASSWORD_HASH);
+    if (!accounts.length || !passwordOk) return error('Email or password is incorrect.', 401);
     const sessionHeaders = await createClientSession(request, env, accounts[0]);
     return json({ client: clientSummary(accounts[0]) }, 200, sessionHeaders);
   }
@@ -652,6 +714,10 @@ async function routeApi(request, env) {
     } catch (cause) { console.error('gallery read failed', cause); return error('Could not load gallery items.', 503); }
   }
   if (path === '/api/availability' && method === 'GET') {
+    // The appointment calendar is account-only: guests never see open slots
+    // (or, through the booking form, the GCash/Maya payment options).
+    const calendarClient = await currentClient(request, env);
+    if (!calendarClient) return error('Sign in or create a client account to view the appointment calendar.', 401);
     const date = String(url.searchParams.get('date') || ''); const month = String(url.searchParams.get('month') || (date ? date.slice(0, 7) : localToday().slice(0, 7)));
     if (!monthStart(month)) return error('Choose a valid month.');
     if (date && (!validDate(date) || date < localToday() || date.slice(0, 7) !== month)) return error('Choose a valid future date in the selected month.');
@@ -725,9 +791,13 @@ async function routeApi(request, env) {
     const value = await readJson(request); if (!value || typeof value !== 'object') return error('Send a valid booking form.');
     const slotId = String(value.slotId || ''); const service = cleanText(value.service, 120); const context = cleanText(value.context, 100);
     const paymentMethod = ['gcash', 'maya'].includes(value.paymentMethod) ? value.paymentMethod : '';
-    if (!/^[0-9a-f-]{36}$/i.test(slotId) || !DEFAULT_CONFIG.services.includes(service) || !paymentMethod) return error('Choose a valid open time, visit type and GCash or Maya payment method.');
+    // The booking phone is required: it is the practice's fallback number
+    // if the video call or internet drops mid-consultation. The form
+    // sends it explicitly; the account phone is the fallback value.
+    const phone = cleanText(value.phone, 30) || String(client.phone || '').trim();
+    if (!/^[0-9a-f-]{36}$/i.test(slotId) || !DEFAULT_CONFIG.services.includes(service) || !paymentMethod || !phone) return error('Choose a valid open time, visit type and GCash or Maya payment method, and enter a phone number for this consultation.');
     try {
-      const rows = await sql(env)`INSERT INTO tele_appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status, payment_method, payment_status, payment_due_at) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${client.phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed', ${paymentMethod}, 'awaiting_proof', now() + interval '15 minutes' FROM tele_consultation_slots AS slot JOIN tele_monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${SITE_TIME_ZONE} > now() AND NOT EXISTS (SELECT 1 FROM tele_appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time, payment_due_at AS "paymentDueAt"`;
+      const rows = await sql(env)`INSERT INTO tele_appointments (site_id, client_account_id, availability_slot_id, name, email, phone, service, appointment_date, appointment_time, context, status, payment_method, payment_status, payment_due_at) SELECT ${SITE_ID}, ${client.id}, slot.id, ${client.name}, ${client.email}, ${phone}, ${service}, slot.slot_date, slot.slot_time, ${context}, 'confirmed', ${paymentMethod}, 'awaiting_proof', now() + interval '15 minutes' FROM tele_consultation_slots AS slot JOIN tele_monthly_schedules AS schedule ON schedule.site_id = slot.site_id AND schedule.month_start = slot.month_start WHERE slot.site_id = ${SITE_ID} AND slot.id = ${slotId}::uuid AND slot.is_open = true AND schedule.status = 'published' AND slot.slot_date >= ${localToday()}::date AND (slot.slot_date + slot.slot_time) AT TIME ZONE ${SITE_TIME_ZONE} > now() AND NOT EXISTS (SELECT 1 FROM tele_appointments AS existing WHERE existing.site_id = slot.site_id AND existing.appointment_date = slot.slot_date AND existing.appointment_time = slot.slot_time AND existing.status <> 'cancelled') RETURNING id, appointment_date::text AS date, to_char(appointment_time, 'HH24:MI') AS time, payment_due_at AS "paymentDueAt"`;
       if (!rows.length) return error('That time was just taken or is no longer available. Refresh the calendar and choose another.', 409);
       return json({ ok: true, appointment: { ...rows[0], timeLabel: displayTime(rows[0].time), status: 'confirmed', paymentStatus: 'awaiting_proof', paymentMethod } }, 201);
     } catch (cause) {
@@ -823,6 +893,7 @@ async function routeApi(request, env) {
   }
   if (path === '/api/admin/appointments' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
     try {
       const appointments = await sql(env)`SELECT appointment.id, appointment.name, appointment.email, appointment.phone, appointment.service, appointment.context, appointment.status, appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, client.id AS "clientId", note.note_body AS "noteBody", note.updated_at AS "noteUpdatedAt" FROM tele_appointments AS appointment LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id LEFT JOIN tele_consultation_notes AS note ON note.site_id = appointment.site_id AND note.appointment_id = appointment.id WHERE appointment.site_id = ${SITE_ID} AND appointment.appointment_date >= (${localToday()}::date - interval '90 days')::date AND appointment.appointment_date <= (${localToday()}::date + interval '90 days')::date ORDER BY appointment.appointment_date ASC, appointment.appointment_time ASC LIMIT 300`;
       return json({ appointments: appointments.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
@@ -830,14 +901,28 @@ async function routeApi(request, env) {
   }
   if (path === '/api/admin/payments/unpaid' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
     try {
       const bookings = await sql(env)`SELECT appointment.id, appointment.name, client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username, appointment.service, appointment.payment_method AS "paymentMethod", appointment.payment_due_at AS "paymentDueAt", appointment.payment_reminder_sent_at AS "paymentReminderSentAt", appointment.payment_owner_attention_at AS "paymentOwnerAttentionAt", appointment.created_at AS "createdAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time FROM tele_appointments AS appointment LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE appointment.site_id = ${SITE_ID} AND appointment.status <> 'cancelled' AND appointment.payment_status = 'awaiting_proof' AND NOT EXISTS (SELECT 1 FROM tele_appointment_payment_proofs AS proof WHERE proof.site_id = appointment.site_id AND proof.appointment_id = appointment.id) ORDER BY appointment.created_at ASC LIMIT 300`;
       return json({ bookings: bookings.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
     } catch (cause) { console.error('unpaid booking list failed', cause); return error('Could not load bookings awaiting payment proof.', 503); }
   }
+  if (path === '/api/admin/payments/dropped' && method === 'GET') {
+    if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
+    // Owner notification surface for cron drops: the sweep stamps
+    // payment_owner_attention_at at the moment it cancels, so this list is
+    // current as soon as the drop commits. Includes the booking phone so the
+    // owner can follow up with the client directly.
+    try {
+      const bookings = await sql(env)`SELECT appointment.id, appointment.name, client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username, appointment.phone, appointment.service, appointment.payment_method AS "paymentMethod", appointment.payment_owner_attention_at AS "droppedAt", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time FROM tele_appointments AS appointment LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE appointment.site_id = ${SITE_ID} AND appointment.status = 'cancelled' AND appointment.payment_status = 'expired' ORDER BY appointment.payment_owner_attention_at DESC NULLS LAST, appointment.created_at DESC LIMIT 50`;
+      return json({ bookings: bookings.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
+    } catch (cause) { console.error('dropped booking list failed', cause); return error('Could not load dropped bookings.', 503); }
+  }
   if (path.startsWith('/api/admin/payments/unpaid/') && method === 'PATCH') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
     const id = path.slice('/api/admin/payments/unpaid/'.length); const value = await readJson(request); const action = String(value?.action || '');
     if (!/^[0-9a-f-]{36}$/i.test(id) || !['received', 'release'].includes(action)) return error('Choose whether payment was received or the booking should be released.');
     try {
@@ -850,6 +935,7 @@ async function routeApi(request, env) {
   }
   if (path === '/api/admin/payments' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
     try {
       const payments = await sql(env)`SELECT proof.id, proof.payment_method AS "paymentMethod", proof.review_status AS status, proof.uploaded_at AS "uploadedAt", appointment.id AS "appointmentId", appointment.name, appointment.service, appointment.status AS "appointmentStatus", appointment.payment_status AS "appointmentPaymentStatus", appointment.appointment_date::text AS date, to_char(appointment.appointment_time, 'HH24:MI') AS time, appointment.created_at AS "bookedAt", client.full_name AS "clientName", COALESCE(client.email, appointment.email) AS username FROM tele_appointment_payment_proofs AS proof JOIN tele_appointments AS appointment ON appointment.id = proof.appointment_id AND appointment.site_id = proof.site_id LEFT JOIN tele_client_accounts AS client ON client.id = appointment.client_account_id AND client.site_id = appointment.site_id WHERE proof.site_id = ${SITE_ID} ORDER BY proof.uploaded_at DESC LIMIT 300`;
       return json({ payments: payments.map((row) => ({ ...row, timeLabel: displayTime(row.time) })) });
@@ -857,6 +943,7 @@ async function routeApi(request, env) {
   }
   if (path.startsWith('/api/admin/payment-proofs/') && path.endsWith('/image') && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
     const id = path.slice('/api/admin/payment-proofs/'.length, -'/image'.length);
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid payment proof id.');
     try {
@@ -870,6 +957,7 @@ async function routeApi(request, env) {
   if (path.startsWith('/api/admin/payment-proofs/') && method === 'PATCH') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
     const id = path.slice('/api/admin/payment-proofs/'.length); const value = await readJson(request); const decision = String(value?.status || '');
     if (!/^[0-9a-f-]{36}$/i.test(id) || !['approved', 'rejected'].includes(decision)) return error('Choose whether to approve or reject this payment proof.');
     try {
@@ -883,6 +971,7 @@ async function routeApi(request, env) {
   if (path.startsWith('/api/admin/appointments/') && method === 'PATCH') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
     const id = path.slice('/api/admin/appointments/'.length); const value = await readJson(request); const status = String(value?.status || '');
     if (!/^[0-9a-f-]{36}$/i.test(id) || !['requested', 'confirmed', 'cancelled'].includes(status)) return error('Invalid appointment update.');
     try {
@@ -904,6 +993,7 @@ async function routeApi(request, env) {
   if (path.startsWith('/api/admin/appointments/') && path.endsWith('/note') && method === 'PUT') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.scheduling) return error('Online appointments are not enabled.', 404);
     const id = path.slice('/api/admin/appointments/'.length, -'/note'.length);
     const value = await readJson(request); if (!/^[0-9a-f-]{36}$/i.test(id) || !value || typeof value !== 'object') return error('Invalid consultation note.');
     const noteBody = cleanText(value.noteBody, 12000);
@@ -918,6 +1008,7 @@ async function routeApi(request, env) {
   }
   if (path === '/api/admin/posts' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.blog) return error('Blog is not enabled for this site.', 404);
     try {
       const posts = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.status, post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM tele_blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} ORDER BY post.created_at DESC LIMIT 100`;
       return json({ posts });
@@ -926,6 +1017,7 @@ async function routeApi(request, env) {
   if (path === '/api/admin/posts' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.blog) return error('Blog is not enabled for this site.', 404);
     const value = await readJson(request); if (!value) return error('Send a valid JSON object.');
     const post = articlePostPayload(value);
     if (!post) return error('Add a title and article body, plus a valid feature image. If you leave the feature image blank, add a gallery image with a URL and alt text.');
@@ -937,6 +1029,7 @@ async function routeApi(request, env) {
   if (path.startsWith('/api/admin/posts/') && method === 'PUT') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.blog) return error('Blog is not enabled for this site.', 404);
     const id = path.slice('/api/admin/posts/'.length);
     const value = await readJson(request); if (!value) return error('Send a valid JSON object.');
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid post id.');
@@ -953,6 +1046,7 @@ async function routeApi(request, env) {
   if (path.startsWith('/api/admin/posts/') && method === 'DELETE') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.blog) return error('Blog is not enabled for this site.', 404);
     const id = path.slice('/api/admin/posts/'.length);
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid post id.');
     try {
@@ -962,6 +1056,7 @@ async function routeApi(request, env) {
   }
   if (path === '/api/admin/gallery' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.gallery) return error('Gallery is not enabled for this site.', 404);
     try {
       const items = await sql(env)`SELECT id, title, image_url AS "imageUrl", alt_text AS "altText", caption, category, status, sort_order AS "sortOrder", created_at AS "createdAt" FROM tele_gallery_items WHERE site_id = ${SITE_ID} ORDER BY sort_order ASC, created_at DESC LIMIT 100`;
       return json({ items });
@@ -970,6 +1065,7 @@ async function routeApi(request, env) {
   if (path === '/api/admin/gallery' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.gallery) return error('Gallery is not enabled for this site.', 404);
     const value = await readJson(request); if (!value) return error('Send a valid JSON object.');
     const item = galleryPayload(value);
     if (!validGalleryPayload(item)) return error('Add a title, valid HTTPS or same-site image URL and alternative text. Display order must be from 0 to 9999.');
@@ -981,6 +1077,7 @@ async function routeApi(request, env) {
   if (path.startsWith('/api/admin/gallery/') && (method === 'PUT' || method === 'DELETE')) {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
+    if (!DEFAULT_CONFIG.features?.gallery) return error('Gallery is not enabled for this site.', 404);
     const id = path.slice('/api/admin/gallery/'.length);
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid gallery item id.');
     if (method === 'DELETE') {
@@ -1028,13 +1125,34 @@ export default {
     if (url.pathname === '/' || url.pathname.endsWith('.html')) headers.set('Cache-Control', 'no-store');
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   },
+  // The reminder sweep must NOT bootstrap the schema. A cron trigger runs in a
+  // fresh isolate, so the module-level `schemaReady` / `siteRowReady` memos are
+  // always empty here and `sql(env)` would re-run all 59 DDL statements inside
+  // one transaction on every single tick — 17 `ALTER TABLE` (ACCESS EXCLUSIVE)
+  // and 14 `CREATE INDEX` (SHARE, which blocks writes), all held until commit.
+  // A client registering during that window blocked on
+  // `INSERT INTO tele_client_accounts` behind the cron's lock and answered 503
+  // "Could not create the client account.", so signup failed roughly once a
+  // minute for as long as the deployment lived. The two UPDATEs below need no
+  // `tele_sites` row and no foreign key, so they run against the raw client;
+  // the first real request still bootstraps the schema through `sql(env)`.
   async scheduled(_controller, env, ctx) {
     if (!env.DATABASE_URL) return;
-    const job = runPaymentReminderChecks(sql(env), SITE_ID)
-      .then(({ reminders, ownerFollowups }) => {
-        if (reminders.length || ownerFollowups.length) console.info(`[payment-reminders] ${reminders.length} client reminder(s), ${ownerFollowups.length} owner follow-up(s)`);
+    const job = runPaymentReminderChecks(rawSql(env), SITE_ID)
+      .then(({ reminders, dropped }) => {
+        if (reminders.length) console.info(`[payment-reminders] ${reminders.length} client reminder(s)`);
+        // The drop statement already stamped payment_owner_attention_at, so
+        // the dashboard's "Dropped bookings" list shows these the moment the
+        // sweep commits; the client sees 'Slot released' in their own list.
+        if (dropped.length) console.info(`[payment-reminders] ${dropped.length} booking(s) dropped (no payment proof within 15 minutes); owner notified in the dashboard, client notified in their appointment list`);
       })
-      .catch((cause) => console.error('scheduled payment reminder check failed', cause));
+      .catch((cause) => {
+        // 42P01 = undefined_table. A fresh deployment nobody has visited yet
+        // has no tele_appointments table; that is a state to report quietly,
+        // not an error to raise every minute.
+        if (cause?.code === '42P01') { console.info('[payment-reminders] schema not applied yet; skipping this sweep'); return; }
+        console.error('scheduled payment reminder check failed', cause);
+      });
     ctx.waitUntil(job);
   }
 };

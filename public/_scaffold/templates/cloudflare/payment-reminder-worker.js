@@ -1,5 +1,5 @@
 import { createNeonClient } from './db/connection.js';
-import { markPaymentOwnerFollowups, markPaymentProofReminders } from './lib/payment-reminders.js';
+import { markDroppedBookings, markPaymentProofReminders } from './lib/payment-reminders.js';
 
 const SITE_ID = '__SITE_ID__';
 const REMINDER_INTERVAL_MS = 90_000;
@@ -25,9 +25,9 @@ function createChecks() {
       if (ownerFollowupBusy) return;
       ownerFollowupBusy = true;
       try {
-        const rows = await markPaymentOwnerFollowups(sql, SITE_ID);
-        if (rows.length) console.info(`[payment-reminders] ${rows.length} unpaid booking(s) need owner review`);
-      } catch (error) { console.error('[payment-reminders] owner follow-up check failed', error); }
+        const rows = await markDroppedBookings(sql, SITE_ID);
+        if (rows.length) console.info(`[payment-reminders] ${rows.length} booking(s) dropped (no payment proof within 15 minutes); owner notified in the dashboard, client notified in their appointment list`);
+      } catch (error) { console.error('[payment-reminders] booking drop check failed', error); }
       finally { ownerFollowupBusy = false; }
     }
   };
@@ -45,4 +45,4 @@ function stop() {
 }
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
-console.info('[payment-reminders] worker started: 90-second client reminders, 3-minute owner follow-ups');
+console.info('[payment-reminders] worker started: 90-second client reminders, 3-minute dropped-booking checks');

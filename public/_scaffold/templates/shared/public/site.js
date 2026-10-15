@@ -32,6 +32,10 @@
     document.body.classList.remove('theme-canopy','theme-clay','theme-coastal','theme-editorial','theme-neat','theme-launcher','theme-air','theme-brivon-dark','theme-brivon-light');
     if (['canopy','clay','coastal','editorial','neat','launcher','air','brivon-dark','brivon-light'].includes(site.theme)) document.body.classList.add(`theme-${site.theme}`);
   }
+  // Browser copy of `cleanMenuHref` from `lib/menu-links.js`. The two copies
+  // must stay byte-for-byte identical so a server-cleaned href also passes
+  // the client-side navigation guard. The browser cannot import the lib
+  // because the generated ZIP ships `public/*.js` as static files.
   function safeMenuNavigationHref(value) {
     const raw = String(value ?? '').trim();
     if (!raw || raw.length > 2048 || /[\u0000-\u001f\u007f]/.test(raw)) return '';
@@ -75,10 +79,26 @@
       });
     });
   }
-  function renderPaymentDetails() {
+  async function renderPaymentDetails() {
     const section = $('footerPayments');
     const list = $('paymentDetails');
     if (!section || !list) return;
+    // GCash/Maya payment details are account-only: a guest (no client
+    // session) is never shown them. The appointment calendar enforces the
+    // same rule, and /api/availability requires a session server-side.
+    let signedIn = false;
+    try {
+      const response = await fetch('/api/auth/me', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+      const data = await response.json().catch(() => ({}));
+      signedIn = Boolean(response.ok && data.client);
+    } catch (_) { /* treat as guest */ }
+    if (!signedIn) {
+      list.replaceChildren();
+      const note = document.createElement('p'); note.className = 'footer-payment-signin';
+      note.textContent = 'Sign in to view GCash and Maya payment options.';
+      list.appendChild(note);
+      return;
+    }
     const details = site.payments || {};
     const methods = [
       { name: 'GCash', account: details.gcashName, number: details.gcashNumber },

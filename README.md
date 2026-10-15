@@ -64,7 +64,7 @@ Guided setup supports custom menu pages with their own menu label, URL, title, t
 
 ### Generated package administrator and environment variables
 
-Each downloaded ZIP includes a ready-to-use environment file — `.dev.vars` for the Cloudflare target, `.env` for the Vercel target — plus a `.gitignore` entry for that file. The builder asks for an administrator username, email, and password. Passwords must be 12–128 characters and contain a lowercase letter, uppercase letter, number, and symbol. The raw password is used only while the ZIP is built in memory; the environment file contains a salted PBKDF2 password hash. `ADMIN_API_KEY` is no longer used.
+Each downloaded ZIP includes a ready-to-use environment file — `.dev.vars` for the Cloudflare target, `.env` for the Vercel target — plus a `.gitignore` entry for that file. The builder asks for an administrator username, email, and password. Passwords must be 8–25 characters and contain a lowercase letter, uppercase letter, number, and symbol — the same 8–25 range the generated site enforces for owner sign-in and client sign-up. The raw password is used only while the ZIP is built in memory; the environment file contains a salted PBKDF2 password hash. `ADMIN_API_KEY` is no longer used.
 
 For every generated ZIP:
 
@@ -88,3 +88,7 @@ The owner dashboard URL is computed at request time in the generated site's conf
 The database URL and admin password are only used to build the ZIP in memory for that request. The builder does not log or retain them, and the account username, email, password hash, and secrets never flow into the generated site's public config (`site-config.js`, `/api/site`, or `db/seed.sql`).
 
 Cloudflare dashboard reference: [Create a Worker from a template or repository](https://dash.cloudflare.com/9d8cf0bed724c974cfd216a9e2eafcb6/workers-and-pages/create/deploy-to-workers?repository=https%3A%2F%2Fgithub.com%2Fcloudflare%2Ftemplates%2Ftree%2Fmain%2Fllm-chat-app-template). This project uses the Workers static-assets binding rather than the chat template's Workers AI binding.
+
+## To Be Implemented — basic CMS always on (completion plan)
+
+The builder side is done: the blog switch is disabled and always on, and every generated package forces `features.blog = true`, so every site ships with the basic CMS (posts with title, category, excerpt, body, optional feature image, draft/published). Remaining work, specified in full at the bottom of `current_code.md` (and summarised in `system-rules.md` under the same heading): force `blog: true` in each generated runtime's config merge and in the owner settings save so a stale database row cannot hide the Journal menu; show a clear "connect DATABASE_URL" message when post saves fail without a database; and verify both ZIPs end to end (draft hidden → publish visible → edit → delete). Known inconsistencies that restrict this: blog on/off is still stored in the database site config and can override the compiled config; pre-change deployed packages keep the old switch until regenerated; without `DATABASE_URL` the journal falls back to compiled demo posts; and the compiled public `site-config.js` still embeds the GCash/Maya account strings (hidden from guests in the UI/API, but not secret).

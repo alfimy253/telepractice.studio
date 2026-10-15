@@ -1,6 +1,6 @@
 import { buildPreviewDocument, generateBundle, normalizePageEdits } from './generator.js';
 import { createNeonClient } from './database.js';
-import { loadPageEditsFromDatabase, savePageEditsToDatabase } from './page-edits-store.js';
+import { loadPageEditsFromDatabase, savePageEditsToDatabase, clearPageEditsFromDatabase } from './page-edits-store.js';
 
 const encoder = new TextEncoder();
 // The HTTPS prefix prevents sibling domains from injecting the CSRF cookie.
@@ -147,7 +147,10 @@ async function csrfValid(request, env) {
 // The live preview renders caller-supplied public settings with the same
 // scaffold files as the ZIP. It holds no secrets and changes no state, sends
 // no CORS headers and cannot be framed, so it is safe without a CSRF token.
-const MAX_PREVIEW_CONFIG_BYTES = 16 * 1024;
+// The live preview cap must accommodate the full page-edit budget so a
+// 64×2000-byte edit list never trips a 413. 128 KB matches the worst-case
+// `MAX_PAGE_EDITS * MAX_PAGE_EDIT_TEXT` ceiling; typical edits are ~4 KB.
+const MAX_PREVIEW_CONFIG_BYTES = 128 * 1024;
 async function preview(request, env, origin) {
   const raw = new URL(request.url).searchParams.get('config') || '';
   if (!raw) return failure('Send a preview configuration.', 400);
@@ -173,7 +176,10 @@ async function preview(request, env, origin) {
 // edits server-side (Neon) so they survive the editor tab closing. The builder
 // tab applies the same edits to its config and preview at the same time; the
 // next prepared ZIP carries them in the homepage source.
-const PAGE_EDIT_SITE_ID = /^[a-z0-9][a-z0-9-]{0,54}$/;
+// The runtime produces site ids through `slugify` in `public/package-core.js`,
+// which slices to 45 characters. Anything longer would never match a generated
+// `tele_sites.site_id`, so the server-side validator mirrors the same bound.
+const PAGE_EDIT_SITE_ID = /^[a-z0-9][a-z0-9-]{0,44}$/;
 async function savePageEdits(request, env) {
   if (!await csrfValid(request, env)) return failure('Cross-site request rejected or security token expired.', 403);
   const body = await readBoundedText(request, MAX_CONFIG_BYTES);
@@ -209,6 +215,29 @@ async function loadPageEdits(url, env) {
     return failure('Page edits could not be loaded from the database.', 500);
   }
 }
+// "Clear edits" must delete the server row, not just the local copy. Without
+// this the next page-editor load (on another device, profile or after the
+// Worker state is reset) would resurrect the edits the operator thought they
+// had cleared.
+async function clearPageEdits(request, env) {
+  if (!await csrfValid(request, env)) return failure('Cross-site request rejected or security token expired.', 403);
+  const body = await readBoundedText(request, MAX_CONFIG_BYTES);
+  if (body.tooLarge) return failure('The page edits payload is too large.', 413);
+  if (body.text === null) return failure('Send the page edits site id as JSON.');
+  let input;
+  try { input = JSON.parse(body.text); }
+  catch (_) { return failure('Send the page edits site id as JSON.'); }
+  const siteId = String(input?.siteId || '').trim().toLowerCase();
+  if (!PAGE_EDIT_SITE_ID.test(siteId)) return failure('Send a valid site id.');
+  if (!env.DATABASE_URL) return failure('Page editor database is not configured on this deployment.', 503);
+  try {
+    await clearPageEditsFromDatabase(createNeonClient(env.DATABASE_URL), siteId);
+  } catch (cause) {
+    console.error('Page editor database clear failed', cause);
+    return failure('Page edits could not be cleared from the database.', 500);
+  }
+  return json({ ok: true, siteId, cleared: true });
+}
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -226,6 +255,7 @@ export default {
     if (url.pathname === '/api/preview' && request.method === 'GET') return preview(request, env, url.origin);
     if (url.pathname === '/api/page-editor' && request.method === 'POST') return savePageEdits(request, env);
     if (url.pathname === '/api/page-editor' && request.method === 'GET') return loadPageEdits(url, env);
+    if (url.pathname === '/api/page-editor' && request.method === 'DELETE') return clearPageEdits(request, env);
     if (url.pathname === '/api/generate' && request.method === 'POST') {
       if (!await csrfValid(request, env)) return failure('Cross-site request rejected or security token expired.', 403);
       const body = await readBoundedText(request, MAX_CONFIG_BYTES);

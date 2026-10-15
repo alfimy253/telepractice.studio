@@ -10,15 +10,25 @@ const DEFAULT_MENU_LINKS = Object.freeze([
   Object.freeze({ id: 'contact', label: 'Contact', href: '/#contact' })
 ]);
 
-function safeMenuHref(value) {
-  const raw = String(value ?? '').trim().slice(0, 2048);
-  if (!raw || /[\u0000-\u001f\u007f]/.test(raw)) return '';
+// The canonical menu-link sanitizer. The same-origin paths below (`/about`,
+// `/#services`, `/appointments.html`) round-trip through `URL` with the
+// deployment's origin as the base; absolute URLs must be `https://…` with no
+// embedded credentials. The browser copies of this algorithm
+// (`site.js: safeMenuNavigationHref`, `admin.js: safeMenuDestination`) must
+// stay byte-for-byte identical to this one so a saved value passes the
+// server-side `cleanMenuLinks` check and the client-side navigation guard.
+const SAFE_MENU_HREF_MAX = 2048;
+function cleanMenuHref(value, baseOrigin = 'https://menu.invalid') {
+  const raw = String(value ?? '').trim();
+  if (!raw || raw.length > SAFE_MENU_HREF_MAX || /[\u0000-\u001f\u007f]/.test(raw)) return '';
 
   if (raw.startsWith('/')) {
+    // Reject protocol-relative (`//evil.com/x`) and backslash-relative
+    // (`/\evil.com/x`) before they reach the URL parser.
     if (raw.startsWith('//') || raw.startsWith('/\\')) return '';
     try {
-      const url = new URL(raw, 'https://menu.invalid');
-      if (url.origin !== 'https://menu.invalid') return '';
+      const url = new URL(raw, baseOrigin);
+      if (url.origin !== baseOrigin) return '';
       return `${url.pathname}${url.search}${url.hash}`;
     } catch (_) {
       return '';
@@ -40,7 +50,7 @@ function cleanMenuLinks(value, fallback = DEFAULT_MENU_LINKS) {
   return source.slice(0, MAX_MENU_LINKS).flatMap((item, index) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
     const label = String(item.label ?? '').trim().slice(0, 60);
-    const href = safeMenuHref(item.href);
+    const href = cleanMenuHref(item.href);
     const id = String(item.id ?? '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 48) || `menu-${index + 1}`;
     if (!label || !href || seenIds.has(id)) return [];
     seenIds.add(id);
@@ -58,4 +68,4 @@ function menuLinksForPages(customPages = []) {
   return cleanMenuLinks([...DEFAULT_MENU_LINKS, ...pageLinks], []);
 }
 
-export { DEFAULT_MENU_LINKS, MAX_MENU_LINKS, cleanMenuLinks, menuLinksForPages, safeMenuHref };
+export { DEFAULT_MENU_LINKS, MAX_MENU_LINKS, cleanMenuLinks, menuLinksForPages, cleanMenuHref };

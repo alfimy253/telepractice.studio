@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow"><title>Site owner studio</title>
   <link rel="stylesheet" href="/site.css"><link rel="stylesheet" href="/admin.css">
-  <script src="/site-config.js" defer></script><script src="/admin.js" defer></script>
+  <script src="/site-config.js" defer></script><script src="/brivon-fonts.js" defer></script><script src="/admin.js" defer></script>
 </head>
 <body class="admin-body">
   <header class="admin-topbar"><a class="site-brand" href="/" aria-label="View website"><span class="brand-symbol" id="adminSymbol">✳</span><span><strong id="adminBrandName">Practice studio</strong><small>WEBSITE OWNER</small></span></a><div class="admin-top-actions"><span class="owner-pill" id="ownerIdentity" hidden><i></i><span id="ownerEmail"></span></span><button type="button" class="preview-link admin-logout" id="logoutButton" hidden>Sign out</button><a href="/" class="preview-link">View website ↗</a></div></header>
@@ -12,7 +12,7 @@
     <div class="admin-heading"><div><span class="admin-overline">PRACTICE WEBSITE</span><h1>Your site, your voice.</h1><p>Choose a page to update practice details, menu links, appearance, content, availability or appointments.</p></div><span class="save-indicator" id="saveIndicator"><i></i> Ready to edit</span></div>
     <section class="admin-login-panel panel-admin" id="loginPanel">
       <div class="login-icon">⌁</div><div class="login-copy"><strong>Owner sign in</strong><p>Use the username and password you set in the builder. Your admin email is kept with the account for reference.</p></div>
-      <form id="loginForm" class="admin-login-form" method="post" action="/api/admin/login" autocomplete="on"><label for="adminUsername">Username<input id="adminUsername" name="username" type="text" maxlength="64" autocomplete="username" required></label><label for="adminPassword">Password<input id="adminPassword" name="password" type="password" maxlength="128" autocomplete="current-password" required></label><button type="submit" class="admin-primary" id="loginButton">Sign in</button><small id="loginMessage" aria-live="polite">Sign-in fields are never prefilled into the public page.</small></form>
+      <form id="loginForm" class="admin-login-form" method="post" action="/api/admin/login" autocomplete="on"><label for="adminUsername">Username<input id="adminUsername" name="username" type="text" maxlength="64" autocomplete="username" required></label><label for="adminPassword">Password<input id="adminPassword" name="password" type="password" maxlength="25" minlength="8" autocomplete="current-password" required></label><button type="submit" class="admin-primary" id="loginButton">Sign in</button><small id="loginMessage" aria-live="polite">Sign-in fields are never prefilled into the public page.</small></form>
     </section>
     <section class="admin-grid" id="adminWorkspace" hidden>
       <nav class="admin-page-nav" aria-label="Website editing pages">
@@ -96,14 +96,19 @@
           <div id="appointmentsList" class="appointments-list"><p class="empty-posts">Sign in to review appointment requests.</p></div>
         </section>
         <section class="panel-admin admin-card payments-admin-card" id="paymentsManager" data-admin-page="payments" hidden>
-          <div class="admin-card-heading"><div><span class="admin-section-index">08 / PAYMENTS</span><h2>Payment proof review</h2><p>Clients are reminded after 12 minutes to upload GCash or Maya transaction proof. Bookings remain scheduled after 15 minutes until you mark payment received or release the booking.</p></div><span class="card-icon card-icon-payment">₱</span></div>
+          <div class="admin-card-heading"><div><span class="admin-section-index">08 / PAYMENTS</span><h2>Payment proof review</h2><p>Clients are reminded after 12 minutes to upload GCash or Maya transaction proof. If no proof arrives within 15 minutes, the booking is dropped automatically and appears under Dropped Bookings — that list is your notification. Before the window closes you can still mark payment received manually.</p></div><span class="card-icon card-icon-payment">₱</span></div>
           <div class="payment-tabs" role="tablist" aria-label="Payment review tabs">
             <button type="button" class="active" id="unpaidBookingsTab" role="tab" aria-selected="true" aria-controls="unpaidBookingsPanel" data-payment-tab="unpaid">Bookings Without Payments <span id="unpaidBookingsCount">0</span></button>
             <button type="button" id="paymentsTab" role="tab" aria-selected="false" aria-controls="paymentsPanel" data-payment-tab="payments">Payments <span id="paymentsCount">0</span></button>
+            <button type="button" id="droppedBookingsTab" role="tab" aria-selected="false" aria-controls="droppedBookingsPanel" data-payment-tab="dropped">Dropped Bookings <span id="droppedBookingsCount">0</span></button>
           </div>
           <section id="unpaidBookingsPanel" class="payment-tab-panel" role="tabpanel" aria-labelledby="unpaidBookingsTab" data-payment-panel="unpaid">
-            <div class="payment-list-toolbar"><p>Bookings still waiting for proof. At 15 minutes, check your payment account; mark funds received or manually release the booking.</p><button type="button" id="refreshUnpaidBookings">Refresh ↻</button></div>
+            <div class="payment-list-toolbar"><p>Bookings still waiting for proof. If payment already arrived, mark it received before the 15-minute window closes; after that the booking is dropped automatically.</p><button type="button" id="refreshUnpaidBookings">Refresh ↻</button></div>
             <div id="unpaidBookingsList" class="payment-review-list"><p class="empty-posts">No bookings are waiting for payment proof.</p></div>
+          </section>
+          <section id="droppedBookingsPanel" class="payment-tab-panel" role="tabpanel" aria-labelledby="droppedBookingsTab" data-payment-panel="dropped" hidden>
+            <div class="payment-list-toolbar"><p>Bookings the scheduler dropped because no payment proof arrived within 15 minutes. The client sees the release in their account. If a client contacts you after paying, re-book them or mark a new booking received.</p><button type="button" id="refreshDroppedBookings">Refresh ↻</button></div>
+            <div id="droppedBookingsList" class="payment-review-list"><p class="empty-posts">No bookings have been dropped.</p></div>
           </section>
           <section id="paymentsPanel" class="payment-tab-panel" role="tabpanel" aria-labelledby="paymentsTab" data-payment-panel="payments" hidden>
             <div class="payment-list-toolbar"><p>Uploaded screenshots stay private. Approve a successful payment or reject it and release the time.</p><button type="button" id="refreshPayments">Refresh ↻</button></div>
@@ -113,7 +118,7 @@
         <section class="panel-admin admin-card" id="adminPage-signin" data-admin-page="signin" hidden>
           <div class="admin-card-heading"><div><span class="admin-section-index">09 / SIGN-IN</span><h2>Owner sign-in</h2><p>Your owner account is stored in this site's database (tele_admin_users), so it survives redeploys and keeps working after the builder secrets are rotated.</p></div><span class="card-icon">✦</span></div>
           <form id="accountForm" class="admin-form" method="post" action="/api/admin/account">
-            <div class="admin-form-grid"><label><span>Owner username</span><input name="username" maxlength="64" autocomplete="username" required></label><label><span>Owner email</span><input name="email" type="email" maxlength="254" autocomplete="email" required></label><label><span>Current password</span><input name="currentPassword" type="password" maxlength="128" autocomplete="current-password" required></label><label><span>New password <small>(leave blank to keep)</small></span><input name="newPassword" type="password" minlength="12" maxlength="128" autocomplete="new-password" placeholder="12+ characters"></label></div>
+            <div class="admin-form-grid"><label><span>Owner username</span><input name="username" maxlength="64" autocomplete="username" required></label><label><span>Owner email</span><input name="email" type="email" maxlength="254" autocomplete="email" required></label><label><span>Current password</span><input name="currentPassword" type="password" maxlength="25" autocomplete="current-password" required></label><label><span>New password <small>(leave blank to keep)</small></span><input name="newPassword" type="password" minlength="8" maxlength="25" autocomplete="new-password" placeholder="8–25 characters"></label></div>
             <p class="admin-form-note">The stored password is a salted PBKDF2 hash; the raw password is never saved. Saving signs you in again with the new details.</p>
             <div class="admin-form-actions"><small>Signing in accepts the username or the owner email.</small><button type="submit" class="admin-primary">Save sign-in details</button></div>
             <p class="admin-form-message" id="accountMessage" aria-live="polite"></p>

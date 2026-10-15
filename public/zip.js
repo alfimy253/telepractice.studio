@@ -63,4 +63,4 @@ function createZip(files) {
   put32(endView, 12, centralDirectory.length); put32(endView, 16, offset); put16(endView, 20, 0);
   return join([...localParts, centralDirectory, end]);
 }
-export { createZip, crc32 };
+export { createZip };

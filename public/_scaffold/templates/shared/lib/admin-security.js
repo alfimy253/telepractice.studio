@@ -1,5 +1,16 @@
 const ADMIN_PASSWORD_ITERATIONS = 210000;
 const ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60;
+// Single source of truth for the password length rule. Password length is 8–25
+// characters for every sign-in form in a generated site: the owner sign-in, the
+// owner's "change password" panel, the public client sign-up and the client
+// sign-in. The owner policy additionally demands one lowercase letter, one
+// uppercase letter, one number and one symbol; the client policy enforces
+// length only. Both generated runtimes (Cloudflare `src/index.js` and Vercel
+// `api/index.js`) import these two constants instead of re-typing the numbers,
+// so the owner validation, the client validation and verifyPasswordHash() below
+// can never drift apart. Changing the rule means changing it here once.
+const PASSWORD_MIN = 8;
+const PASSWORD_MAX = 25;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -54,14 +65,23 @@ async function createPasswordHash(password) {
 async function verifyPasswordHash(password, encoded) {
   const [algorithm, roundsText, salt, expected, ...rest] = String(encoded || '').split('$');
   const rounds = Number(roundsText);
-  if (algorithm !== 'pbkdf2' || rest.length || !salt || !expected
-    || !Number.isInteger(rounds) || rounds < 100000 || rounds > 1000000
-    || typeof password !== 'string' || password.length > 128) return false;
+  const hashWellFormed = algorithm === 'pbkdf2' && !rest.length && Boolean(salt) && Boolean(expected)
+    && Number.isInteger(rounds) && rounds >= 100000 && rounds <= 1000000;
+  const lengthOk = typeof password === 'string' && !(password.length < PASSWORD_MIN || password.length > PASSWORD_MAX);
+  // Constant-time discipline: always pay the PBKDF2 cost and always run the
+  // constant-time comparison, even when the stored hash is malformed or the
+  // candidate is outside the length policy, so response timing cannot reveal
+  // which check failed. The dummy salt/iterations stand in whenever the real
+  // parameters are unusable; the boolean guards still decide the result.
+  let digest = '';
   try {
-    return constantEqual(await passwordDigest(password, salt, rounds), expected);
-  } catch (_) {
-    return false;
-  }
+    digest = await passwordDigest(
+      typeof password === 'string' ? password : '',
+      hashWellFormed ? salt : 'AAAAAAAAAAAAAAAAAAAAAA',
+      hashWellFormed ? rounds : ADMIN_PASSWORD_ITERATIONS
+    );
+  } catch (_) { /* a failed derivation is simply a failed verification */ }
+  return hashWellFormed && lengthOk && constantEqual(digest, expected);
 }
 
 function normalizedUsername(username) {
@@ -106,6 +126,9 @@ async function verifyAdminSession(token, username, passwordHash, secret, now = D
 export {
   ADMIN_PASSWORD_ITERATIONS,
   ADMIN_SESSION_TTL_SECONDS,
+  PASSWORD_MAX,
+  PASSWORD_MIN,
+  constantEqual,
   createAdminSession,
   createPasswordHash,
   verifyAdminSession,

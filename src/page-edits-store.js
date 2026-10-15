@@ -38,3 +38,12 @@ export async function loadPageEditsFromDatabase(sql, siteId) {
   if (!record) return null;
   return { siteId: record.siteId, edits: record.edits, updatedAt: record.updatedAt };
 }
+
+// "Clear edits" in the builder must wipe the server row, not just the local
+// copy. Without this the next page-editor load (on another device, profile or
+// after the worker state is reset) would resurrect the edits the operator
+// thought they had cleared.
+export async function clearPageEditsFromDatabase(sql, siteId) {
+  await ensurePageEditsTable(sql);
+  await sql`DELETE FROM tele_builder_page_edits WHERE site_id = ${siteId}`;
+}
