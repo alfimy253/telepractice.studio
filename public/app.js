@@ -95,8 +95,8 @@ let livePreviewController = null;
 // `ownerPasswordProblem` (server-side validation in both runtimes) and the
 // `minlength`/`maxlength` attributes on the new-password input.
 // Owner passwords are 8–25 characters with at least one lowercase letter, one
-// uppercase letter, one number and one symbol. (Client sign-up passwords use
-// the same 8–25 length rule but drop the complexity requirement.)
+// uppercase letter, one number and one symbol. Client sign-up uses the same
+// 8–25 length and the same four character classes.
 const ADMIN_PASSWORD_POLICY = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).{8,25}$/;
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));

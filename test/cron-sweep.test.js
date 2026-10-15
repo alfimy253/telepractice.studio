@@ -149,6 +149,7 @@ test('the Cloudflare cron sweep uses the raw client and never bootstraps the sch
   assert.doesNotMatch(rawSqlBody, /ensureSchema|ensureSiteRow/, 'rawSql must stay free of the schema bootstrap');
   const sqlBody = /function sql\(env\) \{[\s\S]*?\n\}/.exec(source)[0];
   assert.match(sqlBody, /await ensureSiteRow\(env\)/, 'sql(env) is the bootstrapping client');
+  assert.match(sqlBody, /await ensureAdminUser\(env\)/, 'sql(env) must also seed tele_admin_users on first use');
   // A cron trigger is a fresh isolate, so the memos cannot persist. The handler
   // must therefore tolerate a database whose tables do not exist yet instead of
   // logging an error every minute.

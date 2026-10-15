@@ -2,8 +2,23 @@
 
 **Date:** 2026-10-13 · **Branch:** `arena/ce69da9b-telepractice-studio` · **Commit:** `d973c66`
 
-Every finding below was derived from the **current source code**, not from `current_code.md` or `README.md`.
-Where the documentation and the code disagree, the code is quoted.
+This file is a **snapshot of that commit**. It is not a description of the working tree as of 2026-10-16. Do not implement from it without re-checking the code. Live behaviour belongs in `current_code.md` and `system-rules.md`.
+
+**Status vs the 2026-10-16 tree (code investigation, not a re-audit):**
+
+| Finding | Then | Now |
+|---|---|---|
+| F1 | `.gitignore` omitted `.dev.vars`; live Neon URL tracked | `.gitignore` lists `.dev.vars`, `.env`, and `.wrangler/`. Those paths are **still in the git index** (ignore does not untrack). `.dev.vars` still holds a `DATABASE_URL`. |
+| F2 | `payment-reminders.js` queried unprefixed `appointments` | Queries `tele_appointments` / `tele_appointment_payment_proofs`. |
+| F3–F5, F8, F10 | Open or later marked fixed in this file | Remain marked fixed in the sections below; code matches those fix notes (GET page-edits on builder init, `notify`, DELETE, feature-gated owner writes, 128 KB preview cap, hero fields in `normalizeConfig`). |
+| F6 | slug 45 vs 55 | Shared `slugify()` from `package-core.js` (45 chars); `PAGE_EDIT_SITE_ID` is `{0,44}`. |
+| F7 | generated `.gitignore` omitted `wrangler.jsonc` | Cloudflare package `.gitignore` includes `wrangler.jsonc`. |
+| F9 | functional pages never loaded Brivon fonts | `appointments.html`, `admin.html`, and `generatedCustomPageHtml()` include `/brivon-fonts.js`. |
+| Method `npm test` | 84/84 | 135 tests in this tree. |
+| Password length (not an F-finding) | not recorded here | **8–25** for every user type (`PASSWORD_MIN = 8`). |
+
+Every finding below was derived from the source at `d973c66`, not from today's tree.
+Where the documentation and the code disagreed **then**, the code at that commit is quoted.
 
 ## Method
 

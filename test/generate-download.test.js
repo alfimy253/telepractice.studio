@@ -259,7 +259,7 @@ async function assertDownloadedPackage({ dom, doc, linkClick, downloadEvent, gen
   const envName = target === 'cloudflare' ? '.dev.vars' : '.env';
   const env = entries.get(envName);
   assert.ok(env, `${envName} should be part of the package`);
-  // The Vercel .env is unquoted; the Cloudflare .dev.vars quotes its values.
+  // Both env files quote values so a PBKDF2 hash's `$iterations` is not interpolated by dotenv.
   assert.match(env.text, /ADMIN_PASSWORD_HASH="?pbkdf2\$/);
   assert.match(env.text, /ADMIN_USERNAME="?practiceowner/);
   for (const entry of entries.values()) {

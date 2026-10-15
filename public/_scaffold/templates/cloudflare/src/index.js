@@ -1,5 +1,5 @@
 import { createNeonClient } from '../db/connection.js';
-import { createAdminSession, PASSWORD_MAX, PASSWORD_MIN, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
+import { createAdminSession, PASSWORD_MAX, PASSWORD_MIN, normalizePasswordHash, ownerLoginError, passwordHashWellFormed, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
 import { adminDashboardPath, isAdminDashboardPath } from '../lib/admin-url.js';
 import { cleanMenuLinks } from '../lib/menu-links.js';
 import { normalizeSiteTheme } from '../lib/site-theme.js';
@@ -44,7 +44,11 @@ function headersWithSecurity(source = {}) {
   return headers;
 }
 function json(data, status = 200, extra = {}) {
-  const headers = headersWithSecurity({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...extra });
+  const setCookie = extra['Set-Cookie'];
+  const rest = { ...extra };
+  delete rest['Set-Cookie'];
+  const headers = headersWithSecurity({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...rest });
+  for (const cookie of Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : []) headers.append('Set-Cookie', cookie);
   return new Response(JSON.stringify(data), { status, headers });
 }
 function error(message, status = 400) { return json({ error: message }, status); }
@@ -288,15 +292,20 @@ function ensureSiteRow(env) {
     const client = rawSql(env);
     siteRowReady = (async () => {
       await ensureSchema(env);
-      await client`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(DEFAULT_CONFIG)}::jsonb) ON CONFLICT (site_id) DO NOTHING`;
+      // Bug Fix No. 204: refresh the compiled package theme (and the rest of
+      // DEFAULT_CONFIG) onto an untouched seed row. `updated_at = created_at`
+      // is the same predicate the owner-account seed uses: an owner save of
+      // appearance/identity stamps updated_at and is never overwritten, so a
+      // rebuilt Brivon Light ZIP deployed onto a database that still holds the
+      // first Brivon Dark seed actually becomes light.
+      await client`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(DEFAULT_CONFIG)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config WHERE tele_sites.updated_at = tele_sites.created_at`;
     })().catch((cause) => { siteRowReady = null; throw cause; });
   }
   return siteRowReady;
 }
-// The owner account lives in tele_admin_users. The ADMIN_* Worker secrets seed
-// that row on first use; after that the database copy is authoritative, so the
-// owner can change the username, email or password in the dashboard without
-// touching Worker secrets.
+// The owner account lives in tele_admin_users, in the same Neon database as
+// client registration. The ADMIN_* Worker values seed that row on the first
+// live request after deploy; after that the database copy is authoritative.
 //
 // A redeploy refreshes the row only while it is still the untouched seed, which
 // is what `updated_at = created_at` identifies: the dashboard's account panel
@@ -311,8 +320,11 @@ function ensureAdminUser(env) {
     const client = rawSql(env);
     adminUserReady = (async () => {
       await ensureSiteRow(env);
-      if (!env.ADMIN_USERNAME || !env.ADMIN_EMAIL || !env.ADMIN_PASSWORD_HASH) return;
-      await client`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${String(env.ADMIN_USERNAME).trim()}, ${String(env.ADMIN_EMAIL).trim()}, ${String(env.ADMIN_PASSWORD_HASH)}) ON CONFLICT (site_id) DO UPDATE SET username = EXCLUDED.username, email = EXCLUDED.email, password_hash = EXCLUDED.password_hash WHERE tele_admin_users.updated_at = tele_admin_users.created_at`;
+      const username = String(env.ADMIN_USERNAME || '').trim();
+      const email = String(env.ADMIN_EMAIL || '').trim();
+      const passwordHash = normalizePasswordHash(env.ADMIN_PASSWORD_HASH);
+      if (!username || !email || !passwordHash) return;
+      await client`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${username}, ${email}, ${passwordHash}) ON CONFLICT (site_id) DO UPDATE SET username = EXCLUDED.username, email = EXCLUDED.email, password_hash = EXCLUDED.password_hash WHERE tele_admin_users.updated_at = tele_admin_users.created_at`;
     })().catch((cause) => { adminUserReady = null; debugError(env, 'owner account seed failed', cause); throw cause; });
   }
   return adminUserReady;
@@ -323,6 +335,7 @@ function sql(env) {
   const client = rawSql(env);
   return async (strings, ...values) => {
     await ensureSiteRow(env);
+    await ensureAdminUser(env);
     return client(strings, ...values);
   };
 }
@@ -352,13 +365,16 @@ async function csrfSecret(env) {
   return derivedCsrfSecret;
 }
 async function issueCsrf(request, env) {
+  if (env.DATABASE_URL) {
+    try { await ensureAdminUser(env); } catch (cause) { debugError(env, 'first-url owner seed failed', cause); }
+  }
   const secret = await csrfSecret(env);
   if (!secret) return error('Set a CSRF_SECRET Worker secret (or DATABASE_URL) before using forms.', 503);
   const nonceBytes = crypto.getRandomValues(new Uint8Array(24));
   const nonce = base64url(nonceBytes);
   const signature = base64url(await hmac(nonce, secret));
   const token = `${nonce}.${signature}`;
-  const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+  const secure = requestIsHttps(request) ? '; Secure' : '';
   // Wrangler local may use http; production is always served over HTTPS.
   return json({ token }, 200, { 'Set-Cookie': `${CSRF_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600${secure}` });
 }
@@ -427,10 +443,33 @@ function constantEqual(left, right) {
   for (let i = 0; i < max; i++) diff |= (a[i % (a.length || 1)] || 0) ^ (b[i % (b.length || 1)] || 0);
   return diff === 0;
 }
-async function csrfOk(request, env) {
-  const url = new URL(request.url);
+function hostnamesMatch(left, right) {
+  const a = String(left || '').toLowerCase();
+  const b = String(right || '').toLowerCase();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.split(':')[0] === b.split(':')[0];
+}
+function requestIsHttps(request) {
+  try { if (new URL(request.url).protocol === 'https:') return true; } catch (_) { /* ignore */ }
+  const forwarded = String(request.headers.get('X-Forwarded-Proto') || '').split(',')[0].trim().toLowerCase();
+  if (forwarded === 'https') return true;
+  return /"scheme"\s*:\s*"https"/i.test(String(request.headers.get('CF-Visitor') || ''));
+}
+function requestOriginAllowed(request) {
   const origin = request.headers.get('Origin');
-  if (origin && origin !== url.origin) return false;
+  if (!origin) return true;
+  let parsed;
+  try { parsed = new URL(origin); } catch (_) { return false; }
+  const url = new URL(request.url);
+  if (parsed.origin === url.origin || hostnamesMatch(parsed.host, url.host)) return true;
+  for (const entry of String(request.headers.get('X-Forwarded-Host') || '').split(',')) {
+    if (hostnamesMatch(parsed.host, entry.trim())) return true;
+  }
+  return false;
+}
+async function csrfOk(request, env) {
+  if (!requestOriginAllowed(request)) return false;
   const cookie = readCookie(request.headers.get('Cookie'), CSRF_COOKIE);
   const header = request.headers.get('X-CSRF-Token');
   if (!cookie || !header || !constantEqual(cookie, header)) return false;
@@ -444,11 +483,10 @@ async function csrfOk(request, env) {
 }
 // PASSWORD_MIN / PASSWORD_MAX are imported from lib/admin-security.js so this
 // file, the Vercel runtime and verifyPasswordHash() all read the same two
-// numbers. Password length is 8–25 for every sign-in form in this app: the
-// owner sign-in, the owner's "change password" panel, the public client
-// sign-up, and the client sign-in. The owner policy still demands one lowercase
-// letter, one uppercase letter, one number and one symbol; the client policy
-// only enforces length.
+// numbers. Password length is 8–25 for every user type: the owner sign-in, the
+// owner's "change password" panel, public client sign-up, and client sign-in.
+// Creation (owner and client) also requires one lowercase, one uppercase, one
+// number and one symbol. Verification checks length only.
 function ownerPasswordProblem(value) {
   if (value.length < PASSWORD_MIN || value.length > PASSWORD_MAX) return `The password must be ${PASSWORD_MIN}–${PASSWORD_MAX} characters long.`;
   if (!/[a-z]/.test(value) || !/[A-Z]/.test(value) || !/[0-9]/.test(value) || !/[^A-Za-z0-9\s]/.test(value)) {
@@ -477,29 +515,43 @@ function registerProblem(name, email, phone, password) {
 async function adminCredentials(env) {
   const fromSecrets = {
     username: cleanText(env.ADMIN_USERNAME, 64), email: cleanText(env.ADMIN_EMAIL, 254),
-    passwordHash: String(env.ADMIN_PASSWORD_HASH || ''), source: 'worker-secrets'
+    passwordHash: normalizePasswordHash(env.ADMIN_PASSWORD_HASH), source: 'worker-secrets'
   };
   const secretsComplete = Boolean(fromSecrets.username && fromSecrets.email && fromSecrets.passwordHash);
   if (!env.DATABASE_URL) return secretsComplete ? fromSecrets : null;
   try {
     await ensureAdminUser(env);
     const rows = await sql(env)`SELECT username, email, password_hash AS "passwordHash" FROM tele_admin_users WHERE site_id = ${SITE_ID} LIMIT 1`;
-    if (rows[0]) return { username: String(rows[0].username), email: String(rows[0].email), passwordHash: String(rows[0].passwordHash), source: 'database' };
+    if (rows[0]) {
+      const fromDatabase = {
+        username: String(rows[0].username), email: String(rows[0].email),
+        passwordHash: normalizePasswordHash(rows[0].passwordHash), source: 'database'
+      };
+      if (passwordHashWellFormed(fromDatabase.passwordHash)) return fromDatabase;
+      if (secretsComplete && passwordHashWellFormed(fromSecrets.passwordHash)) {
+        return { ...fromDatabase, passwordHash: fromSecrets.passwordHash, source: 'worker-secrets' };
+      }
+      return fromDatabase;
+    }
   } catch (cause) { debugError(env, 'owner account read failed', cause); }
   return secretsComplete ? fromSecrets : null;
 }
 async function adminConfigured(env) {
   return Boolean(await adminCredentials(env));
 }
-function adminSessionCookieName(request) {
-  return new URL(request.url).protocol === 'https:' ? '__Host-canopy_owner' : 'canopy_owner';
+function ownerSessionToken(request) {
+  // Bug Fix No. 204: protocol detection can disagree between the login POST
+  // and later GETs (proxy TLS termination). Read both cookie names so a
+  // successful sign-in is not immediately forgotten.
+  const header = request.headers.get('Cookie');
+  return readCookie(header, '__Host-canopy_owner') || readCookie(header, 'canopy_owner');
 }
 async function adminOk(request, env) {
   const credentials = await adminCredentials(env);
   if (!credentials) return false;
   const secret = await csrfSecret(env);
   if (!secret) return false;
-  const token = readCookie(request.headers.get('Cookie'), adminSessionCookieName(request));
+  const token = ownerSessionToken(request);
   return verifyAdminSession(token, credentials.username, credentials.passwordHash, secret);
 }
 async function adminFailure(env) {
@@ -507,9 +559,12 @@ async function adminFailure(env) {
     ? error('Owner session is not valid. Sign in again.', 401)
     : error('Owner sign-in is not configured. Set ADMIN_USERNAME, ADMIN_EMAIL and ADMIN_PASSWORD_HASH on the Worker (the database copy is used once it exists).', 503);
 }
-function ownerSessionCookie(request, token) {
-  const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-  return `${adminSessionCookieName(request)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`;
+function ownerSessionCookies(request, token, maxAge = 43200) {
+  const encoded = encodeURIComponent(token);
+  const secure = requestIsHttps(request);
+  const cookies = [`canopy_owner=${encoded}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`];
+  if (secure) cookies.unshift(`__Host-canopy_owner=${encoded}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=${maxAge}`);
+  return cookies;
 }
 async function readJson(request) {
   const contentLength = Number(request.headers.get('Content-Length') || 0);
@@ -592,9 +647,10 @@ async function routeApi(request, env) {
     const usernameMatches = constantEqual(entered, credentials.username.toLowerCase())
       || (Boolean(credentials.email) && constantEqual(entered, credentials.email.toLowerCase()));
     const passwordMatches = await verifyPasswordHash(password, credentials.passwordHash);
-    if (!usernameMatches || !passwordMatches) return error('Username or password is incorrect.', 401);
+    const loginError = ownerLoginError(usernameMatches, passwordMatches);
+    if (loginError) return error(loginError, 401);
     const token = await createAdminSession(credentials.username, credentials.passwordHash, await csrfSecret(env));
-    return json({ ok: true, email: credentials.email, dashboardPath: adminDashboardPath(new Date(), SITE_TIME_ZONE) }, 200, { 'Set-Cookie': ownerSessionCookie(request, token) });
+    return json({ ok: true, authenticated: true, username: credentials.username, email: credentials.email, dashboardPath: adminDashboardPath(new Date(), SITE_TIME_ZONE) }, 200, { 'Set-Cookie': ownerSessionCookies(request, token) });
   }
   if (path === '/api/admin/account' && method === 'PUT') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
@@ -618,13 +674,11 @@ async function routeApi(request, env) {
       await sql(env)`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${username}, ${email}, ${passwordHash}) ON CONFLICT (site_id) DO UPDATE SET username = EXCLUDED.username, email = EXCLUDED.email, password_hash = EXCLUDED.password_hash, updated_at = now()`;
     } catch (cause) { console.error('owner account save failed', cause); return error(databaseErrorMessage(cause, 'Could not save the owner sign-in details.'), 503); }
     const token = await createAdminSession(username, passwordHash, await csrfSecret(env));
-    return json({ ok: true, username, email }, 200, { 'Set-Cookie': ownerSessionCookie(request, token) });
+    return json({ ok: true, username, email }, 200, { 'Set-Cookie': ownerSessionCookies(request, token) });
   }
   if (path === '/api/admin/logout' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
-    const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-    const cookie = `${adminSessionCookieName(request)}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
-    return json({ ok: true }, 200, { 'Set-Cookie': cookie });
+    return json({ ok: true }, 200, { 'Set-Cookie': ownerSessionCookies(request, '', 0) });
   }
   if (path === '/api/site' && method === 'GET') return json(await siteConfig(env));
   if (path === '/api/site' && method === 'PUT') {
@@ -1098,8 +1152,12 @@ async function routeApi(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (env.DATABASE_URL && (request.method === 'GET' || request.method === 'HEAD')
+      && (url.pathname === '/' || url.pathname.endsWith('.html') || isAdminDashboardPath(url.pathname))) {
+      ctx?.waitUntil?.(ensureAdminUser(env).catch((cause) => debugError(env, 'first-url owner seed failed', cause)));
+    }
     if (url.pathname.startsWith('/api/')) {
       try { return await routeApi(request, env); }
       catch (cause) { console.error('unhandled Worker API error', cause); return error('Something went wrong. Please try again.', 500); }
@@ -1108,8 +1166,7 @@ export default {
     if (url.pathname === '/admin.html') return error('Not found.', 404);
     if (isAdminDashboardPath(url.pathname)) {
       const expectedPath = adminDashboardPath(new Date(), SITE_TIME_ZONE);
-      if (url.pathname !== expectedPath) {
-        if (!await adminOk(request, env)) return error('Not found.', 404);
+      if (url.pathname !== expectedPath && await adminOk(request, env)) {
         const headers = headersWithSecurity({ Location: expectedPath, 'Cache-Control': 'no-store' });
         return new Response(null, { status: 302, headers });
       }

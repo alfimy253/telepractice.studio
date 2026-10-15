@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
 import { createNeonClient } from '../db/connection.js';
-import { createAdminSession, PASSWORD_MAX, PASSWORD_MIN, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
+import { createAdminSession, PASSWORD_MAX, PASSWORD_MIN, normalizePasswordHash, ownerLoginError, passwordHashWellFormed, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
 import { adminDashboardPath } from '../lib/admin-url.js';
 import { cleanMenuLinks } from '../lib/menu-links.js';
 import { normalizeSiteTheme } from '../lib/site-theme.js';
@@ -42,14 +42,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// The site owns exactly one row in `sites`, which holds its public
+// The site owns exactly one row in `tele_sites`, which holds its public
 // configuration. db/seed.sql writes that row and the owner's "save details"
 // writes it, but a fresh deployment that only ran db/schema.sql has none — and
 // every client account, booking, CMS row and schedule references
 // sites(site_id) by foreign key, so client signup answered
 // "Could not create the client account." until the owner happened to save
-// something first. Create the row on first database use instead; an existing
-// row — including owner-edited settings — is never modified.
+// something first. Create the row on first database use instead. An owner-edited
+// row (updated_at <> created_at) is never modified; an untouched seed is
+// refreshed from the compiled package so a rebuilt theme actually deploys.
 let schemaReady = null;
 let schemaFailures = 0;
 function ensureSchema() {
@@ -73,15 +74,17 @@ function ensureSiteRow() {
     const client = createNeonClient(process.env.DATABASE_URL);
     siteRowReady = (async () => {
       await ensureSchema();
-      await client`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(DEFAULT_CONFIG)}::jsonb) ON CONFLICT (site_id) DO NOTHING`;
+      // Bug Fix No. 204: refresh the compiled package theme onto an untouched
+      // seed row. Owner-saved appearance stamps updated_at and is kept.
+      await client`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(DEFAULT_CONFIG)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config WHERE tele_sites.updated_at = tele_sites.created_at`;
     })().catch((cause) => { siteRowReady = null; throw cause; });
   }
   return siteRowReady;
 }
-// The owner account lives in tele_admin_users. The ADMIN_* environment values
-// seed that row on first use; after that the database copy is authoritative, so
-// the owner can change the username, email or password in the dashboard without
-// touching the deployment environment.
+// The owner account lives in tele_admin_users, in the same Neon database as
+// client registration. The ADMIN_* environment values seed that row on the
+// first live request after deploy; after that the database copy is
+// authoritative.
 //
 // A redeploy refreshes the row only while it is still the untouched seed, which
 // is what `updated_at = created_at` identifies: the dashboard's account panel
@@ -96,8 +99,11 @@ function ensureAdminUser() {
     const client = createNeonClient(process.env.DATABASE_URL);
     adminUserReady = (async () => {
       await ensureSiteRow();
-      if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD_HASH) return;
-      await client`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${String(process.env.ADMIN_USERNAME).trim()}, ${String(process.env.ADMIN_EMAIL).trim()}, ${String(process.env.ADMIN_PASSWORD_HASH)}) ON CONFLICT (site_id) DO UPDATE SET username = EXCLUDED.username, email = EXCLUDED.email, password_hash = EXCLUDED.password_hash WHERE tele_admin_users.updated_at = tele_admin_users.created_at`;
+      const username = String(process.env.ADMIN_USERNAME || '').trim();
+      const email = String(process.env.ADMIN_EMAIL || '').trim();
+      const passwordHash = normalizePasswordHash(process.env.ADMIN_PASSWORD_HASH);
+      if (!username || !email || !passwordHash) return;
+      await client`INSERT INTO tele_admin_users (site_id, username, email, password_hash) VALUES (${SITE_ID}, ${username}, ${email}, ${passwordHash}) ON CONFLICT (site_id) DO UPDATE SET username = EXCLUDED.username, email = EXCLUDED.email, password_hash = EXCLUDED.password_hash WHERE tele_admin_users.updated_at = tele_admin_users.created_at`;
     })().catch((cause) => { adminUserReady = null; debugError('owner account seed failed', cause); throw cause; });
   }
   return adminUserReady;
@@ -108,6 +114,7 @@ const getDb = () => {
   const client = createNeonClient(process.env.DATABASE_URL);
   return async (strings, ...values) => {
     await ensureSiteRow();
+    await ensureAdminUser();
     return client(strings, ...values);
   };
 };
@@ -142,6 +149,18 @@ function debugError(label, cause) {
   if (verbose) console.error(label, cause);
   else console.error(label, cause?.name || cause?.code || 'unknown');
 }
+function requestIsHttps(req) {
+  if (req.secure) return true;
+  const forwarded = String(req.get('x-forwarded-proto') || '').split(',')[0].trim().toLowerCase();
+  return forwarded === 'https';
+}
+function hostnamesMatch(left, right) {
+  const a = String(left || '').toLowerCase();
+  const b = String(right || '').toLowerCase();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.split(':')[0] === b.split(':')[0];
+}
 function makeCsrfToken() {
   const nonce = b64url(randomBytes(24));
   const secret = csrfSecret();
@@ -169,11 +188,10 @@ function cookieValue(header, name) {
 }
 // PASSWORD_MIN / PASSWORD_MAX are imported from lib/admin-security.js so this
 // file, the Cloudflare runtime and verifyPasswordHash() all read the same two
-// numbers. Password length is 8–25 for every sign-in form in this app: the
-// owner sign-in, the owner's "change password" panel, the public client
-// sign-up, and the client sign-in. The owner policy still demands one lowercase
-// letter, one uppercase letter, one number and one symbol; the client policy
-// only enforces length.
+// numbers. Password length is 8–25 for every user type: the owner sign-in, the
+// owner's "change password" panel, public client sign-up, and client sign-in.
+// Creation (owner and client) also requires one lowercase, one uppercase, one
+// number and one symbol. Verification checks length only.
 function ownerPasswordProblem(value) {
   if (value.length < PASSWORD_MIN || value.length > PASSWORD_MAX) return `The password must be ${PASSWORD_MIN}–${PASSWORD_MAX} characters long.`;
   if (!/[a-z]/.test(value) || !/[A-Z]/.test(value) || !/[0-9]/.test(value) || !/[^A-Za-z0-9\s]/.test(value)) {
@@ -202,14 +220,24 @@ function registerProblem(name, email, phone, password) {
 async function adminCredentials() {
   const fromEnvironment = {
     username: cleanText(process.env.ADMIN_USERNAME, 64), email: cleanText(process.env.ADMIN_EMAIL, 254),
-    passwordHash: String(process.env.ADMIN_PASSWORD_HASH || ''), source: 'environment'
+    passwordHash: normalizePasswordHash(process.env.ADMIN_PASSWORD_HASH), source: 'environment'
   };
   const environmentComplete = Boolean(fromEnvironment.username && fromEnvironment.email && fromEnvironment.passwordHash);
   if (!process.env.DATABASE_URL) return environmentComplete ? fromEnvironment : null;
   try {
     await ensureAdminUser();
     const rows = await getDb()`SELECT username, email, password_hash AS "passwordHash" FROM tele_admin_users WHERE site_id = ${SITE_ID} LIMIT 1`;
-    if (rows[0]) return { username: String(rows[0].username), email: String(rows[0].email), passwordHash: String(rows[0].passwordHash), source: 'database' };
+    if (rows[0]) {
+      const fromDatabase = {
+        username: String(rows[0].username), email: String(rows[0].email),
+        passwordHash: normalizePasswordHash(rows[0].passwordHash), source: 'database'
+      };
+      if (passwordHashWellFormed(fromDatabase.passwordHash)) return fromDatabase;
+      if (environmentComplete && passwordHashWellFormed(fromEnvironment.passwordHash)) {
+        return { ...fromDatabase, passwordHash: fromEnvironment.passwordHash, source: 'environment' };
+      }
+      return fromDatabase;
+    }
   } catch (cause) { debugError('owner account read failed', cause); }
   return environmentComplete ? fromEnvironment : null;
 }
@@ -217,17 +245,23 @@ async function adminConfigured() {
   if (!csrfSecret()) return false;
   return Boolean(await adminCredentials());
 }
-function adminSessionCookieName(req) {
-  return req.secure ? '__Host-canopy_owner' : 'canopy_owner';
+function ownerSessionToken(req) {
+  // Bug Fix No. 204: read both cookie names so a protocol-detection flip
+  // between the login POST and later GETs cannot drop a valid session.
+  const header = req.headers.cookie;
+  return cookieValue(header, '__Host-canopy_owner') || cookieValue(header, 'canopy_owner');
 }
-function ownerSessionCookie(req, token) {
-  const secure = req.secure ? '; Secure' : '';
-  return `${adminSessionCookieName(req)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`;
+function ownerSessionCookies(req, token, maxAge = 43200) {
+  const encoded = encodeURIComponent(token);
+  const secure = requestIsHttps(req);
+  const cookies = [`canopy_owner=${encoded}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`];
+  if (secure) cookies.unshift(`__Host-canopy_owner=${encoded}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=${maxAge}`);
+  return cookies;
 }
 async function adminOk(req) {
   const credentials = await adminCredentials();
   if (!credentials || !csrfSecret()) return false;
-  const token = cookieValue(req.headers.cookie, adminSessionCookieName(req));
+  const token = ownerSessionToken(req);
   return verifyAdminSession(token, credentials.username, credentials.passwordHash, csrfSecret());
 }
 async function passwordDigest(password, salt, iterations = passwordIterations) {
@@ -287,12 +321,23 @@ async function currentClient(req) {
   const rows = await sql`SELECT account.id, account.full_name AS name, account.email, account.phone FROM tele_client_sessions AS session JOIN tele_client_accounts AS account ON account.id = session.client_account_id AND account.site_id = session.site_id WHERE session.site_id = ${SITE_ID} AND session.token_hash = ${tokenHash} AND session.expires_at > now() LIMIT 1`;
   return rows[0] || null;
 }
+function requestOriginAllowed(req) {
+  const origin = req.get('origin');
+  if (!origin) return true;
+  let parsed;
+  try { parsed = new URL(origin); } catch (_) { return false; }
+  const expectedOrigin = `${req.protocol}://${req.get('host')}`;
+  if (origin === expectedOrigin) return true;
+  if (hostnamesMatch(parsed.host, req.get('host'))) return true;
+  for (const entry of String(req.get('x-forwarded-host') || '').split(',')) {
+    if (hostnamesMatch(parsed.host, entry.trim())) return true;
+  }
+  return false;
+}
 function csrfGuard(req, res, next) {
   const cookie = cookieValue(req.headers.cookie, csrfCookie);
   const header = req.get('x-csrf-token');
-  const origin = req.get('origin');
-  const expectedOrigin = `${req.protocol}://${req.get('host')}`;
-  if (origin && origin !== expectedOrigin) return res.status(403).json({ error: 'Cross-site request rejected.' });
+  if (!requestOriginAllowed(req)) return res.status(403).json({ error: 'Cross-site request rejected.' });
   if (!cookie || !header || cookie !== header || !tokenIsValid(header)) return res.status(403).json({ error: 'Your security token expired. Refresh and try again.' });
   next();
 }
@@ -523,14 +568,17 @@ async function persistArticle(sql, post, id = '') {
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, runtime: 'vercel-node', siteId: SITE_ID }));
-app.get('/api/csrf', (req, res) => {
+app.get('/api/csrf', asyncRoute(async (req, res) => {
   try {
+    if (process.env.DATABASE_URL) {
+      try { await ensureAdminUser(); } catch (cause) { debugError('first-url owner seed failed', cause); }
+    }
     const token = makeCsrfToken();
-    const secure = req.secure ? '; Secure' : '';
+    const secure = requestIsHttps(req) ? '; Secure' : '';
     res.setHeader('Set-Cookie', `${csrfCookie}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600${secure}`);
     res.json({ token });
   } catch (error) { res.status(503).json({ error: error.message }); }
-});
+}));
 app.get('/api/admin/session', asyncRoute(async (req, res) => {
   const credentials = await adminCredentials();
   const authenticated = Boolean(credentials) && await adminOk(req);
@@ -554,10 +602,11 @@ app.post('/api/admin/login', csrfGuard, asyncRoute(async (req, res) => {
   const emailBytes = Buffer.from(String(credentials.email || '').trim().toLowerCase());
   const emailMatches = emailBytes.length > 0 && givenBytes.length === emailBytes.length && timingSafeEqual(givenBytes, emailBytes);
   const passwordMatches = await verifyPasswordHash(password, credentials.passwordHash);
-  if ((!usernameMatches && !emailMatches) || !passwordMatches) return res.status(401).json({ error: 'Username or password is incorrect.' });
+  const loginError = ownerLoginError(usernameMatches || emailMatches, passwordMatches);
+  if (loginError) return res.status(401).json({ error: loginError });
   const token = await createAdminSession(credentials.username, credentials.passwordHash, csrfSecret());
-  res.setHeader('Set-Cookie', ownerSessionCookie(req, token));
-  res.json({ ok: true, email: credentials.email, dashboardPath: adminDashboardPath(new Date(), siteTimeZone) });
+  res.setHeader('Set-Cookie', ownerSessionCookies(req, token));
+  res.json({ ok: true, authenticated: true, username: credentials.username, email: credentials.email, dashboardPath: adminDashboardPath(new Date(), siteTimeZone) });
 }));
 app.put('/api/admin/account', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
   const credentials = await adminCredentials();
@@ -581,12 +630,11 @@ app.put('/api/admin/account', csrfGuard, adminGuard, asyncRoute(async (req, res)
     return res.status(503).json({ error: databaseErrorMessage(error, 'Could not save the owner sign-in details.') });
   }
   const token = await createAdminSession(username, passwordHash, csrfSecret());
-  res.setHeader('Set-Cookie', ownerSessionCookie(req, token));
+  res.setHeader('Set-Cookie', ownerSessionCookies(req, token));
   res.json({ ok: true, username, email });
 }));
 app.post('/api/admin/logout', csrfGuard, (req, res) => {
-  const secure = req.secure ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `${adminSessionCookieName(req)}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
+  res.setHeader('Set-Cookie', ownerSessionCookies(req, '', 0));
   res.json({ ok: true });
 });
 app.get('/api/site', asyncRoute(async (_req, res) => {

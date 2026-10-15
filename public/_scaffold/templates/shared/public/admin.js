@@ -772,12 +772,13 @@
         const session = await api('/api/admin/login', { method: 'POST', body: { username, password } });
         $('adminPassword').value = '';
         setSignedIn(true, session.email || '');
+        fillOwnerAccount({ username: session.username || username, email: session.email || '' });
         if (followDashboardPath(session)) return;
         toast('Owner signed in', 'Your session is protected and will expire automatically.');
         await loadAdminWorkspace();
       } catch (error) {
         $('adminPassword').value = '';
-        $('loginMessage').textContent = error.message || 'Username or password is incorrect.';
+        $('loginMessage').textContent = error.message || 'The username or password is incorrect.';
         setSignedIn(false);
         toast('Sign-in failed', error.message || 'Check your username and password.', true);
       } finally {
