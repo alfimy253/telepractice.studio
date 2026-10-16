@@ -14,7 +14,10 @@
     "public/index.html",
     "public/site-config.js",
     "public/site.css",
-    "public/site.js"
+    "public/site.js",
+    "public/content-gallery.js",
+    "public/page-edits.js",
+    "public/owner-pages.js"
   ],
   "sharedDb": [
     "db/connection.js",
@@ -28,7 +31,9 @@
     "lib/db-errors.js",
     "lib/payment-reminders.js",
     "lib/site-theme.js",
-    "scripts/set-secrets.mjs"
+    "scripts/set-secrets.mjs",
+    "lib/content-gallery.js",
+    "lib/page-edits.js"
   ],
   "vercel": [
     ".env",

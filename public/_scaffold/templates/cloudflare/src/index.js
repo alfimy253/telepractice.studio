@@ -1,3 +1,5 @@
+import { normalizePageEdits } from '../lib/page-edits.js';
+import { normalizeContentGallery } from '../lib/content-gallery.js';
 import { createNeonClient } from '../db/connection.js';
 import { createAdminSession, PASSWORD_MAX, PASSWORD_MIN, normalizePasswordHash, ownerLoginError, passwordHashWellFormed, verifyAdminSession, verifyPasswordHash } from '../lib/admin-security.js';
 import { adminDashboardPath, isAdminDashboardPath } from '../lib/admin-url.js';
@@ -61,8 +63,8 @@ function cleanTimeZone(value, fallback = 'Asia/Manila') {
 function cleanBannerImage(value) {
   const raw = cleanText(value, 2048);
   if (!raw) return '';
-  if (raw.startsWith('/') && !raw.startsWith('//')) return raw;
-  try { const url = new URL(raw); return url.protocol === 'https:' ? url.href : null; } catch (_) { return null; }
+  if (raw.startsWith('/') && !raw.startsWith('//') && !raw.startsWith('/\\') && !/[\u0000-\u0020]/.test(raw)) return raw;
+  try { const url = new URL(raw); return url.protocol === 'https:' && !url.username && !url.password ? url.href : null; } catch (_) { return null; }
 }
 function cleanCustomPageUrl(value) {
   let raw = cleanText(value, 120).replace(/^\/+|\/+$/g, '');
@@ -80,12 +82,14 @@ function cleanCustomPages(value, fallback = []) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
     const menuName = cleanText(item.menuName, 80);
     const pageTitle = cleanText(item.pageTitle, 120);
-    const pageContent = cleanText(item.pageContent, 6000);
+    const pageContent = String(item.pageContent ?? '').replace(/\r\n?/g, '\n').slice(0, 6000);
     const url = cleanCustomPageUrl(item.url);
     const imageUrl = cleanBannerImage(item.imageUrl);
-    if (!menuName || !pageTitle || !pageContent || !url || imageUrl === null || seen.has(url)) return [];
+    if (!menuName || !pageTitle || !url || imageUrl === null || seen.has(url)) return [];
+    let contentGallery;
+    try { contentGallery = normalizeContentGallery(item.contentGallery, pageContent); } catch (_) { return []; }
     seen.add(url);
-    return [{ id: cleanText(item.id, 48, url.slice(1, -5)), menuName, url, pageTitle, pageContent, imageUrl }];
+    return [{ id: cleanText(item.id, 48, url.slice(1, -5)), menuName, url, pageTitle, pageContent, imageUrl, contentGallery }];
   });
 }
 function cleanPaymentDetails(value) {
@@ -111,8 +115,9 @@ function cleanSiteConfig(input = {}) {
     fontStyle: merged.fontStyle === 'sans' ? 'sans' : 'serif',
     theme: normalizeSiteTheme(merged.theme, DEFAULT_CONFIG.theme),
     editorialAccent: ['black','teal','forest'].includes(merged.editorialAccent) ? merged.editorialAccent : 'black',
-    features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), gallery: merged.features?.gallery !== false },
+    features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), blog: true, gallery: merged.features?.gallery !== false },
     payments: cleanPaymentDetails(merged.payments),
+    pageEdits: normalizePageEdits(merged.pageEdits),
     customPages: cleanCustomPages(merged.customPages, DEFAULT_CONFIG.customPages),
     menuLinks: cleanMenuLinks(merged.menuLinks, DEFAULT_CONFIG.menuLinks)
   };
@@ -167,8 +172,8 @@ function slugify(value) { return String(value || '').toLowerCase().normalize('NF
 function cleanGalleryImage(value) {
   const raw = cleanText(value, 2048);
   if (!raw) return '';
-  if (raw.startsWith('/') && !raw.startsWith('//')) return raw;
-  try { const url = new URL(raw); return url.protocol === 'https:' ? url.href : null; } catch (_) { return null; }
+  if (raw.startsWith('/') && !raw.startsWith('//') && !raw.startsWith('/\\') && !/[\u0000-\u0020]/.test(raw)) return raw;
+  try { const url = new URL(raw); return url.protocol === 'https:' && !url.username && !url.password ? url.href : null; } catch (_) { return null; }
 }
 function galleryPayload(value = {}) {
   const imageUrl = cleanGalleryImage(value.imageUrl);
@@ -185,72 +190,43 @@ function validGalleryPayload(item) {
 function cleanArticleImage(value) {
   const raw = cleanText(value, 2048);
   if (!raw) return '';
-  if (raw.startsWith('/') && !raw.startsWith('//')) return raw;
-  try { const url = new URL(raw); return url.protocol === 'https:' ? url.href : null; } catch (_) { return null; }
+  if (raw.startsWith('/') && !raw.startsWith('//') && !raw.startsWith('/\\') && !/[\u0000-\u0020]/.test(raw)) return raw;
+  try { const url = new URL(raw); return url.protocol === 'https:' && !url.username && !url.password ? url.href : null; } catch (_) { return null; }
 }
 function articlePostPayload(value = {}) {
   const title = cleanText(value.title, 140);
-  const slug = slugify(value.slug || title);
+  const slug = slugify(cleanText(value.slug, 160) || title);
   const excerpt = cleanText(value.excerpt, 260);
-  const body = cleanText(value.body, 12000);
+  const body = String(value.body ?? '').replace(/\r\n?/g, '\n').slice(0, 12000);
   const category = cleanText(value.category, 60, 'Practice notes') || 'Practice notes';
   const status = value.status === 'published' ? 'published' : 'draft';
-  if (!Array.isArray(value.gallery ?? []) || (value.gallery || []).length > 12) return null;
-  const gallery = (value.gallery || []).map((image, index) => {
-    const imageUrl = cleanArticleImage(image?.imageUrl);
-    return { imageUrl, altText: cleanText(image?.altText, 180), caption: cleanText(image?.caption, 300), sortOrder: Number(image?.sortOrder ?? index) };
-  });
-  if (gallery.some((image) => !image.imageUrl || image.imageUrl === null || !image.altText || !Number.isInteger(image.sortOrder) || image.sortOrder < 0 || image.sortOrder > 11) || new Set(gallery.map((image) => image.sortOrder)).size !== gallery.length) return null;
-  gallery.sort((left, right) => left.sortOrder - right.sortOrder);
+  if (value.gallery != null && (!Array.isArray(value.gallery) || value.gallery.length)) return null;
+  let contentGallery;
+  try { contentGallery = normalizeContentGallery(value.contentGallery, body); } catch (_) { return null; }
   const suppliedFeatureUrl = cleanArticleImage(value.featureImageUrl);
   if (suppliedFeatureUrl === null) return null;
-  const featureImageUrl = suppliedFeatureUrl || gallery[0]?.imageUrl || '';
-  const featureImageAlt = cleanText(value.featureImageAlt, 180) || gallery.find((image) => image.imageUrl === featureImageUrl)?.altText || title;
-  if (!title || !body || !featureImageUrl || !featureImageAlt) return null;
-  return { title, slug, excerpt, body, category, status, featureImageUrl, featureImageAlt, gallery };
-}
-function articleGalleryRows(gallery) {
-  // jsonb_to_recordset below declares snake_case columns, while the owner
-  // dashboard posts camelCase gallery rows ({ imageUrl, altText, caption,
-  // sortOrder }). Passing the objects through unchanged inserted NULLs and the
-  // save failed with "null value in column \"image_url\"" whenever an article
-  // carried a gallery image, so map the fields explicitly.
-  return JSON.stringify((Array.isArray(gallery) ? gallery : []).map((image) => ({
-    image_url: image?.imageUrl ?? '',
-    alt_text: image?.altText ?? '',
-    caption: image?.caption ?? '',
-    sort_order: Number(image?.sortOrder ?? 0)
-  })));
+  const featureImageUrl = suppliedFeatureUrl;
+  const featureImageAlt = cleanText(value.featureImageAlt, 180) || (featureImageUrl ? title : '');
+  if (!title || !body.trim()) return null;
+  return { title, slug, excerpt, body, category, status, featureImageUrl, featureImageAlt, contentGallery };
 }
 async function persistArticle(sql, post, id = '') {
   if (id) return sql`
     WITH saved AS (
-      UPDATE tele_blog_posts SET title = ${post.title}, slug = ${post.slug}, excerpt = ${post.excerpt}, body = ${post.body}, feature_image_url = ${post.featureImageUrl}, feature_image_alt = ${post.featureImageAlt}, category = ${post.category}, status = ${post.status}, published_at = CASE WHEN ${post.status} = 'published' THEN COALESCE(published_at, now()) ELSE NULL END, updated_at = now()
+      UPDATE tele_blog_posts SET title = ${post.title}, slug = ${post.slug}, excerpt = ${post.excerpt}, body = ${post.body}, feature_image_url = ${post.featureImageUrl}, feature_image_alt = ${post.featureImageAlt}, category = ${post.category}, content_gallery = ${JSON.stringify(post.contentGallery)}::jsonb, status = ${post.status}, published_at = CASE WHEN ${post.status} = 'published' THEN COALESCE(published_at, now()) ELSE NULL END, updated_at = now()
       WHERE site_id = ${SITE_ID} AND id = ${id}::uuid
-      RETURNING id, site_id, title, slug, excerpt, body, feature_image_url AS "featureImageUrl", feature_image_alt AS "featureImageAlt", category, status, published_at AS "publishedAt", created_at AS "createdAt"
+      RETURNING id, site_id, title, slug, excerpt, body, feature_image_url AS "featureImageUrl", feature_image_alt AS "featureImageAlt", category, content_gallery AS "contentGallery", status, published_at AS "publishedAt", created_at AS "createdAt"
     ), cleared AS (
       DELETE FROM tele_blog_post_images AS image USING saved WHERE image.site_id = saved.site_id AND image.post_id = saved.id RETURNING image.id
-    ), added AS (
-      INSERT INTO tele_blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order)
-      SELECT saved.site_id, saved.id, incoming.image_url, incoming.alt_text, incoming.caption, incoming.sort_order
-      FROM saved CROSS JOIN (SELECT count(*) AS cleared_count FROM cleared) AS cleared_images
-      CROSS JOIN jsonb_to_recordset(${articleGalleryRows(post.gallery)}::jsonb) AS incoming(image_url text, alt_text text, caption text, sort_order integer)
-      RETURNING id
     )
     SELECT saved.* FROM saved`;
   return sql`
     WITH saved AS (
-      INSERT INTO tele_blog_posts (site_id, title, slug, excerpt, body, feature_image_url, feature_image_alt, category, status, published_at)
-      VALUES (${SITE_ID}, ${post.title}, ${post.slug}, ${post.excerpt}, ${post.body}, ${post.featureImageUrl}, ${post.featureImageAlt}, ${post.category}, ${post.status}, CASE WHEN ${post.status} = 'published' THEN now() ELSE NULL END)
-      RETURNING id, site_id, title, slug, excerpt, body, feature_image_url AS "featureImageUrl", feature_image_alt AS "featureImageAlt", category, status, published_at AS "publishedAt", created_at AS "createdAt"
+      INSERT INTO tele_blog_posts (site_id, title, slug, excerpt, body, feature_image_url, feature_image_alt, category, content_gallery, status, published_at)
+      VALUES (${SITE_ID}, ${post.title}, ${post.slug}, ${post.excerpt}, ${post.body}, ${post.featureImageUrl}, ${post.featureImageAlt}, ${post.category}, ${JSON.stringify(post.contentGallery)}::jsonb, ${post.status}, CASE WHEN ${post.status} = 'published' THEN now() ELSE NULL END)
+      RETURNING id, site_id, title, slug, excerpt, body, feature_image_url AS "featureImageUrl", feature_image_alt AS "featureImageAlt", category, content_gallery AS "contentGallery", status, published_at AS "publishedAt", created_at AS "createdAt"
     ), cleared AS (
       DELETE FROM tele_blog_post_images AS image USING saved WHERE image.site_id = saved.site_id AND image.post_id = saved.id RETURNING image.id
-    ), added AS (
-      INSERT INTO tele_blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order)
-      SELECT saved.site_id, saved.id, incoming.image_url, incoming.alt_text, incoming.caption, incoming.sort_order
-      FROM saved CROSS JOIN (SELECT count(*) AS cleared_count FROM cleared) AS cleared_images
-      CROSS JOIN jsonb_to_recordset(${articleGalleryRows(post.gallery)}::jsonb) AS incoming(image_url text, alt_text text, caption text, sort_order integer)
-      RETURNING id
     )
     SELECT saved.* FROM saved`;
 }
@@ -685,7 +661,7 @@ async function routeApi(request, env) {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
     const body = await readJson(request); if (!body) return error('Send a valid JSON object.');
-    const config = cleanSiteConfig(body);
+    let config; try { config = cleanSiteConfig(body); } catch (cause) { return error(cause.message, 400); }
     if (!config.businessName || (config.email && !/^\S+@\S+\.\S+$/.test(config.email))) return error('Check the practice name and contact email.');
     try {
       const rows = await sql(env)`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(config)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now() RETURNING config`;
@@ -755,7 +731,7 @@ async function routeApi(request, env) {
       return post ? json({ post }) : error('Article not found.', 404);
     }
     try {
-      const rows = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM tele_blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} AND post.status = 'published' AND post.slug = ${slug} LIMIT 1`;
+      const rows = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.published_at AS "publishedAt", post.created_at AS "createdAt", post.content_gallery AS "contentGallery" FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} AND post.status = 'published' AND post.slug = ${slug} LIMIT 1`;
       return rows.length ? json({ post: rows[0] }) : error('Article not found.', 404);
     } catch (cause) { console.error('blog article read failed', cause); return error('Could not load this article.', 503); }
   }
@@ -1063,8 +1039,9 @@ async function routeApi(request, env) {
   if (path === '/api/admin/posts' && method === 'GET') {
     if (!await adminOk(request, env)) return adminFailure(env);
     if (!DEFAULT_CONFIG.features?.blog) return error('Blog is not enabled for this site.', 404);
+    if (!env.DATABASE_URL) return error('Connect the appointment database (DATABASE_URL) to save posts.', 503);
     try {
-      const posts = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.status, post.published_at AS "publishedAt", post.created_at AS "createdAt", COALESCE((SELECT json_agg(json_build_object('id', image.id, 'imageUrl', image.image_url, 'altText', image.alt_text, 'caption', image.caption, 'sortOrder', image.sort_order) ORDER BY image.sort_order) FROM tele_blog_post_images AS image WHERE image.site_id = post.site_id AND image.post_id = post.id), '[]'::json) AS gallery FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} ORDER BY post.created_at DESC LIMIT 100`;
+      const posts = await sql(env)`SELECT post.id, post.title, post.slug, post.excerpt, post.body, post.category, post.feature_image_url AS "featureImageUrl", post.feature_image_alt AS "featureImageAlt", post.status, post.published_at AS "publishedAt", post.created_at AS "createdAt", post.content_gallery AS "contentGallery" FROM tele_blog_posts AS post WHERE post.site_id = ${SITE_ID} ORDER BY post.created_at DESC LIMIT 100`;
       return json({ posts });
     } catch (cause) { console.error('admin blog read failed', cause); return error('Could not load blog posts. Check the Neon schema.', 503); }
   }
@@ -1072,28 +1049,30 @@ async function routeApi(request, env) {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
     if (!DEFAULT_CONFIG.features?.blog) return error('Blog is not enabled for this site.', 404);
+    if (!env.DATABASE_URL) return error('Connect the appointment database (DATABASE_URL) to save posts.', 503);
     const value = await readJson(request); if (!value) return error('Send a valid JSON object.');
     const post = articlePostPayload(value);
-    if (!post) return error('Add a title and article body, plus a valid feature image. If you leave the feature image blank, add a gallery image with a URL and alt text.');
+    if (!post) return error('Add a title and article body. Use a gallery title and valid unique image URLs, with at most two images per paragraph.');
     try {
       const posts = await persistArticle(sql(env), post);
       return json({ post: posts[0] }, 201);
-    } catch (cause) { console.error('blog post save failed', cause); return error(cause.code === '23505' ? 'That URL slug is already in use or gallery order is duplicated.' : databaseErrorMessage(cause, 'Could not save the post.'), cause.code === '23505' ? 409 : 503); }
+    } catch (cause) { console.error('blog post save failed', cause); return error(cause.code === '23505' ? 'That blog URL is already in use. Choose a different slug.' : databaseErrorMessage(cause, 'Could not save the post.'), cause.code === '23505' ? 409 : 503); }
   }
   if (path.startsWith('/api/admin/posts/') && method === 'PUT') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
     if (!DEFAULT_CONFIG.features?.blog) return error('Blog is not enabled for this site.', 404);
+    if (!env.DATABASE_URL) return error('Connect the appointment database (DATABASE_URL) to save posts.', 503);
     const id = path.slice('/api/admin/posts/'.length);
     const value = await readJson(request); if (!value) return error('Send a valid JSON object.');
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid post id.');
     const post = articlePostPayload(value);
-    if (!post) return error('Add a title and article body, plus a valid feature image. If you leave the feature image blank, add a gallery image with a URL and alt text.');
+    if (!post) return error('Add a title and article body. Use a gallery title and valid unique image URLs, with at most two images per paragraph.');
     try {
       const posts = await persistArticle(sql(env), post, id);
       return posts.length ? json({ post: posts[0] }) : error('That post was not found.', 404);
     } catch (cause) {
-      if (cause.code === '23505') return error('That URL slug is already in use or gallery order is duplicated.', 409);
+      if (cause.code === '23505') return error('That blog URL is already in use. Choose a different slug.', 409);
       console.error('blog post update failed', cause); return error(databaseErrorMessage(cause, 'Could not update the post.'), 503);
     }
   }
@@ -1101,6 +1080,7 @@ async function routeApi(request, env) {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);
     if (!await adminOk(request, env)) return adminFailure(env);
     if (!DEFAULT_CONFIG.features?.blog) return error('Blog is not enabled for this site.', 404);
+    if (!env.DATABASE_URL) return error('Connect the appointment database (DATABASE_URL) to save posts.', 503);
     const id = path.slice('/api/admin/posts/'.length);
     if (!/^[0-9a-f-]{36}$/i.test(id)) return error('Invalid post id.');
     try {
@@ -1164,6 +1144,18 @@ export default {
     }
     if (request.method !== 'GET' && request.method !== 'HEAD') return error('Method not allowed.', 405);
     if (url.pathname === '/admin.html') return error('Not found.', 404);
+    if (url.pathname.startsWith('/blog/')) {
+      const match = /^\/blog\/([a-z0-9-]{1,160})\/?$/i.exec(url.pathname);
+      if (!match) return error('Article not found.', 404);
+      const articleUrl = new URL(`/api/posts/${match[1]}`, url);
+      const article = await routeApi(new Request(articleUrl), env).catch(() => error('Could not load this article.', 503));
+      if (!article.ok) return request.method === 'HEAD' ? new Response(null, { status: article.status, headers: article.headers }) : article;
+      const response = await env.ASSETS.fetch(new Request(new URL('/index.html', url), { method: request.method }));
+      const headers = headersWithSecurity(response.headers);
+      headers.set('Cache-Control', 'no-store');
+      return new Response(request.method === 'HEAD' ? null : response.body, { status: response.status, headers });
+    }
+
     if (isAdminDashboardPath(url.pathname)) {
       const expectedPath = adminDashboardPath(new Date(), SITE_TIME_ZONE);
       if (url.pathname !== expectedPath && await adminOk(request, env)) {

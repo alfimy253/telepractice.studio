@@ -1,3 +1,4 @@
+import { GalleryEditor, emptyGallery } from './_scaffold/templates/shared/public/content-gallery.js';
 import { requestGeneratedPackage } from './download.js';
 import { buildPackageLocally, buildPreviewLocally } from './package-builder.js';
 import { normalizePageEdits, slugify } from './package-core.js';
@@ -71,7 +72,7 @@ async function mergePageEditsFromServer() {
   const serverUpdatedAt = Date.parse(record.updatedAt || '') || 0;
   if (serverUpdatedAt <= localUpdatedAt) return;
   const next = pageEditsFrom(record.edits);
-  if (next.length === config.pageEdits.length && next.every((edit, index) => edit.selector === config.pageEdits[index]?.selector && edit.index === config.pageEdits[index]?.index && edit.text === config.pageEdits[index]?.text)) return;
+  if (JSON.stringify(next) === JSON.stringify(config.pageEdits)) return;
   config.pageEdits = next;
   localStorage.setItem('canopy-page-edits-updated-at', String(serverUpdatedAt));
   saveConfig(true);
@@ -112,7 +113,8 @@ function normalizeSavedPages(value) {
     url: String(page?.url || '').slice(0, 120),
     pageTitle: String(page?.pageTitle || '').slice(0, 120),
     pageContent: String(page?.pageContent || '').slice(0, 6000),
-    imageUrl: String(page?.imageUrl || '').slice(0, 2048)
+    imageUrl: String(page?.imageUrl || '').slice(0, 2048),
+    contentGallery: page?.contentGallery || emptyGallery()
   }));
 }
 // Page-editor edits are public page text. They are validated on load so a
@@ -488,7 +490,9 @@ function safeBannerImageUrl(value) {
   if (raw.startsWith('/') && !raw.startsWith('//')) return true;
   try { return new URL(raw).protocol === 'https:'; } catch (_) { return false; }
 }
+const customGalleryEditors = [];
 function renderCustomPageList() {
+  for (const editor of customGalleryEditors.splice(0)) editor.destroy();
   const list = $('wizardPageList');
   if (!list) return;
   if (!config.customPages.length) {
@@ -506,8 +510,8 @@ function renderCustomPageList() {
           <label class="form-field"><span>Menu link name</span><input data-page-field="menuName" maxlength="80" value="${esc(page.menuName)}" placeholder="About us" required></label>
           <label class="form-field"><span>Page URL</span><input data-page-field="url" maxlength="120" value="${esc(page.url)}" placeholder="/about-us.html" inputmode="url" required></label>
           <label class="form-field wizard-field-full"><span>Page title</span><input data-page-field="pageTitle" maxlength="120" value="${esc(page.pageTitle)}" placeholder="A little about our practice" required></label>
-          <label class="form-field wizard-field-full"><span>Page content</span><textarea data-page-field="pageContent" maxlength="6000" rows="4" placeholder="Write the content visitors will read on this page." required>${esc(page.pageContent)}</textarea></label>
-          <label class="form-field wizard-field-full"><span>Banner image URL (optional)</span><input data-page-field="imageUrl" maxlength="2048" value="${esc(page.imageUrl)}" placeholder="https://example.com/banner.jpg" inputmode="url"><small>One HTTPS or same-site image URL is used as the page banner.</small></label>
+          <label class="form-field wizard-field-full"><span>Page content</span><textarea data-page-field="pageContent" maxlength="6000" rows="4" placeholder="Write the content visitors will read on this page.">${esc(page.pageContent)}</textarea></label>
+          <div data-page-gallery class="wizard-field-full"></div><label class="form-field wizard-field-full"><span>Banner image URL (optional)</span><input data-page-field="imageUrl" maxlength="2048" value="${esc(page.imageUrl)}" placeholder="https://example.com/banner.jpg" inputmode="url"><small>One HTTPS or same-site image URL is used as the page banner.</small></label>
           <div class="wizard-page-actions">
             <button type="button" data-page-action="up" ${index === 0 ? 'disabled' : ''}>Move earlier</button>
             <button type="button" data-page-action="down" ${index === config.customPages.length - 1 ? 'disabled' : ''}>Move later</button>
@@ -517,6 +521,11 @@ function renderCustomPageList() {
       </details>
     </div>`;
   }).join('');
+  list.querySelectorAll('details[data-page-id]').forEach((accordion) => {
+    const page = config.customPages.find((page) => page.id === accordion.dataset.pageId);
+    const input = accordion.querySelector('[data-page-field="pageContent"]');
+    customGalleryEditors.push(new GalleryEditor({ host: accordion.querySelector('[data-page-gallery]'), input, getGallery: () => page.contentGallery || emptyGallery(), onChange: (gallery) => { page.pageContent = input.value; page.contentGallery = gallery; saveConfig(); } }));
+  });
 }
 function bindCustomPageEditor() {
   const list = $('wizardPageList');
@@ -561,7 +570,7 @@ function validateCustomPages() {
   for (let index = 0; index < config.customPages.length; index++) {
     const page = config.customPages[index];
     const accordion = [...document.querySelectorAll('#wizardPageList details[data-page-id]')].find((item) => item.dataset.pageId === page.id);
-    for (const [field, message] of [['menuName', 'Add a menu link name.'], ['url', 'Add a page URL.'], ['pageTitle', 'Add a title for this page.'], ['pageContent', 'Add content for this page.']]) {
+    for (const [field, message] of [['menuName', 'Add a menu link name.'], ['url', 'Add a page URL.'], ['pageTitle', 'Add a title for this page.']]) {
       if (!String(page[field] || '').trim()) {
         if (accordion) { accordion.open = true; accordion.querySelector(`[data-page-field="${field}"]`)?.focus(); }
         toast('Complete the page details', message, true);
@@ -588,7 +597,8 @@ function validateCustomPages() {
     page.url = route;
     page.menuName = page.menuName.trim();
     page.pageTitle = page.pageTitle.trim();
-    page.pageContent = page.pageContent.trim();
+    // Preserve paragraph boundaries and intentionally empty content after deletion.
+    page.pageContent = String(page.pageContent || '');
     page.imageUrl = page.imageUrl.trim();
   }
   saveConfig();

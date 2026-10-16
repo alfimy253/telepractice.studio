@@ -16,7 +16,10 @@
     .editor-status.error { color: #a75c4e; }
     .export-button { border: 0; border-radius: 6px; background: #376f62; color: #fff; font-size: 12px; font-weight: 700; padding: 9px 16px; cursor: pointer; }
     .export-button:disabled { opacity: .55; cursor: wait; }
-    .editor-stage { padding: 18px; }
+    .editor-stage { padding: 18px; display:grid; grid-template-columns:minmax(0,1fr) minmax(260px,340px); gap:16px; }
+    .page-gallery-panel { padding:12px;background:white;overflow:auto;max-height:85vh; }
+    .page-gallery-panel textarea { width:100%;min-height:140px; }
+    @media(max-width:800px){.editor-stage{grid-template-columns:1fr}.page-gallery-panel{max-height:none}}
     .editor-frame { display: block; width: 100%; height: calc(100vh - 130px); border: 1px solid #e6e8e2; border-radius: 10px; background: #fff; }
   </style>
   <script type="module" src="/page-editor.js"></script>
@@ -24,13 +27,14 @@
 <body>
   <header class="editor-bar">
     <strong>Page editor</strong>
-    <span class="editor-hint">Click any plain text on the page to edit it. The builder preview updates when you export.</span>
+    <span class="editor-hint">Click text to edit; use × Delete paragraph/section to remove it. Export updates the builder preview and the next deployment package, not an already deployed site.</span>
     <span class="editor-count" id="editCount" hidden></span>
     <span class="editor-status" id="editorStatus" aria-live="polite"></span>
     <button class="export-button" id="exportButton" type="button">Export to builder</button>
   </header>
   <main class="editor-stage">
     <iframe class="editor-frame" id="editorFrame" title="Editable page preview" referrerpolicy="no-referrer"></iframe>
+    <aside id="pageGalleryPanel" class="page-gallery-panel" hidden><h2>Paragraphs &amp; page gallery</h2><p>Click a paragraph in the preview. Two newlines create another paragraph. One gallery is shared across this page.</p><textarea id="pageGalleryText" aria-label="Selected page text"></textarea><div id="pageGalleryControls"></div></aside>
   </main>
 </body>
 </html>

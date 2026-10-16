@@ -8,7 +8,7 @@
   <title>__BUSINESS_NAME__</title>
   <link rel="stylesheet" href="/site.css">
   <script src="/site-config.js" defer></script>
-  <script src="/site.js" defer></script>
+  <script src="/site.js" type="module"></script>
 </head>
 <body class="__THEME_CLASS__">
   <div class="announcement"><span class="announcement-dot"></span><span>Taking new clients</span><span class="announcement-separator">·</span><span>Thoughtful care, close to home</span></div>
@@ -79,12 +79,11 @@
     <article class="article-dialog" role="dialog" aria-modal="true" aria-labelledby="articleTitle">
       <button class="article-close" id="articleClose" type="button" aria-label="Close article">×</button>
       <header class="article-hero" id="articleHero">
-        <img id="articleFeatureImage" src="/images/blog-welcome.svg" alt="">
+        <img id="articleFeatureImage" hidden alt="">
         <div class="article-hero-shade"></div>
         <div class="article-hero-copy"><span class="post-category" id="articleCategory">From our team</span><h2 id="articleTitle">A note from our team</h2></div>
       </header>
       <div class="article-content"><p class="article-excerpt" id="articleExcerpt"></p><p class="article-meta" id="articleMeta"></p><div class="article-body" id="articleBody"></div>
-        <section class="article-gallery hidden" id="articleGallery"><div class="article-gallery-heading"><span class="eyebrow"><span></span> A CLOSER LOOK</span><h3>More from this story</h3></div><div class="article-gallery-grid" id="articleGalleryGrid"></div></section>
         <a class="button button-primary article-book" id="articleBook" href="#book">Request a visit <span>↗</span></a>
       </div>
     </article>
