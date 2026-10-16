@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "functions": { "api/index.js": { "includeFiles": "index.html" } },
   "crons": [
     { "path": "/api/internal/payment-sweeps", "schedule": "0 0 * * *" }
   ],
@@ -7,6 +8,7 @@
     { "source": "/admin.html", "destination": "/", "permanent": false }
   ],
   "rewrites": [
+    { "source": "/blog/:slug", "destination": "/api/index.js" },
     { "source": "/api/:path*", "destination": "/api/index.js" },
     { "source": "/:adminSegment/dashboard", "destination": "/admin.html" }
   ],

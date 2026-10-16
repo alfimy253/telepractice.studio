@@ -242,7 +242,8 @@ test('an "Export to builder" message applies the edits, saves them server-side a
     editorTab.addEventListener('message', (event) => acks.push(event.data));
     const edits = [
       { selector: '#heroText', index: 0, text: 'Edited from the page editor' },
-      { selector: 'h3.service-title', index: 1, text: 'Second service edited' }
+      { selector: 'h3.service-title', index: 1, text: 'Second service edited' },
+      { selector: '#about', index: 0, remove: true }
     ];
     editorTab.postMessage({ type: 'export', siteId: 'harborlight-veterinary-care', edits });
 
@@ -264,13 +265,14 @@ test('an "Export to builder" message applies the edits, saves them server-side a
       'the preview was not re-rendered with the exported edits');
     const stashed = dom.storage.get('canopy-preview-html');
     assert.ok(stashed.includes('Second service edited'));
+    assert.match(stashed, /data-page-deleted/, 'section deletion reaches the builder preview');
     const meta = JSON.parse(dom.storage.get('canopy-preview-meta'));
     assert.equal(meta.siteId, 'harborlight-veterinary-care');
     assert.deepEqual(meta.pageEdits, edits);
     // The layout section shows the applied edits.
     const status = dom.doc.getElementById('pageEditorStatus');
     assert.equal(status.hidden, false);
-    assert.match(status.textContent, /2 edits applied/);
+    assert.match(status.textContent, /3 edits applied/);
     assert.equal(dom.doc.getElementById('clearPageEdits').hidden, false);
     editorTab.close();
   } finally {
@@ -414,4 +416,16 @@ test('the builder keeps the local copy when the server record is older than loca
   } finally {
     dom.restore();
   }
+});
+
+test('219: newer gallery-only server edits restore even when selector and text have not changed', async () => {
+  const textEdit = { selector: '#heroText', index: 0, text: 'Same text' };
+  const serverEdits = [{ ...textEdit, pageGallery: { title: 'Restored photos', images: [{ id: 'one', url: 'https://example.test/one.jpg', paragraph: 0, target: '#heroText::0', alt: 'Restored photos' }] } }];
+  const dom = installDom({ serverPageEdits: { edits: serverEdits, updatedAt: '2030-01-01T00:00:00.000Z' } });
+  try {
+    dom.storage.set('canopy-site-config', JSON.stringify({ businessName: 'Harborlight Veterinary Care', pageEdits: [textEdit] }));
+    await import(`../public/app.js?gallery-only-219-${Date.now()}`);
+    assert.ok(await waitFor(() => savedConfig(dom).pageEdits[0]?.pageGallery?.title === 'Restored photos'));
+    assert.ok(await waitFor(() => (dom.storage.get('canopy-preview-html') || '').includes('https://example.test/one.jpg')));
+  } finally { dom.restore(); }
 });

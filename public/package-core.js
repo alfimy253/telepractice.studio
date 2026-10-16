@@ -1,3 +1,5 @@
+import { normalizePageEdits, applyPageEdits, PAGE_EDIT_EXCLUDED_IDS } from './_scaffold/templates/shared/public/page-edits.js';
+import { normalizeContentGallery, contentHtml, galleryCss } from './_scaffold/templates/shared/public/content-gallery.js';
 // Shared package/preview build core for the Canopy Studio builder. This module
 // runs in two places: the Cloudflare Worker (src/generator.js passes an
 // ASSETS-backed template reader) and the builder browser tab (package-builder.js
@@ -77,19 +79,10 @@ const VERTICALS = {
     ]
   }
 };
-const SAMPLE_POST_GALLERIES = [
-  [
-    { imageUrl: '/images/blog-welcome.svg', altText: 'An open, welcoming practice doorway', caption: 'A warm welcome and time to settle in.' },
-    { imageUrl: '/images/blog-care-team.svg', altText: 'A care team listening together', caption: 'Questions are always part of the visit.' }
-  ],
-  [
-    { imageUrl: '/images/blog-small-moments.svg', altText: 'A sunlit still life with a flower and warm cup', caption: 'Small routines can make care feel easier.' },
-    { imageUrl: '/images/blog-care-team.svg', altText: 'A care team ready to listen', caption: 'A little check-in can open a helpful conversation.' }
-  ],
-  [
-    { imageUrl: '/images/blog-care-team.svg', altText: 'A practice team and companion in a calm room', caption: 'A familiar team makes space for a slower hello.' },
-    { imageUrl: '/images/blog-welcome.svg', altText: 'A welcoming room with an open doorway', caption: 'The first moments can move at your pace.' }
-  ]
+const SAMPLE_POST_IMAGES = [
+  { imageUrl: '/images/blog-welcome.svg', altText: 'An open, welcoming practice doorway' },
+  { imageUrl: '/images/blog-small-moments.svg', altText: 'A sunlit still life with a flower and warm cup' },
+  { imageUrl: '/images/blog-care-team.svg', altText: 'A practice team and companion in a calm room' }
 ];
 const DEMO_GALLERY = [
   { title: 'A warm welcome', imageUrl: '', altText: 'Illustrated gallery placeholder for a welcoming practice space', caption: 'A friendly first impression starts at the door.', category: 'Practice life', sortOrder: 1, status: 'published' },
@@ -124,16 +117,16 @@ function normalizeCustomPages(value) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Each custom page must be a page configuration object.');
     const menuName = clean(item.menuName, 80);
     const pageTitle = clean(item.pageTitle, 120);
-    const pageContent = clean(item.pageContent, 6000);
+    const pageContent = String(item.pageContent ?? '').replace(/\r\n?/g, '\n').slice(0, 6000);
     const route = safePageUrl(item.url);
-    if (!menuName || !pageTitle || !pageContent || !route) throw new Error('Each custom page needs a menu name, unique page URL, page title and page content.');
+    if (!menuName || !pageTitle || !route) throw new Error('Each custom page needs a menu name, unique page URL and page title.');
     if (seen.has(route.url)) throw new Error(`Each custom page URL must be unique (${route.url} is repeated).`);
     const imageUrl = safePageImage(item.imageUrl);
     if (imageUrl === null) throw new Error('Use an HTTPS URL or a same-site path for a banner image.');
     seen.add(route.url);
     return {
       id: clean(item.id, 48, route.slug) || route.slug,
-      menuName, url: route.url, slug: route.slug, pageTitle, pageContent, imageUrl
+      menuName, url: route.url, slug: route.slug, pageTitle, pageContent, imageUrl, contentGallery: normalizeContentGallery(item.contentGallery, pageContent)
     };
   });
 }
@@ -189,8 +182,8 @@ function normalizeConfig(input = {}) {
   const createdTime = Number.isNaN(createdStamp.getTime()) ? Date.now() : createdStamp.getTime();
   const createdAt = new Date(createdTime).toISOString();
   const demoPosts = vertical.posts.map((post, index) => {
-    const gallery = SAMPLE_POST_GALLERIES[index].map((image, sortOrder) => ({ ...image, sortOrder }));
-    return { ...post, id: `sample-${index + 1}`, featureImageUrl: gallery[0].imageUrl, featureImageAlt: gallery[0].altText, gallery, publishedAt: new Date(createdTime - (index + 1) * 86400000 * 9).toISOString() };
+    const image = SAMPLE_POST_IMAGES[index];
+    return { ...post, id: `sample-${index + 1}`, featureImageUrl: image.imageUrl, featureImageAlt: image.altText, publishedAt: new Date(createdTime - (index + 1) * 86400000 * 9).toISOString() };
   });
   const customPages = normalizeCustomPages(input.customPages);
   return {
@@ -207,7 +200,7 @@ function normalizeConfig(input = {}) {
       mayaName: clean(input.payments?.mayaName, 80, businessName) || businessName,
       mayaNumber: clean(input.payments?.mayaNumber, 40, '+63 918 555 0142')
     },
-    customPages, menuLinks: menuLinksForPages(customPages),
+    customPages, menuLinks: menuLinksForPages(customPages), pageEdits: normalizePageEdits(input.pageEdits),
     // The hero copy and service list can be overridden through the builder.
     // When the operator leaves the field empty (or omits the key entirely),
     // the vertical's defaults take over. The vertical headline is a single
@@ -370,7 +363,6 @@ function createSeedSql(config) {
   ];
   for (const post of config.demoPosts) {
     lines.push(`INSERT INTO tele_blog_posts (site_id, title, slug, excerpt, body, feature_image_url, feature_image_alt, category, status, published_at) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(post.title)}, ${sqlLiteral(post.slug)}, ${sqlLiteral(post.excerpt)}, ${sqlLiteral(post.body)}, ${sqlLiteral(post.featureImageUrl)}, ${sqlLiteral(post.featureImageAlt)}, ${sqlLiteral(post.category)}, 'published', now()) ON CONFLICT (site_id, slug) DO NOTHING;`);
-    for (const [index, image] of (post.gallery || []).entries()) lines.push(`INSERT INTO tele_blog_post_images (site_id, post_id, image_url, alt_text, caption, sort_order) SELECT ${sqlLiteral(config.siteId)}, post.id, ${sqlLiteral(image.imageUrl)}, ${sqlLiteral(image.altText)}, ${sqlLiteral(image.caption)}, ${index} FROM tele_blog_posts AS post WHERE post.site_id = ${sqlLiteral(config.siteId)} AND post.slug = ${sqlLiteral(post.slug)} AND NOT EXISTS (SELECT 1 FROM tele_blog_post_images AS existing WHERE existing.post_id = post.id AND existing.sort_order = ${index});`);
   }
   for (const item of config.demoGallery) lines.push(`INSERT INTO tele_gallery_items (site_id, title, image_url, alt_text, caption, category, status, sort_order) SELECT ${sqlLiteral(config.siteId)}, ${sqlLiteral(item.title)}, ${sqlLiteral(item.imageUrl)}, ${sqlLiteral(item.altText)}, ${sqlLiteral(item.caption)}, ${sqlLiteral(item.category)}, 'published', ${Number(item.sortOrder)} WHERE NOT EXISTS (SELECT 1 FROM tele_gallery_items WHERE site_id = ${sqlLiteral(config.siteId)} AND title = ${sqlLiteral(item.title)});`);
   return lines.join('\n') + '\n';
@@ -455,7 +447,7 @@ function generatedCustomPageHtml(config, page) {
   <link rel="stylesheet" href="/brivon.css">
   <script src="/site-config.js" defer></script>
   <script src="/brivon-fonts.js" defer></script>
-  <script src="/site.js" defer></script>
+  <script src="/site.js" type="module"></script>
 </head>
 <body class="custom-page theme-${e(config.theme)}">
   <div class="announcement"><span class="announcement-dot"></span><span>Taking new clients</span><span class="announcement-separator">·</span><span>Thoughtful care, close to home</span></div>
@@ -473,7 +465,7 @@ function generatedCustomPageHtml(config, page) {
       <div class="custom-page-copy">
         <span class="eyebrow"><span></span>${e(page.menuName)}</span>
         <h1>${e(page.pageTitle)}</h1>
-        <div class="custom-page-content">${e(page.pageContent)}</div>
+        <div class="custom-page-content">${contentHtml(page.pageContent, page.contentGallery)}</div>
       </div>
     </article>
   </main>
@@ -623,119 +615,7 @@ function setElementClass(html, elementId, className, enabled) {
 // the ZIP — both are built from the same scaffold source, and the preview's
 // own transformations never add or remove elements outside the live-data
 // regions (menu, gallery, journal, payments), which the editor excludes.
-const PAGE_EDIT_TAGS = new Set(['h1','h2','h3','h4','h5','h6','h7','h8','p','span','li','strong','em','small','blockquote','figcaption','label','div']);
-// Regions the preview regenerates from the builder config and the generated
-// site re-renders at runtime (menu, gallery, journal, payments, CTAs, modal,
-// toast). Their content differs between the preview document and the packaged
-// homepage source, so page edits never target them — in the editor, in the
-// index computation, and in applyPageEdits alike. Keeping one shared list is
-// what makes a selector+index pair mean the same element in both documents.
-const PAGE_EDIT_EXCLUDED_IDS = new Set(['siteNav','drawerNav','editorialSiteNav','galleryGrid','postGrid','paymentDetails','footerPayments','headerCta','heroBook','articleBook','editorialSidebarCta','articleModal','siteToast']);
-const MAX_PAGE_EDITS = 64;
-const MAX_PAGE_EDIT_TEXT = 2000;
-const PAGE_EDIT_SELECTOR = /^([a-z][a-z0-9]*)?((?:\.[a-zA-Z0-9_-]+){0,3})?(#[a-zA-Z0-9_-]+)?$/;
-function parsePageEditSelector(selector) {
-  const match = PAGE_EDIT_SELECTOR.exec(String(selector || '').trim());
-  if (!match || (!match[1] && !match[2] && !match[3])) return null;
-  return {
-    tag: match[1] ? match[1].toLowerCase() : null,
-    classes: match[2] ? match[2].split('.').filter(Boolean) : [],
-    id: match[3] ? match[3].slice(1) : null
-  };
-}
-// Validates and deduplicates the editor's edit list. Throws on anything the
-// editor would never produce, so a bad payload fails loudly instead of
-// silently dropping edits.
-function normalizePageEdits(value) {
-  if (value == null) return [];
-  if (!Array.isArray(value)) throw new Error('Page edits must be a list of target/text pairs.');
-  if (value.length > MAX_PAGE_EDITS) throw new Error(`Apply no more than ${MAX_PAGE_EDITS} page edits.`);
-  const byTarget = new Map();
-  for (const item of value) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Each page edit must be a target/text object.');
-    const selector = String(item.selector || '').trim();
-    const parsed = parsePageEditSelector(selector);
-    if (!parsed) throw new Error(`Unsupported page-edit target: ${selector || '(empty)'}`);
-    if (parsed.tag && !PAGE_EDIT_TAGS.has(parsed.tag)) throw new Error(`Page edits cannot target <${parsed.tag}> elements.`);
-    const index = Number(item.index);
-    if (!Number.isInteger(index) || index < 0 || index > 999) throw new Error('Each page edit needs a target position between 0 and 999.');
-    byTarget.set(`${selector}::${index}`, { selector, index, text: String(item.text ?? '').slice(0, MAX_PAGE_EDIT_TEXT) });
-  }
-  return [...byTarget.values()];
-}
-// Ranges of a document whose text must never be scanned for tags: style and
-// script bodies can contain characters that look like markup, and comments
-// can contain example tags.
-function inertRanges(html) {
-  const ranges = [];
-  const pattern = /<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>|<!--[\s\S]*?-->/gi;
-  let match;
-  while ((match = pattern.exec(html)) !== null) ranges.push([match.index, match.index + match[0].length]);
-  return ranges;
-}
-// Every opening tag matching the parsed selector, in document order, skipping
-// the excluded live-data regions (by ancestor-or-self id) and inert ranges.
-// Mirrors the browser editor's index computation: querySelectorAll(selector)
-// filtered to elements outside the same excluded regions.
-const PAGE_EDIT_VOID_TAGS = new Set(['area','base','br','col','embed','hr','img','input','link','meta','source','track','wbr']);
-function findMatchingTags(html, parsed) {
-  const inert = inertRanges(html);
-  const insideInert = (index) => inert.some(([start, end]) => index >= start && index < end);
-  const matches = [];
-  const openIds = []; // ids of currently open ancestors
-  const tagPattern = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
-  let match;
-  while ((match = tagPattern.exec(html)) !== null) {
-    if (insideInert(match.index)) continue;
-    const closing = match[1] === '/';
-    const tag = match[2].toLowerCase();
-    const attrs = match[3];
-    const idAttr = (/\bid\s*=\s*"([^"]*)"/.exec(attrs) || /\bid\s*=\s*'([^']*)'/.exec(attrs) || [])[1] || '';
-    if (closing) {
-      for (let i = openIds.length - 1; i >= 0; i--) {
-        if (openIds[i].tag === tag) { openIds.length = i; break; }
-      }
-      continue;
-    }
-    const selfClosing = /\/\s*>$/.test(match[0]) || PAGE_EDIT_VOID_TAGS.has(tag);
-    const excluded = PAGE_EDIT_EXCLUDED_IDS.has(idAttr) || openIds.some((entry) => PAGE_EDIT_EXCLUDED_IDS.has(entry.id));
-    if (!selfClosing) openIds.push({ tag, id: idAttr });
-    if (excluded) continue;
-    if (parsed.tag && tag !== parsed.tag) continue;
-    const classAttr = (/\bclass\s*=\s*"([^"]*)"/.exec(attrs) || /\bclass\s*=\s*'([^']*)'/.exec(attrs) || [])[1] || '';
-    const classes = classAttr.split(/\s+/).filter(Boolean);
-    if (parsed.classes.some((name) => !classes.includes(name))) continue;
-    if (parsed.id && idAttr !== parsed.id) continue;
-    matches.push({ start: match.index, end: match.index + match[0].length, tag: match[0] });
-  }
-  return matches;
-}
-// Replaces the inner HTML of the element whose opening tag is `openTag`,
-// tracking nested tags of the same name so nested wrappers stay intact.
-function replaceElementContentAt(html, openTag, content) {
-  const tagName = /^<\s*([a-zA-Z][a-zA-Z0-9-]*)/.exec(openTag.tag)[1].toLowerCase();
-  const scanner = new RegExp(`<\\/?${tagName}(?=[\\s/>])`, 'gi');
-  scanner.lastIndex = openTag.end;
-  let depth = 1;
-  let match;
-  while ((match = scanner.exec(html)) !== null) {
-    depth += match[0].startsWith('</') ? -1 : 1;
-    if (depth === 0) return `${html.slice(0, openTag.end)}${content}${html.slice(match.index)}`;
-  }
-  return html;
-}
-// Applies page-editor text edits to an HTML document. New text is escaped and
-// newlines become <br>, so edited elements keep their line structure.
-function applyPageEdits(html, edits) {
-  for (const edit of edits) {
-    const parsed = parsePageEditSelector(edit.selector);
-    if (!parsed) continue;
-    const target = findMatchingTags(html, parsed)[edit.index];
-    if (!target) continue;
-    html = replaceElementContentAt(html, target, htmlEscape(edit.text).replace(/\n/g, '<br>'));
-  }
-  return html;
-}
+
 function previewMenuHtml(config) {
   const links = config.menuLinks.filter((link) => featureEnabled(config, link.feature));
   return links.map((link) => `<a href="${htmlEscape(link.href)}">${htmlEscape(link.label)}</a>`).join('\n          ');
@@ -858,6 +738,7 @@ async function buildPreviewDocument(input, readTemplate) {
   // Page-editor edits apply last, so an edited element wins over the
   // config-derived text the preview just filled in.
   html = applyPageEdits(html, normalizePageEdits(input?.pageEdits));
+  html = html.replace('</head>', `<style data-content-gallery-style>${galleryCss}</style></head>`);
   return { html, theme: config.theme, siteId: config.siteId };
 }
 const ENV_FILE_BY_TARGET = { cloudflare: '.dev.vars', vercel: '.env' };
@@ -894,15 +775,16 @@ async function buildFiles(input, readTemplate) {
     if (relative === 'public/index.html') {
       const homepage = homeDesignFile(config.theme);
       if (homepage !== `shared/${relative}`) content = replaceTokens(await readTemplate(homepage), config);
-      content = applyPageEdits(content, pageEdits);
+      content = applyPageEdits(content, pageEdits, true);
     }
+    if (relative.endsWith('.html')) content = content.replace('</head>', `<style data-content-gallery-style>${galleryCss}</style></head>`);
     files.set(publicPath(relative), content);
   }
   for (const relative of manifest.sharedDb) {
-    files.set(relative, await readTemplate(`shared/${relative}`));
+    files.set(relative, await readTemplate(['lib/content-gallery.js', 'lib/page-edits.js'].includes(relative) ? relative.replace('lib/', 'shared/public/') : `shared/${relative}`));
   }
   for (const relative of manifest.sharedRuntime || []) {
-    files.set(relative, await readTemplate(`shared/${relative}`));
+    files.set(relative, await readTemplate(['lib/content-gallery.js', 'lib/page-edits.js'].includes(relative) ? relative.replace('lib/', 'shared/public/') : `shared/${relative}`));
   }
   files.set('db/seed.sql', createSeedSql(config));
   files.set('db/apply-config.sql', createApplyConfigSql(config));
@@ -915,7 +797,7 @@ async function buildFiles(input, readTemplate) {
   }
   for (const page of config.customPages) {
     const pageFile = `${page.slug}.html`;
-    files.set(target === 'vercel' ? pageFile : `public/${pageFile}`, generatedCustomPageHtml(config, page));
+    files.set(target === 'vercel' ? pageFile : `public/${pageFile}`, generatedCustomPageHtml(config, page).replace('</head>', `<style data-content-gallery-style>${galleryCss}</style></head>`));
   }
 
   files.set('README.md', generatedReadme(config, secrets));

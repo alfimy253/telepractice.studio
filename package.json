@@ -22,6 +22,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.10",
+    "jsdom": "^26.1.0",
     "wrangler": "4.147.0"
   }
 }

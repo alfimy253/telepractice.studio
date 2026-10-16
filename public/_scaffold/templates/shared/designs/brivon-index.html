@@ -11,7 +11,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Boldonse&family=Inter+Tight:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/brivon.css">
   <script src="/site-config.js" defer></script>
-  <script src="/site.js" defer></script>
+  <script src="/site.js" type="module"></script>
   <script src="/brivon.js" defer></script>
 </head>
 <body class="brivon-shell __THEME_CLASS__">
@@ -300,14 +300,13 @@
     <article class="article-dialog" role="dialog" aria-modal="true" aria-labelledby="articleTitle">
       <button class="article-close" id="articleClose" type="button" aria-label="Close article">×</button>
       <header class="article-hero" id="articleHero">
-        <img id="articleFeatureImage" src="/images/blog-welcome.svg" alt="">
+        <img id="articleFeatureImage" hidden alt="">
         <div class="article-hero-copy"><span class="post-category" id="articleCategory">From our team</span><h2 id="articleTitle">A note from our team</h2></div>
       </header>
       <div class="article-content">
         <p id="articleExcerpt"></p>
         <p id="articleMeta"></p>
         <div id="articleBody"></div>
-        <section class="article-gallery hidden" id="articleGallery"><h3>More from this story</h3><div class="article-gallery-grid" id="articleGalleryGrid"></div></section>
         <a class="btn btn--primary" id="articleBook" href="/appointments.html">Request a visit</a>
       </div>
     </article>

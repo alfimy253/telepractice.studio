@@ -71,19 +71,14 @@ test('deployed packages create their own site record so client signup works afte
   }
 });
 
-test('generated article writes map camelCase dashboard payloads to the SQL column names', async () => {
+test('219 generated article writes persist one structured gallery and retire legacy image-table rows', async () => {
   for (const target of ['cloudflare', 'vercel']) {
     const runtime = (await packageFiles(target)).get(target === 'cloudflare' ? 'src/index.js' : 'api/index.js');
-    const label = `${target} runtime`;
-    assert.match(runtime, /function articleGalleryRows\(gallery\)/, `${label}: gallery mapper missing`);
-    assert.match(runtime, /image_url: image\?\.imageUrl \?\? ''/, `${label}: imageUrl is not mapped to image_url`);
-    assert.match(runtime, /alt_text: image\?\.altText \?\? ''/, `${label}: altText is not mapped to alt_text`);
-    assert.match(runtime, /sort_order: Number\(image\?\.sortOrder \?\? 0\)/, `${label}: sortOrder is not mapped to sort_order`);
-    // Both the create and the update statement must use it.
-    const usages = runtime.match(/jsonb_to_recordset\(\$\{articleGalleryRows\(post\.gallery\)\}/g) || [];
-    assert.equal(usages.length, 2, `${label}: expected the mapper in both the insert and the update query`);
-    assert.doesNotMatch(runtime, /jsonb_to_recordset\(\$\{JSON\.stringify\(post\.gallery\)\}/,
-      `${label}: a query still passes camelCase gallery objects straight to jsonb_to_recordset`);
+    assert.doesNotMatch(runtime, /INSERT INTO tele_blog_post_images|function articleGalleryRows/);
+    assert.match(runtime, /normalizeContentGallery\(value.contentGallery, body\)/);
+    assert.match(runtime, /content_gallery AS "contentGallery"/);
+    assert.match(runtime, /JSON.stringify\(post.contentGallery\)/);
+    assert.equal((runtime.match(/DELETE FROM tele_blog_post_images AS image USING saved/g) || []).length, 2);
   }
 });
 

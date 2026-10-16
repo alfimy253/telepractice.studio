@@ -1,10 +1,14 @@
+import { applyPageEditsToDocument } from './page-edits.js';
+import { contentHtml, bindGalleryLightbox } from './content-gallery.js';
 (() => {
+  bindGalleryLightbox(document);
   const fallback = window.SITE_CONFIG || {};
   let site = { ...fallback, features: { ...(fallback.features || {}) } };
   let articleRequestId = 0;
   const $ = (id) => document.getElementById(id);
-  const text = (id, value) => { const node = $(id); if (node && value != null) node.textContent = value; };
-  const setLink = (id, href, label) => { const node = $(id); if (node) { node.href = href; if (label) node.textContent = label; } };
+  const hasPageEdit = (node) => Boolean(node?.hasAttribute('data-page-edited') || node?.querySelector('[data-page-edited]'));
+  const text = (id, value) => { const node = $(id); if (node && value != null && !hasPageEdit(node)) node.textContent = value; };
+  const setLink = (id, href, label) => { const node = $(id); if (node) { node.href = href; if (label && !hasPageEdit(node)) node.textContent = label; } };
   const verticalDefaults = {
     veterinary: { icon: '✳', subline: 'CARE THAT FEELS PERSONAL', context: 'Pet name (optional)', book: 'Request a visit', journal: 'Notes from our care team' },
     dental: { icon: '✦', subline: 'A BRIGHTER KIND OF CARE', context: 'Reason for your visit (optional)', book: 'Request an appointment', journal: 'Notes for a healthier smile' }
@@ -151,7 +155,7 @@
     text('heroEyebrow', site.heroEyebrow || (isVet ? 'A LITTLE MORE CARE, EVERY DAY' : 'A BRIGHTER KIND OF DENTAL CARE'));
     const headline = String(site.heroHeadline || (isVet ? 'Good care for\ngood companions.' : 'A reason to\nsmile easier.')).split('\n');
     const headlineNode = $('heroHeadline');
-    if (headlineNode) {
+    if (headlineNode && !hasPageEdit(headlineNode)) {
       headlineNode.replaceChildren(document.createTextNode(headline[0] || title));
       headlineNode.appendChild(document.createElement('br'));
       const em = document.createElement('em'); em.textContent = headline.slice(1).join(' ') || 'good care.';
@@ -159,10 +163,10 @@
     }
     text('heroText', site.heroText || 'Thoughtful care, built around the lives you share.');
     const services = Array.isArray(site.services) ? site.services : [];
-    document.querySelectorAll('.service-title').forEach((node, index) => { if (services[index]) node.textContent = services[index]; });
+    document.querySelectorAll('.service-title').forEach((node, index) => { if (services[index] && !hasPageEdit(node)) node.textContent = services[index]; });
     text('contextLabel', vertical.context);
     text('headerCta', vertical.book); text('heroBook', vertical.book); text('bookingSubmit', isVet ? 'Send visit request ↗' : 'Send appointment request ↗');
-    if (site.specialty === 'dental') { const formHeading = document.querySelector('.form-heading strong'); if (formHeading) formHeading.textContent = 'Request an appointment'; }
+    if (site.specialty === 'dental') { const formHeading = document.querySelector('.form-heading strong'); if (formHeading && !hasPageEdit(formHeading)) formHeading.textContent = 'Request an appointment'; }
     $('journal')?.classList.toggle('hidden', !isEnabled('blog'));
     $('gallery')?.classList.toggle('hidden', !isEnabled('gallery'));
     $('book')?.classList.toggle('hidden', !isEnabled('scheduling'));
@@ -183,54 +187,54 @@
     node.textContent = message; node.classList.toggle('error', error); node.classList.add('visible');
     window.clearTimeout(toast.timer); toast.timer = window.setTimeout(() => node.classList.remove('visible'), 4400);
   }
-  function renderArticleGallery(images) {
-    const section = $('articleGallery'); const grid = $('articleGalleryGrid');
-    if (!section || !grid) return;
-    grid.replaceChildren();
-    const safeItems = Array.isArray(images) ? images.filter((item) => item && item.imageUrl).slice(0, 24) : [];
-    section.classList.toggle('hidden', !safeItems.length);
-    safeItems.forEach((item) => {
-      const url = safeImageUrl(item.imageUrl);
-      if (!url) return;
-      const figure = document.createElement('figure'); figure.className = 'article-gallery-item';
-      const image = document.createElement('img'); image.src = url; image.alt = String(item.altText || ''); image.loading = 'lazy'; image.decoding = 'async'; image.referrerPolicy = 'no-referrer';
-      figure.appendChild(image);
-      if (item.caption) { const caption = document.createElement('figcaption'); caption.textContent = item.caption; figure.appendChild(caption); }
-      grid.appendChild(figure);
-    });
-    if (!grid.children.length) section.classList.add('hidden');
-  }
   function updateArticle(post) {
     text('articleCategory', post.category || 'From our team');
     text('articleTitle', post.title || 'A note from our team');
     text('articleExcerpt', post.excerpt || '');
     const date = post.publishedAt || post.createdAt;
     text('articleMeta', date ? new Date(date).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) : 'A note from our team');
-    text('articleBody', post.body || post.excerpt || '');
+    if ($('articleBody')) $('articleBody').innerHTML = contentHtml(post.body || post.excerpt || '', post.contentGallery);
     const image = $('articleFeatureImage');
     if (image) {
-      image.src = safeImageUrl(post.featureImageUrl) || '/images/blog-welcome.svg';
+      const url = safeImageUrl(post.featureImageUrl);
+      image.hidden = !url;
+      if (url) image.src = url; else image.removeAttribute('src');
       image.alt = String(post.featureImageAlt || post.title || 'Article feature image');
     }
-    renderArticleGallery(post.gallery || []);
   }
-  async function openArticle(post) {
+  function articlePath(slug) { return `/blog/${encodeURIComponent(slug)}`; }
+  function articleSlugFromLocation() {
+    const match = /^\/blog\/([a-z0-9-]{1,160})\/?$/i.exec(window.location.pathname);
+    return match ? match[1] : '';
+  }
+  async function openArticle(post, changeUrl = true) {
     const requestId = ++articleRequestId;
     updateArticle(post);
+    if (changeUrl && post.slug && window.location.pathname !== articlePath(post.slug)) {
+      window.history.pushState(null, '', articlePath(post.slug));
+    }
     const modal = $('articleModal'); modal?.classList.add('open'); modal?.setAttribute('aria-hidden', 'false');
     document.body.style.overflow = 'hidden'; $('articleClose')?.focus();
     if (!post.slug) return;
     try {
       const response = await fetch(`/api/posts/${encodeURIComponent(post.slug)}`, { headers: { Accept: 'application/json' } });
-      if (!response.ok) return;
+      if (!response.ok) throw new Error(response.status === 404 ? 'This article is not published or no longer exists.' : 'Please try loading this article again.');
       const result = await response.json();
       if (requestId === articleRequestId && result.post) updateArticle(result.post);
-    } catch (_) { /* Keep the public-list fallback content in view. */ }
+    } catch (cause) {
+      if (requestId === articleRequestId) updateArticle({ title: 'Article unavailable', body: cause.message || 'Please try again.' });
+    }
   }
-  function closeArticle() {
+  function closeArticle(changeUrl = true) {
     articleRequestId += 1;
     const modal = $('articleModal'); modal?.classList.remove('open'); modal?.setAttribute('aria-hidden', 'true');
     document.body.style.overflow = '';
+    if (changeUrl && articleSlugFromLocation()) window.history.pushState(null, '', '/#journal');
+  }
+  function followArticleLocation() {
+    const slug = articleSlugFromLocation();
+    if (slug) openArticle({ slug, title: 'Loading article…' }, false);
+    else closeArticle(false);
   }
   function renderPosts(posts) {
     const grid = $('postGrid'); if (!grid) return;
@@ -240,8 +244,8 @@
       const note = document.createElement('p'); note.className = 'loading-copy'; note.textContent = 'New notes from our care team are coming soon.'; grid.appendChild(note); return;
     }
     safePosts.forEach((post, index) => {
-      const card = document.createElement('article'); card.className = 'post-card'; card.setAttribute('role', 'button'); card.setAttribute('tabindex', '0'); card.setAttribute('aria-label', `Read ${post.title}`);
-      card.addEventListener('click', () => openArticle(post));
+      const card = document.createElement('article'); card.className = 'post-card'; card.setAttribute('role', 'link'); card.setAttribute('tabindex', '0'); card.setAttribute('aria-label', `Read ${post.title}`);
+      card.addEventListener('click', (event) => { if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return; event.preventDefault(); openArticle(post); });
       card.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openArticle(post); } });
       const image = document.createElement('div'); image.className = 'post-image';
       const featureUrl = safeImageUrl(post.featureImageUrl);
@@ -252,7 +256,8 @@
       }
       const content = document.createElement('div'); content.className = 'post-card-content';
       const category = document.createElement('span'); category.className = 'post-category'; category.textContent = post.category || 'From our team';
-      const title = document.createElement('h3'); title.textContent = post.title;
+      const title = document.createElement('h3');
+      const link = document.createElement('a'); link.href = articlePath(post.slug); link.textContent = post.title; title.appendChild(link);
       const excerpt = document.createElement('p'); excerpt.textContent = post.excerpt || '';
       const date = document.createElement('div'); date.className = 'post-meta';
       const created = post.publishedAt || post.createdAt;
@@ -310,6 +315,16 @@
       const result = await response.json(); renderGallery(result.items || []);
     } catch (_) { renderGallery(site.demoGallery || []); }
   }
+  function applySavedPage() {
+    if (!document.body.classList.contains('custom-page')) { applyPageEditsToDocument(document, site.pageEdits || []); return; }
+    const page = (site.customPages || []).find((page) => page.url === window.location.pathname);
+    if (!page) return;
+    const copy = document.querySelector('.custom-page-copy');
+    if (copy?.querySelector('h1')) copy.querySelector('h1').textContent = page.pageTitle;
+    const content = document.querySelector('.custom-page-content'); if (content) content.innerHTML = contentHtml(page.pageContent, page.contentGallery);
+    const banner = document.querySelector('.custom-page-banner'); if (banner) { banner.hidden = !page.imageUrl; if (page.imageUrl) banner.src = page.imageUrl; }
+    document.title = `${page.pageTitle} · ${site.businessName}`;
+  }
   async function refreshSiteConfig() {
     try {
       const response = await fetch('/api/site', { headers: { Accept: 'application/json' } });
@@ -318,13 +333,15 @@
         if (data.config && typeof data.config === 'object') { site = { ...site, ...data.config, features: { ...site.features, ...(data.config.features || {}) } }; }
       }
     } catch (_) { /* use the generated config fallback */ }
-    setTheme(); applyContent(); loadPosts(); loadGallery();
+    setTheme(); applyContent(); applySavedPage(); loadPosts(); loadGallery();
   }
-  $('articleClose')?.addEventListener('click', closeArticle);
+  $('articleClose')?.addEventListener('click', () => closeArticle());
+  window.addEventListener('popstate', followArticleLocation);
   $('articleModal')?.addEventListener('click', (event) => { if (event.target === $('articleModal')) closeArticle(); });
   document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && $('articleModal')?.classList.contains('open')) closeArticle(); });
   $('navMenu')?.addEventListener('click', () => $('siteNav')?.classList.toggle('open'));
   $('siteNav')?.addEventListener('click', (event) => { if (event.target.closest('a')) $('siteNav')?.classList.remove('open'); });
   setTheme(); applyContent();
   refreshSiteConfig();
+  followArticleLocation();
 })();

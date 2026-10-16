@@ -1,10 +1,14 @@
+import { mountOwnerPages } from './owner-pages.js';
+import { GalleryEditor, emptyGallery } from './content-gallery.js';
 (() => {
   const fallback = window.SITE_CONFIG || {};
   let site = { ...fallback, features: { ...(fallback.features || {}) } };
   let csrfToken = '';
   let signedIn = false;
+  let postGallery = emptyGallery();
+  let postGalleryEditor;
   let paymentsRefreshTimer = null;
-  const ADMIN_PAGE_IDS = new Set(['identity', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments', 'payments', 'signin']);
+  const ADMIN_PAGE_IDS = new Set(['identity', 'pages', 'menu', 'appearance', 'blog', 'gallery', 'availability', 'appointments', 'payments', 'signin']);
   const MAX_MENU_LINKS = 16;
   const $ = (id) => document.getElementById(id);
   const isSignedIn = () => signedIn;
@@ -80,6 +84,14 @@
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
     return data;
+  }
+  let ownerPages;
+  function initOwnerPages() {
+    if (!$('ownerPagesEditor')) return;
+    ownerPages = mountOwnerPages({ host: $('ownerPagesEditor'), api, getSite: () => site,
+      setSite: (config) => { site = config; },
+      fetchPage: async (path) => { const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store' }); if (!response.ok) throw new Error('Could not load the page.'); return response.text(); }
+    });
   }
   function applyToForm() {
     const siteForm = $('siteForm');
@@ -222,7 +234,7 @@
       const response = await fetch('/api/site', { headers: { Accept: 'application/json' } });
       if (response.ok) { const data = await response.json(); if (data.config) site = { ...site, ...data.config, features: { ...site.features, ...(data.config.features || {}) } }; }
     } catch (_) {}
-    applyToForm(); previewTheme(); renderMenuLinks(site.menuLinks);
+    applyToForm(); previewTheme(); renderMenuLinks(site.menuLinks); if (!ownerPages) initOwnerPages(); else ownerPages.refresh();
     // Re-render the nav so disabled-feature pages disappear and the active
     // page can fall back to "identity" if the URL still names a hidden one.
     showAdminPage(window.location.hash.slice(1) || 'identity');
@@ -278,47 +290,44 @@
       $('loginMessage').textContent = error.message || 'Could not check the owner session. Refresh and try again.';
     }
   }
-  function addPostGalleryRow(image = {}) {
-    const rows = $('postGalleryRows');
-    if (!rows || rows.children.length >= 12) { toast('A post can have up to 12 gallery images.', true); return; }
-    const usedOrders = new Set([...rows.querySelectorAll('[data-gallery-field="sortOrder"]')].map((input) => Number(input.value)));
-    const nextOrder = Array.from({ length: 12 }, (_unused, index) => index).find((index) => !usedOrders.has(index)) ?? rows.children.length;
-    const row = document.createElement('div'); row.className = 'post-gallery-row';
-    const fields = [
-      ['imageUrl', 'Image URL', 'https://example.com/photo.jpg', 2048, 'text'],
-      ['altText', 'Alt text', 'Describe this image', 180, 'text'],
-      ['caption', 'Caption', 'Optional caption', 300, 'text'],
-      ['sortOrder', 'Order', '', 4, 'number']
-    ];
-    for (const [name, labelText, placeholder, maxLength, type] of fields) {
-      const label = document.createElement('label');
-      const title = document.createElement('span'); title.textContent = labelText;
-      const input = document.createElement('input'); input.type = type; input.dataset.galleryField = name;
-      if (type === 'number') { input.min = '0'; input.max = '11'; input.value = String(Number.isInteger(Number(image.sortOrder)) ? Number(image.sortOrder) : nextOrder); }
-      else { input.maxLength = maxLength; input.placeholder = placeholder; input.value = image[name] || ''; if (name === 'imageUrl') input.inputMode = 'url'; }
-      label.append(title, input); row.appendChild(label);
+  function previewPostImage() {
+    const form = $('postForm');
+    const image = $('postImagePreview');
+    const wrap = $('postImagePreviewWrap');
+    const message = $('postImagePreviewMessage');
+    const raw = form.elements.featureImageUrl.value.trim();
+    let url = '';
+    if (raw.startsWith('/') && !raw.startsWith('//') && !raw.startsWith('/\\') && !/[\u0000-\u0020]/.test(raw)) url = raw;
+    else {
+      try { const parsed = new URL(raw); if (parsed.protocol === 'https:' && !parsed.username && !parsed.password) url = parsed.href; } catch (_) { /* invalid URL */ }
     }
-    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'remove-post-gallery'; remove.textContent = 'Remove'; remove.setAttribute('aria-label', 'Remove gallery image');
-    remove.addEventListener('click', () => row.remove()); row.appendChild(remove); rows.appendChild(row);
+    image.removeAttribute('src');
+    wrap.hidden = !raw;
+    message.textContent = raw && !url ? 'Use an HTTPS or same-site image URL.' : 'Image URL preview';
+    image.hidden = !url;
+    image.alt = form.elements.featureImageAlt.value.trim() || form.elements.title.value.trim() || 'Blog image preview';
+    if (url) image.src = url;
   }
-  function readPostGallery() {
-    return [...$('postGalleryRows').querySelectorAll('.post-gallery-row')].map((row) => {
-      const value = (name) => row.querySelector(`[data-gallery-field="${name}"]`)?.value.trim() || '';
-      return { imageUrl: value('imageUrl'), altText: value('altText'), caption: value('caption'), sortOrder: Number(value('sortOrder') || 0) };
-    }).filter((image) => image.imageUrl || image.altText || image.caption);
+  function previewPostUrl() {
+    const form = $('postForm');
+    $('postUrlPreview').textContent = `/blog/${suggestedPostSlug(form.elements.slug.value.trim() || form.elements.title.value)} — editable; defaults to the title.`;
+  }
+  function suggestedPostSlug(title) {
+    return String(title || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 160) || 'practice-note';
   }
   function beginPostEdit(post) {
     const form = $('postForm');
     form.elements.id.value = post.id || '';
     for (const field of ['title','slug','excerpt','body','category','status']) form.elements[field].value = post[field] || (field === 'category' ? 'Practice notes' : field === 'status' ? 'draft' : '');
-    const gallery = Array.isArray(post.gallery) ? [...post.gallery].sort((left, right) => Number(left.sortOrder) - Number(right.sortOrder)) : [];
-    const inheritedFeature = gallery[0] && post.featureImageUrl === gallery[0].imageUrl;
-    form.elements.featureImageUrl.value = inheritedFeature ? '' : post.featureImageUrl || '';
-    form.elements.featureImageAlt.value = inheritedFeature ? '' : post.featureImageAlt || '';
-    $('postGalleryRows').replaceChildren();
-    gallery.forEach((image) => addPostGalleryRow(image));
-    form.elements.slug.dataset.edited = 'true';
-    form.querySelector('[type="submit"]').textContent = 'Update post';
+    form.elements.featureImageUrl.value = post.featureImageUrl || '';
+    form.elements.featureImageAlt.value = post.featureImageAlt || '';
+    previewPostImage();
+    previewPostUrl();
+    postGallery = post.contentGallery || emptyGallery();
+    postGalleryEditor?.render();
+    // Draft auto-slugs follow title edits; published and custom slugs stay stable.
+    form.elements.slug.dataset.edited = post.status === 'published' || post.slug !== suggestedPostSlug(post.title) ? 'true' : '';
+    form.querySelector('[type="submit"]').textContent = 'Save post';
     form.scrollIntoView({ behavior: 'smooth', block: 'center' });
     form.elements.title.focus({ preventScroll: true });
   }
@@ -345,7 +354,7 @@
         const icon = document.createElement('span'); icon.className = 'admin-post-dot'; icon.textContent = '▤';
         const copy = document.createElement('span'); copy.className = 'admin-post-copy';
         const title = document.createElement('strong'); title.textContent = post.title;
-        const details = document.createElement('small'); details.textContent = `${post.category || 'Practice notes'} · ${post.status || 'draft'} · ${post.gallery?.length || 0} gallery images`;
+        const details = document.createElement('small'); details.textContent = `${post.category || 'Practice notes'} · ${post.status || 'draft'}`;
         copy.append(title, details);
         const state = document.createElement('span'); state.className = `post-status${post.status === 'draft' ? ' draft' : ''}`; state.textContent = post.status || 'draft';
         const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'edit-post'; edit.textContent = 'Edit'; edit.setAttribute('aria-label', `Edit ${post.title}`);
@@ -358,7 +367,7 @@
         });
         row.append(icon, copy, state, edit, remove); list.appendChild(row);
       });
-    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — check your sign-in session.</p>`; }
+    } catch (error) { list.innerHTML = `<p class="empty-posts">${esc(error.message)} — refresh to try again.</p>`; }
   }
   async function loadGallery() {
     const list = $('galleryList');
@@ -842,19 +851,26 @@
     });
     $('postForm').elements.title.addEventListener('input', (event) => {
       const slug = $('postForm').elements.slug;
-      if (!slug.dataset.edited) slug.value = event.target.value.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+      if (!slug.dataset.edited) slug.value = suggestedPostSlug(event.target.value);
+      previewPostUrl();
     });
-    $('postForm').elements.slug.addEventListener('input', (event) => { event.target.dataset.edited = 'true'; });
-    $('addPostGalleryImage').addEventListener('click', () => addPostGalleryRow());
+    $('postForm').elements.slug.addEventListener('input', (event) => { event.target.dataset.edited = event.target.value.trim() ? 'true' : ''; previewPostUrl(); });
+    for (const name of ['featureImageUrl', 'featureImageAlt']) $('postForm').elements[name].addEventListener('input', previewPostImage);
+    $('postImagePreview').addEventListener('error', () => { $('postImagePreview').hidden = true; $('postImagePreviewMessage').textContent = 'Could not load this image URL. Check that it is public and allows image embedding.'; });
+    postGalleryEditor = new GalleryEditor({ host: $('postParagraphGallery'), input: $('postForm').elements.body, getGallery: () => postGallery, onChange: (gallery) => { postGallery = gallery; } });
     $('postForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       if (!isSignedIn()) { toast('Sign in first', 'Only a site owner can create posts.', true); return; }
       const formElement = event.currentTarget;
+      const saveButton = formElement.querySelector('[type="submit"]'); if (saveButton.disabled) return;
+      $('postFormMessage').textContent = '';
       const form = new FormData(formElement);
-      const post = { title: String(form.get('title') || '').trim(), slug: String(form.get('slug') || '').trim(), excerpt: String(form.get('excerpt') || '').trim(), body: String(form.get('body') || '').trim(), featureImageUrl: String(form.get('featureImageUrl') || '').trim(), featureImageAlt: String(form.get('featureImageAlt') || '').trim(), gallery: readPostGallery(), category: String(form.get('category') || '').trim(), status: String(form.get('status') || 'draft') };
+      const post = { contentGallery: postGallery, title: String(form.get('title') || '').trim(), slug: String(form.get('slug') || '').trim(), excerpt: String(form.get('excerpt') || '').trim(), body: String(form.get('body') || ''), featureImageUrl: String(form.get('featureImageUrl') || '').trim(), featureImageAlt: String(form.get('featureImageAlt') || '').trim(), category: String(form.get('category') || '').trim(), status: String(form.get('status') || 'draft') };
       const postId = String(form.get('id') || '');
-      try { await api(postId ? `/api/admin/posts/${encodeURIComponent(postId)}` : '/api/admin/posts', { method: postId ? 'PUT' : 'POST', body: post }); formElement.reset(); $('postGalleryRows').replaceChildren(); formElement.elements.id.value = ''; formElement.elements.slug.dataset.edited = ''; formElement.querySelector('[type="submit"]').textContent = 'Save post'; status('Post saved'); toast(postId ? 'Post updated' : 'Post saved', post.status === 'published' ? 'Your published article is live on the journal.' : 'Your draft is safely stored.'); await loadPosts(); }
-      catch (error) { toast(error.message, true); }
+      saveButton.disabled = true;
+      try { await api(postId ? `/api/admin/posts/${encodeURIComponent(postId)}` : '/api/admin/posts', { method: postId ? 'PUT' : 'POST', body: post }); formElement.reset(); postGallery = emptyGallery(); postGalleryEditor.render(); previewPostImage(); previewPostUrl(); formElement.elements.id.value = ''; formElement.elements.slug.dataset.edited = ''; formElement.querySelector('[type="submit"]').textContent = 'Save post'; status('Post saved'); toast(postId ? 'Post updated' : 'Post saved', post.status === 'published' ? 'Your published article is live on the journal.' : 'Your draft is safely stored.'); await loadPosts(); }
+      catch (error) { $('postFormMessage').textContent = error.message; toast(error.message, true); }
+      finally { saveButton.disabled = false; }
     });
     $('galleryForm').addEventListener('submit', async (event) => {
       event.preventDefault();

@@ -180,9 +180,9 @@ The implementation was adapted from the user-provided `axelmercer253/brivon` rep
 
 The builder's site layout section ("Choose a Site Layout") has a **Page editor** text link that opens `/page-editor.html` in a new tab. The editor tab loads the exact document the builder preview is currently rendering — the builder stashes the rendered preview HTML plus the applied edit list in localStorage on every render (`canopy-preview-html`, `canopy-preview-meta`) — and falls back to building the preview locally from the saved builder configuration when no builder tab stashed one. Plain-text elements (headings `h1`–`h8`, paragraphs, list items, spans, labels and similar) can be clicked and edited inline. Elements carrying inner markup (icons, links) are never editable, so an edit cannot destroy markup, and newlines in the edited text become `<br>` so line structure survives.
 
-Each edit is recorded as `{ selector, index, text }`: a restricted simple selector (`#id`, `tag`, `tag.class`, `.class`, up to three classes) plus the element's position among that selector's matches **outside the excluded live-data regions** (`siteNav`, `drawerNav`, `editorialSiteNav`, `galleryGrid`, `postGrid`, `paymentDetails`, `footerPayments`, the CTA ids `headerCta`/`heroBook`/`articleBook`/`editorialSidebarCta`, `articleModal`, `siteToast`). Those regions are regenerated from the builder configuration in the preview and re-rendered by the generated site at runtime, so their content differs between the preview document and the packaged homepage. Excluding them from both the editor's index computation and the core's `applyPageEdits` matcher (one shared `PAGE_EDIT_EXCLUDED_IDS` list in `public/package-core.js`) is what makes a selector+index pair mean the same element in the editor, the preview and the ZIP.
+Each text edit is recorded as `{ selector, index, text }`; a paragraph/section deletion is `{ selector, index, remove: true }`: a restricted simple selector (`#id`, `tag`, `tag.class`, `.class`, up to three classes) plus the element's position among that selector's matches **outside the excluded live-data regions** (`siteNav`, `drawerNav`, `editorialSiteNav`, `galleryGrid`, `postGrid`, `paymentDetails`, `footerPayments`, the CTA ids `headerCta`/`heroBook`/`articleBook`/`editorialSidebarCta`, `articleModal`, `siteToast`). Those regions are regenerated from the builder configuration in the preview and re-rendered by the generated site at runtime, so their content differs between the preview document and the packaged homepage. Excluding them from both the editor's index computation and the core's `applyPageEdits` matcher (one shared `PAGE_EDIT_EXCLUDED_IDS` list in `shared/public/page-edits.js`, re-exported by `public/package-core.js`) is what makes a selector+index pair mean the same element in the editor, the preview and the ZIP.
 
-The **Export to builder** button posts the edits to the builder tab over a `BroadcastChannel` (`canopy-page-editor`). The builder validates them (`normalizePageEdits`), applies them to its configuration, persists the configuration (localStorage) and re-renders the preview immediately, saves them server-side, shows an "N edits applied" note with a "Clear edits" button next to the layout controls, and acknowledges the message so the editor tab closes itself. If no builder tab answers within six seconds, the editor saves directly through the same endpoint and reports that the builder should be opened to apply the edits.
+The **Export to builder** button first stores the validated edits in the local builder configuration (without a database URL), then posts the edits to the builder tab over a `BroadcastChannel` (`canopy-page-editor`). The builder validates them (`normalizePageEdits`), applies them to its configuration, persists the configuration (localStorage) and re-renders the preview immediately, saves them server-side, shows an "N edits applied" note with a "Clear edits" button next to the layout controls, and acknowledges the message so the editor tab closes itself. If no builder tab answers within six seconds, the editor attempts a backup through the same builder endpoint; the edits already remain in local configuration for the next Generate. Missing BroadcastChannel support or failed server backup cannot silently discard that local export. **This button does not save to or deploy an existing practice website.** Deployed-site page editing instead uses the owner dashboard’s **Pages → Save page** workflow below; blog articles use **Save post**.
 
 Server side, `POST /api/page-editor` (CSRF-protected like `/api/generate`, bounded 256 KiB body) validates the site id and edit list, then stores `{ siteId, edits, updatedAt }` in the `builder_page_edits` PostgreSQL table through Neon when `DATABASE_URL` is configured. `GET /api/page-editor?siteId=` returns the saved record (404 when none). Without `DATABASE_URL`, the routes return 503 with a clear message and the builder keeps working — exports apply locally, only server-side persistence is skipped. The root Wrangler config does not declare a KV binding.
 
@@ -634,3 +634,329 @@ Requirement 2's **code** faults are closed. `POST /api/admin/login` now returns 
 
 ---
 
+
+## Bug Fix Session #209 — basic CMS completion (2026-10-16)
+
+### Study-first rules guide and documentation cross-check
+
+Derived from the code before changes (not assumed from the plan):
+
+1. This repository serves a **builder**, not an already-generated practice site. `src/index.js` serves assets, previews, page-edit persistence and ZIP generation; practice CMS APIs live in the two runtime templates. Changing templates affects newly generated ZIPs, not existing deployments (G3).
+2. Browser and Worker builds share `public/package-core.js` and the scaffold manifest. Keep both target packages functional; no second CMS or new content model is needed.
+3. Compiled config already forces blog on, but both `cleanSiteConfig()` functions trust database `features.blog`. Reads and owner settings writes both use that function. Force the invariant there without changing gallery/scheduling or overwriting owner settings (G4/C2).
+4. Owner CRUD is cookie-authenticated; mutations also require signed double-submit CSRF. Public reads filter by site and published status. Keep these guards and the existing compiled route gates (A/B/C rules).
+5. Posts and optional article galleries already use `tele_blog_posts` / `tele_blog_post_images`, with site-scoped SQL, stable explicit slugs and database uniqueness. Preserve these contracts and database bootstrap. The schema requires a nonempty feature image: optional owner image input must use the existing bundled cover fallback rather than break old database constraints.
+6. No database means public demo content, not successful persistence. Owner post operations must explain `DATABASE_URL` explicitly; do not mislabel arbitrary database outages as missing configuration.
+7. Follow existing password hashing, date-rotating dashboard paths and secret boundaries. Do not use production credentials or mutate production data during testing.
+
+Cross-check: existing `system-rules.md` G3/G4 and the completion plans agree with items 1–4 and 6. The older image-required implementation/UI conflicts with the plan's **optional** feature image. `README.md`, `inconsistency.md`, and the historical plan above accurately describe the pre-session gaps, but must be read with this appended session record for current status. Per request, solution records are kept **only in this file**; earlier history and other Markdown files are not rewritten.
+
+### Pre-change testing and scope
+
+- `npm ci`: successful; 0 audit vulnerabilities reported.
+- `npm test`: **135 passed, 0 failed** before implementation (about 25 seconds). Existing coverage includes auth/security, builder/ZIP parity, page editor, booking/payment/cron, schema identifiers and concurrent generation.
+- Attempted an HTTPS HEAD request to `https://telepractice-studio.missiona-carla.workers.dev/`: TLS connection failed (`curl` exit 35). This sandbox permits outbound traffic only to approved GitHub/package-registry hosts, **not workers.dev**. No live page, login, deployed version or production workflow was verified. This is a testing limitation, not evidence of a production bug.
+- Confirmed code findings: stale `blog: false` survives runtime config normalization; missing-database CMS operations give generic errors; text-only posts are rejected despite the completion plan. Regression tests and implementation results follow below.
+
+### Confirmed fixes and implementation record
+
+**Completion status:** the remaining CMS code work in the earlier “To Be Implemented — basic CMS always on (completion plan)” is implemented for **newly generated Cloudflare and Vercel packages**. Package-level integration tests pass; production deployment/browser acceptance remains unverified. This session supersedes the earlier pending-status statements; they are retained as history.
+
+| Finding | Root cause | Solution |
+|---|---|---|
+| Journal could disappear with a legacy saved `blog: false` | Both runtimes merged the database feature object over compiled defaults without reasserting G4 | Set `blog: true` after the feature spread in both `cleanSiteConfig()` implementations. Public `/api/site` reads and authenticated `PUT /api/site` saves use that function, so the next owner settings save also repairs the stored flag. No bulk database overwrite; owner identity/menu/theme settings remain intact. |
+| Database-less CMS was not actionable | Reads/writes tried creating a Neon client; Cloudflare returned generic 503s and some Vercel operations fell through the generic 500 handler | All four owner post operations now explicitly return **503**, “Connect the appointment database (DATABASE_URL) to save posts.” Guards run **after** owner authentication/CSRF and the existing blog route gates. Configured database failures still use the existing diagnostic paths rather than falsely claiming configuration is missing. |
+| Basic text-only posts failed validation | Historical validator required a feature image or at least one gallery image, despite the completion plan's optional image input | Both article payload validators now choose explicit image → first gallery image → existing `/images/blog-welcome.svg`. This makes owner image input optional while keeping the existing schema's nonempty image constraint and article/card rendering compatible. Unsafe supplied URLs still fail. No schema/table changes. Dashboard copy explains the fallback. |
+| Draft title changes did not re-suggest the slug after opening an existing draft | `beginPostEdit()` locked every slug, regardless of status | Shared dashboard slug helper matches the runtime's normalization/160-character cap. Auto-generated draft slugs follow title input; custom draft slugs and published slugs stay stable unless explicitly edited. |
+| Save failures appeared only in a temporary toast | Post form catch had no persistent error location | Add an accessible `postFormMessage` status region and fill it with the API error via `textContent`. It remains visible after the toast disappears and clears at the next submit. Post-list errors no longer automatically blame the owner's session for database setup failures. |
+
+Changed code: `public/_scaffold/templates/cloudflare/src/index.js`, `vercel/api/index.js`, `shared/public/admin.js`, `shared/public/admin.html`; new regression suite: `test/cms-209.test.js`. No changes to booking, payments, cron, password policy, content tables or route-gate contracts. No new dependencies. Solution documentation changed only in `current_code.md`.
+
+### Testing record / reproducible verification
+
+The four initial generated-package regression tests were run **before** runtime changes and failed for both targets: stale database blog flag remained false, and missing-database operations did not return the actionable response (Vercel's read threw to the generic handler). After the fixes, all pass. Additional editor coverage was then added.
+
+`test/cms-209.test.js` builds and reads **both actual ZIPs**, evaluates their generated runtime code, substitutes PGlite (real PostgreSQL) only for the Neon transport, and exercises real authentication, CSRF, config and post route handlers. Cloudflare uses its actual Request/Response `fetch()` entry point. Vercel uses a small Express route adapter that executes the generated handlers/middleware; it is **not a full Express HTTP-server or browser test**. Both apply the generated schema through bootstrap. Public navigation and owner-editor functions are exercised with small DOM stubs, not a visual browser.
+
+Verified per target:
+
+- Owner CSRF initialization and username/password sign-in.
+- Owner-edited legacy `blog: false` row: public config returns true, practice name/scheduling settings preserved, guest Journal navigation renders, owner settings save persists true even when sent false.
+- Anonymous owner reads rejected (401); missing cookies/CSRF mutations rejected (403).
+- Text-only draft creation succeeds, bundled cover exists in ZIP, draft absent from public list and direct-slug read (404).
+- Publish → public list and article visible; edit title/body with stable explicit slug → article updated.
+- Duplicate slug rejected (409); unsafe feature-image URL rejected (400).
+- Gallery insert/replacement at the same sort order works; deleting the post cascades gallery rows; deleted article/list entry gone.
+- No database: public demo posts remain readable; authenticated owner list/create/update/delete all return the explicit database 503.
+- Owner editor: auto draft slug remains editable by title; published/custom slug protected; persistent accessible error location present.
+
+Final commands/results:
+
+- `npm test`: **140 tests passed, 0 failed, 0 skipped** (about 36 seconds). Includes all 135 pre-existing tests plus 5 new session tests. Existing broad coverage checks builder/browser-fallback ZIP parity, previews/page editor, auth/security, themes, guest calendar, booking, payment proofs, cron workflows, database schema and 40 concurrent builds.
+- `npm run check`: **passed**, Wrangler production build dry run; **no deployment performed**.
+- `git diff --check`: **passed**.
+
+### Deployment and remaining acceptance limits
+
+No live site or database was modified. The supplied workers.dev URL could not be reached under sandbox network restrictions, so “the entire live site passed” is **not** a claim of this session. Visual/responsive/accessibility browser acceptance, actual Express/Neon network integration and production settings must still be checked in a reachable environment. Deploy this builder update, then **regenerate and redeploy practice ZIPs** to update existing practice sites. Saving owner settings in the updated runtime repairs a stale database blog flag; it cannot patch old deployed JavaScript. Owners may still intentionally customize their menu links—the fix prevents the feature flag hiding Journal, not restoration of a manually deleted navigation item. Public demo fallback without `DATABASE_URL` remains deliberate and is not persistent CMS storage.
+
+## Bug Fix #214 — one-image CMS URLs, dynamic articles, working page-editor text (2026-10-16)
+
+**Status:** implemented and tested locally. This record supersedes Session #209's automatic bundled-cover fallback and the older multi-image article-gallery workflow. It does not change the independent practice **Gallery** feature or private payment-proof uploads. No production deployment was performed.
+
+### Requested behavior and current rules
+
+1. **One optional image URL per blog post.** The CMS has one plain-text URL field (HTTPS or same-site path), plus alt text. No local upload control or article gallery. Its image preview sits above the post fields, updates on URL/alt input and when an existing post opens, and reports inaccessible/invalid URLs. Blank means **no image**, not an automatically assigned bundled cover. Demo posts may still explicitly reference their bundled illustration URLs.
+2. **One dynamic article route:** `/blog/<slug>`. No per-post HTML file or deployment is generated when the owner publishes. The CMS shows the resulting path beside the editable slug field; blank/whitespace slug input is generated from the title. Normalization lowercases, removes accents, replaces punctuation/spacing with hyphens, caps at 160 characters, and uses `practice-note` if normalization has no letters/numbers. Duplicate site-scoped slugs return 409 with an actionable message. Published/custom slugs stay stable during title edits; explicitly changing or clearing the slug changes the URL. Old URLs then return 404 (no automatic redirect aliases).
+3. **Page-editor plain-text edits must reach the preview, saved edit list, next ZIP and running generated homepage.** Existing live-data exclusions and escaping remain intact; this is not an arbitrary HTML/block editor.
+
+### Root causes and fixes
+
+**CMS images:** the old dashboard supported up to 12 gallery images and article payloads inferred a cover from them. #209 then added a bundled-cover fallback. Removed the article-gallery controls/editor code and public rendering from both homepage designs. Both API validators now accept only the single `featureImageUrl`; nonempty legacy `gallery` payloads are rejected. Images use safe HTTPS/same-site URLs; protocol-relative/backslash paths, script/data schemes and URL credentials are rejected. A blank image URL is stored as an empty string and hidden publicly. The existing `tele_blog_posts_feature_image_nonempty` constraint is removed by an idempotent schema migration; NOT NULL and other constraints remain. The legacy `tele_blog_post_images` table is retained for database compatibility, but extra images are no longer exposed and are cleared when that post is saved. Demo config/seed generation no longer creates per-post galleries. The separate practice Gallery remains unchanged.
+
+**Dynamic URLs:** public articles previously only opened in an in-page modal, without changing the address or supporting direct links. Public cards now contain real `/blog/<slug>` anchors, ordinary clicks update browser history, direct links fetch the requested article, and Back/Forward/Close synchronize the article view. Failed article fetches show an unavailable message rather than stale content. Both target runtimes gate HTML deep links through the same site-scoped **published-only** article lookup used by their public API: drafts/missing posts return 404. Cloudflare serves the shared `/index.html` asset after the gate. Vercel rewrites `/blog/:slug` to its runtime, serves the shared HTML with `sendFile`, and explicitly includes `index.html` in the function artifact. Root-absolute assets keep working at nested URLs. Slug fallback now trims input before using the title, fixing whitespace-only slugs.
+
+**Page-editor text — reproduced, not guessed:**
+
+- **Iframe realm mismatch:** `event.target instanceof Element` compared an iframe node to the parent window's `Element`. It returned false, so clicking text never entered edit mode. Replaced this with node/capability-based targeting and covered it with two actual DOM realms in JSDOM.
+- **Export timing:** edits were recorded only on focusout. Input now records edits immediately, and export explicitly captures the active editable node before preparing the payload. Edit-budget errors are shown in the editor instead of failing silently. Links inside the editor no longer navigate away from the editable document.
+- **Losing pre-existing edits:** restoring text to the session's initial value used to delete even a previously saved edit. A separate seed map restores that saved value instead of dropping it.
+- **Fallback/race:** the locally rebuilt preview now receives saved page edits and seeds from the corresponding saved config; iframe load handlers are installed before assigning `srcdoc`.
+- **Deployment overwrite:** even when edited HTML appeared in the ZIP, `site.js` immediately replaced hero/service/identity text from site config, then did so again after `/api/site`. Packaged edited nodes now get `data-page-edited` markers. Runtime text/headline/service setters preserve marked nodes and their marked descendants, including nested emphasis, through initial rendering and config refresh. Nonedited fields still update normally. Markers contain no executable content; edited text stays escaped and line breaks stay `<br>`.
+
+### Files and compatibility
+
+- CMS: both runtime templates; shared `admin.html`, `admin.js`, `admin.css`; `db/schema.sql`.
+- Public article URLs: shared `site.js`, both homepage designs, both runtime templates, Vercel routing/function config.
+- Page editor: `public/page-editor.js`, `public/package-core.js`, shared generated `site.js`.
+- Tests: added `test/bug-fix-214.test.js`; extended `test/cms-209.test.js`; updated the obsolete multi-image mapper assertion in `test/deployment-fixes.test.js` to enforce the new single-image contract. Auth/CSRF/published-only assertions were retained and expanded, not removed.
+- Added **JSDOM 26** as a test-only development dependency (and updated the lockfile). Generated sites have no new dependencies from this change.
+- The site still bootstraps its schema automatically; no blog-content migration or new post tables are needed. Existing primary feature-image URLs are preserved. Existing gallery rows are retained until the corresponding post is saved, when only those rows are cleared. Do not drop the legacy table manually while older packages may still be using it.
+- As with G3, deploy the updated builder, then regenerate/redeploy existing practice ZIPs. Page-editor changes need a rebuilt ZIP to change already deployed source. Neither this session nor the builder reaches into existing production deployments.
+
+### Test record
+
+**Before implementation:** `npm test` **140 passed, 0 failed**. The first five #214 regression cases were then added and run against the old code; **all five failed**, reproducing iframe edit rejection, deployed text overwrite in both targets, remaining gallery controls, and missing deep-link article loading.
+
+**After implementation:**
+
+- `npm test`: **148 passed, 0 failed, 0 skipped** (about 36 seconds).
+- `test/bug-fix-214.test.js`: **8 passed** — actual iframe-realm click/input events and seeded-edit restoration; generated runtime text survival/escaping for **both targets × Canopy and Brivon Light**; complete dashboard script binding for URL-only preview, unsafe URL handling, failed-image feedback and clearing; deep-link loading and real article anchors; Vercel route/artifact configuration.
+- Extended generated-ZIP/PGlite integration tests pass on both targets: owner login; text-only posts; one-URL image edits; rejection of additional gallery images; retirement of legacy rows; title-derived whitespace-slug fallback; custom slug changes; duplicate slug rejection; draft/deleted/renamed HTML URL 404 and published URL 200; preserved CSRF/session protection. Also re-applied the generated schema over an installed legacy nonempty-image constraint and verified text-only saves succeed after migration.
+- **Real Express HTTP smoke test**, separate from the route adapter: generated/unzipped a Vercel package under ignored `preview-out/session214-vercel`, installed its own declared dependencies, started its actual app on an ephemeral local HTTP port and closed it after testing. Verified health 200; published demo `/blog/<slug>` returns themed HTML 200 and `Cache-Control: no-store`; HEAD 200 with no body; nonexistent slug 404; public article JSON has no extra gallery. No Neon connection or production data was used.
+- `npm run check`: **passed**, Wrangler production build dry run.
+- `git diff --check`: **passed**.
+
+**Limits:** JSDOM tests exercise DOM/event/runtime behavior, not browser layout, real image-host reachability, or native contenteditable rendering. The HTTP smoke used compiled demo content; database behavior was exercised against PGlite, not production Neon. The supplied workers.dev production URL remains outside the sandbox's outbound allowlist. No claim is made that the live deployment has received these changes or passed browser acceptance.
+
+## Bug Fix Session #219 — one gallery per post/page, images after paragraphs (2026-10-16)
+
+**Status:** implemented and locally tested for both generated targets. This session **supersedes #214's no-article-gallery restriction**. It retains URL-only image entry, dynamic `/blog/<slug>` URLs, draft privacy and the page-editor text fixes. No production deployment was performed.
+
+### Required rules
+
+1. **Exactly one gallery bank per post or page, when a gallery is used.** A gallery is a required nonblank **gallery title** plus a dynamically expandable list of image-URL text inputs. No local image uploads or second gallery bank in the same document. Different posts/pages have independent galleries.
+2. **Two newlines create a paragraph boundary.** A single newline is a line break in the same paragraph. CRLF is normalized. The link appears immediately after entering two newlines, including a newly-created empty trailing paragraph; saving must not trim that paragraph away.
+3. **“Add image From A Gallery”** appears after an eligible paragraph. It opens the gallery modal even if no gallery exists; that modal is where the first gallery can be created. In the iframe page editor, these controls appear in the **Paragraphs & page gallery** panel beside the selected text block. They also appear directly below the CMS body/custom-page content fields.
+4. **“Create gallery” / “Save gallery” remains disabled** until the title is filled and at least one nonempty URL has a successfully loaded preview. Every filled URL row must be valid, successfully previewed and unique. Empty additional rows do not count. Failed/unsafe URLs show feedback and cannot enable Save. “Add image URL” adds another input row dynamically.
+5. Below each preview is **“Add Image Next To Paragraph”**. It inserts that image after the paragraph whose link opened the modal. Already placed images cannot be selected again. Opening the modal through the general Create/Edit gallery button allows bank management; select a paragraph link or the modal’s paragraph destination selector to enable insertion.
+6. **At most two individually placed gallery images after any one paragraph.** A **single image fills 100%** of the content width; **two images are side by side at 50% each**, with no gap reducing that width. There is no small-screen stacking override. A whole-gallery set is the explicit exception described in rule 9, not an extra placement alongside individually reused images.
+7. A gallery image has **one placement or is unused**. Once all images are placed, every paragraph's “Add image From A Gallery” link disappears. A full two-image paragraph also hides its link even when other unused images exist. The general **Edit gallery** button remains available so more URLs can be added or the entire set can be moved/restyled. A placed whole set consumes every image in the bank and likewise hides paragraph insertion links. Removing an image from a paragraph returns it to the same bank and eligible links reappear.
+8. Modal changes are staged until Save/Create or insertion; **Cancel/Escape does not change the document**. Those actions update the surrounding editor. Finish with **Save post**, builder save/export, or **Export to builder** for the document's normal persistence flow. This is stated in the modal; there is no hidden second gallery-save service.
+
+9. The modal provides **“Add entire gallery after this paragraph”**, a paragraph destination selector, and a gallery-set layout selector. It places **all bank images together once**, directly after the selected paragraph. This converts/removes any existing individual assignments; it does not duplicate images or create a second gallery. The set may include all 24 allowed bank images.
+10. **Two gallery-set CSS/layout variants:** **Grid** (two equal columns) and **Horizontal strip** (scrollable, scroll-snapping cards). A one-image set fills **100%** in either layout. Edit gallery can change layout or move the set; **Remove gallery set** returns the images to the unused bank without deleting their URLs.
+11. Clicking an inserted gallery image, editor preview, or successfully loaded modal preview opens a **full-viewport image lightbox**. Enter/Space also opens it; Previous/Next and arrow keys navigate its group, with wraparound. Close, Escape or backdrop dismissal restores focus and the previous body scroll state. The viewer traps Tab focus and does not close an underlying article/gallery dialog when Escape dismisses it. This is viewport fullscreen, not a forced browser Fullscreen API session.
+
+### Data model, implementation and compatibility
+
+- Added shared native-ESM `shared/public/content-gallery.js`: paragraph splitting, safe URL/HTML handling, singleton gallery normalization, layout CSS and the reusable `GalleryEditor` modal/paragraph UI. The builder copies the same canonical code into each package's public assets and `lib/content-gallery.js`; the source-tree library file is only an alias. The scaffold manifest includes both. CMS/site scripts now load as modules, including appointments/custom pages which also consume `site.js`.
+- Canonical document data is `contentGallery: { title, images: [{ id, url, alt, paragraph }] }`. `paragraph` is a zero-based index or `null` for unused. One object, not a list of galleries. URLs and image IDs must be unique in that bank. The shared validator rejects missing titles/images, unsafe URLs, invalid paragraph indexes and a third image in the same paragraph. Whole-set mode adds optional `setPlacement: { paragraph, style: "grid" | "strip" }`; all image `paragraph` values must then be `null`. The shared validator rejects mixed individual/set assignments and unsupported styles. Existing galleries without this field remain individual-placement galleries. A bounded **24-image bank** and 120-character title limit keep the existing request/config budgets practical; URL inputs are capped at 2048 characters.
+- **Posts:** a new `tele_blog_posts.content_gallery` JSONB column, defaulting to an empty gallery. It is added idempotently inside the runtime's existing schema migration block, preserving the schema statement count and bootstrapping flow. Both Cloudflare and Vercel validate the same model before saving and return it on owner reads and public article reads. Existing owner session/CSRF/site scoping/published-only guards remain intact. The retired bare `gallery: [...]` payload is not the new contract; a titled `contentGallery` object is required. Legacy `tele_blog_post_images` rows remain retired and are cleared on parent save, as in #214; this change does not revive/import that old table.
+- **Custom pages:** `customPages[i].contentGallery` survives builder local storage, input normalization, generated config, owner settings normalization and ZIP generation. The page content editor uses the same modal and paragraph controls. Generated custom-page HTML places only assigned images after their matching paragraphs. Builder-authored package/source changes require regeneration/redeployment. After the page-save correction below is deployed, an owner can also edit an existing deployed page directly: its saved title/body/gallery are loaded from `/api/site` and rendered on public-page reload, without rebuilding its static shell.
+- **Iframe homepage page editor:** one shared `pageGallery` is carried on the first item of the existing page-edit list. Its image records additionally identify the text-block target (`selector::index`), so individual placements can span several selected blocks without creating a second gallery. A whole-set placement carries its destination in `pageGallery.setPlacement.target` instead. Unchanged text targets containing a set are retained when switching to another block, so export normalization cannot orphan the set. Target/index and paragraph limits are validated against the edited texts. This metadata travels through the existing BroadcastChannel, local cache, server edit JSON, preview and ZIP—no new unauthenticated persistence endpoint.
+- The new paragraph panel edits the selected preview text and exposes gallery controls after its paragraphs. It shares one bank across blocks, captures text changes, and preserves two-newline boundaries. Selecting text alone does not create an unnecessary saved edit. Edits with images carry stable `data-page-edit-key` markers so reopening the editor can restore plain editable text without counting rendered gallery spans as source elements.
+- **Rendering/index fix:** gallery markup adds span elements. `applyPageEdits()` now resolves all original targets before inserting markup and applies changes in reverse document order; otherwise a gallery in the first `span` could shift a later `span` selector and change the wrong text. Packaged edit markers continue to prevent `site.js` overwriting exported text/images.
+- **Gallery-only restore fix:** builder server hydration used to compare only selector/index/text. It now compares the complete normalized edit data, so a newer server gallery is restored even when all text stayed the same.
+- Public rendering escapes text/attributes and permits only HTTPS or safe same-site image URLs. It renders **placed images only**, never automatically appends unused gallery images. The optional pre-existing **cover/banner image** remains separate from this single paragraph-gallery bank. The independent practice Gallery feature and private payment-proof upload flow are unchanged; paragraph galleries work even when the practice Gallery feature is off.
+- Image positions are paragraph-index based. If the text is shortened so a placement no longer has a paragraph, the editor returns that image—or the entire set—to the bank instead of silently dropping it. When reorganizing paragraphs, owners should review/reposition images in the paragraph preview.
+- The modal includes accessible dialog labeling, initial focus, keyboard focus trapping, Escape/cancel and failed-image feedback. Remote image loading happens only in the browser; the server validates URLs without fetching arbitrary remote hosts.
+
+### Testing record
+
+- The first test attempt in this restored sandbox encountered missing development packages. `npm ci` restored the lockfile dependencies (0 audit vulnerabilities); this was an environment issue, not a production-site finding.
+- **Pre-change baseline after install:** `npm test` **148 passed, 0 failed**.
+- **Initial #219 suite:** `npm test` **160 passed, 0 failed, 0 skipped** (about 36 seconds); the follow-up verification below supersedes this total.
+- New `test/content-gallery-219.test.js`: **10 tests** covering paragraph/CRLF/trailing-empty behavior; one titled gallery and safe unique URLs; two-per-paragraph enforcement; inline order and 50% layout; modal creation without an existing gallery; successful-preview/title gating; adding URL rows; failed previews; cancel; reuse prevention; exhausted-link hiding; returning removed/orphaned images; both-target custom-page HTML; one shared page gallery across selector targets; stable selector indexes; and actual iframe-panel insertion/export into both ZIPs.
+- Extended both-target generated-runtime/PGlite tests in `test/cms-209.test.js`: save/publish/reload gallery JSON, owner/public reads, reject third image/missing title/unsafe URL, preserve an empty trailing paragraph with its image, and retain custom-page gallery data through owner settings saves. Existing draft/URL/auth/CSRF checks still pass.
+- Added a builder bridge regression in `test/editor-bridge.test.js` for **gallery-only** newer-server restoration when text is unchanged.
+- Added a store/API-validation regression in `test/page-edits.test.js`: gallery metadata round-trips through the existing database store; invalid paragraph references fail validation before attempting a database write.
+- Updated the prior single-image deployment assertion to enforce the new singleton-JSON contract rather than an obsolete no-gallery restriction. Prior #214 iframe text, image-URL preview and dynamic-link tests remain passing with the module-aware harness.
+- **Builder dry run:** `npm run check` **passed**.
+- **Generated Cloudflare package dry run:** generated/unzipped a fresh package under ignored `preview-out/session219-cloudflare`; Wrangler dry run of that package **passed**, including the canonical gallery module and assets.
+- **Generated Vercel HTTP smoke:** installed the generated package's own declared dependencies under ignored `preview-out/session219-vercel`, ran the real Express app on an ephemeral local port, then closed it. Verified health 200; published dynamic article HTML 200; importing `site.js` served correctly; `content-gallery.js` served as JavaScript and exported the component; missing article 404. Production credentials/databases were not used.
+- `git diff --check`: **passed**. No new dependencies were needed for #219.
+
+### Deployment/testing limits
+
+No production site or database was changed. Existing deployments receive the runtime/UI/schema changes only after deploying the updated builder and regenerating/redeploying their packages. Browser image-host availability is host-dependent; tests simulate image load/error events rather than claiming remote hosts were contacted. JSDOM covers DOM/event logic, not native contenteditable/layout screenshots. Database integration uses real PostgreSQL via PGlite, not live Neon. The workers.dev production URL remains outside this sandbox's outbound allowlist; production acceptance is not claimed.
+
+
+### Follow-up verification — whole-gallery sets, two layouts and fullscreen (2026-10-16)
+
+The additional request is implemented in this same **Bug Fix Session #219**. Rule 6 above supersedes the initial single-image 50% behavior; rules 9–11 extend the initial individual-placement workflow.
+
+Implementation remains centralized in the canonical shared `content-gallery.js`, copied into both generated runtimes. The modal’s destination/layout controls and dedicated set action use the same title/unique-URL/successful-preview validation as Save/Create. Save gallery retains an existing set and updates its layout/bank; the dedicated insertion action converts or moves the complete set. Cancel and failed previews do not persist partial changes. No additional database column, endpoint, package or upload mechanism was introduced: optional placement metadata travels in the existing gallery JSONB/config/page-edit data.
+
+`site.js` now installs an idempotent delegated lightbox binding once, so both exported page images and subsequently fetched article images open the viewer. `GalleryEditor` installs the same behavior for editor and modal previews. Separate group markers keep navigation inside the clicked paragraph, whole set, or modal bank. Singleton viewers disable Previous/Next. Failed full-size loads show recoverable feedback. Paragraph changes reconcile orphaned sets back to the unused bank; the iframe capture path explicitly keeps unchanged targets with whole-set metadata.
+
+QA performed:
+
+- **Before the enhancement:** full baseline **160 passed, 0 failed**. The first seven new focused cases all failed against the old implementation, reproducing the missing behavior before changes.
+- **New focused file `test/gallery-set-219.test.js`: 15 passed, 0 failed.** Covers computed 100%/50% width contracts; one-image sets in both layouts; exclusive set validation and invalid destinations/styles; modal preview gating, cancellation, conversion from already-used images, bank removal/update, move/restyle/remove-set flows; orphan recovery; modal-preview fullscreen without saving; keyboard navigation, focus trapping/restoration, scroll restoration, dismissal and listener idempotence; actual iframe-panel insertion and cross-block target retention.
+- The focused suite generates both **Cloudflare and Vercel** ZIPs with **both Grid and Horizontal strip**. It checks exported custom-page and homepage set position/count and runs the shipped public script to open their viewers. It also loads a fetched article via its dynamic URL, opens its set’s viewer, and verifies Escape closes only the viewer—not the article or its URL.
+- **Both-target real PGlite/API tests** now save/publish/reload a three-image whole set through owner/public reads, reject unsupported layouts and mixed individual/set placements, and retain set metadata through custom-page owner settings saves/reloads. Existing authentication, draft visibility, validation and individual-placement regressions remain passing.
+- **Final full suite:** `npm test` **175 passed, 0 failed, 0 skipped** (about 39 seconds).
+- **Builder dry run:** `npm run check` passed again.
+- **Fresh generated Cloudflare dry run:** passed using ignored `preview-out/session219-set-cloudflare`, not the earlier pre-enhancement fixture.
+- **Fresh generated Vercel HTTP smoke:** passed using ignored `preview-out/session219-set-vercel` and its real Express runtime/static assets: health 200; whole-set custom page 200; updated public lightbox binding; JavaScript MIME and identical canonical public/library modules; dynamic article shell 200; missing article 404. The ephemeral test server was closed afterward.
+- `git diff --check` passed. Verification logs are local scratch artifacts, not repository deliverables.
+
+No production deployment was performed. The existing testing limits still apply: simulated image load/error events and JSDOM DOM/computed-style contracts are not real-browser screenshots or proof that every remote image host permits embedding. Full-viewport rendering is implemented in CSS; native browser visual acceptance remains a deployment/browser check.
+
+
+### Follow-up — page/section deletion and correct Export versus Save (2026-10-16)
+
+**Status:** implemented and locally verified as an extension of **Bug Fix Session #219**. The existing Page editor section above has been corrected, not just supplemented with a contradictory save rule.
+
+#### Required behavior and button meanings
+
+- **Builder Page editor:** click a paragraph/text block or section in the preview. Context controls expose **× Delete paragraph** and **× Delete section**. A deletion is staged immediately and hides that selected element; it is not a text replacement with an empty string. **Export to builder** transfers text and deletion records into the builder configuration/preview, and the next **Generate** writes them into both target packages’ homepage source code. Export alone does not deploy anything or update a separate live site.
+- Export also keeps the normalized payload in the local builder configuration before opening the BroadcastChannel handshake. With no connected builder tab, the next builder load/Generate can still use the edits; a server backup is attempted when supported. Error/warning messages distinguish local retention from failed backup. The database connection URL is not added to local storage.
+- **Deployed owner dashboard:** a new **Pages** navigation item opens an existing homepage/custom page. Homepage text is edited in a sandboxed, script-free iframe with the same paragraph/section delete controls. Custom-page title/body and the existing gallery controls are editable in fields. **Save page** directly writes the existing authenticated, CSRF-protected `PUT /api/site` endpoint, once per pending save. It never exports to a builder, opens a BroadcastChannel, requires a ZIP, or claims that a static file was rewritten.
+- **Deployed posts:** **Save post** directly creates/updates the article through the existing owner post endpoint, including the current text and gallery. Editing an existing post also uses the Save post label. Duplicate submissions are blocked while the request is pending. Success is reported only after the API succeeds; a failed save leaves the draft fields intact and re-enables Save.
+- Paragraph previews in CMS/custom-page/builder gallery editors now include **Delete paragraph** for individual two-newline-delimited paragraphs. Removing one reindexes later image/set placements, returns images from that paragraph to the same bank, and does not reuse or lose URLs. Deleting a whole text element/section similarly releases placements within it and keeps the page’s bank.
+- Deleting the last custom-page paragraph may leave an intentionally empty content area; the page route/title are retained rather than silently dropping the whole page. Builder/runtime validation now permits that empty page body and no longer trims away trailing paragraph boundaries. Existing post title/body validation and published/draft rules remain unchanged.
+- Save failures do not masquerade as successful exports or saves. The deployed page editor keeps the draft available, shows **Not saved**, and allows retry. Opening another page with unsaved changes asks before discarding. The editor reads current site settings before a save so unrelated current settings/custom pages are preserved. If typing continues during an in-flight save, its status distinguishes the saved snapshot from newer unsaved edits.
+
+#### Implementation and persistence
+
+- Extracted the canonical page-edit normalizer, restricted selector matcher and HTML applier into native ESM **`shared/public/page-edits.js`**. The builder core re-exports the original public API; both generated runtimes receive an identical `lib/page-edits.js` copy, and the public renderer/editor use the same public module. The source-tree library is an alias, just like the gallery module.
+- Deletion has an explicitly validated boolean `remove: true`; unsupported selectors/tags, malformed flags and existing size limits remain enforced. `<section>` is allowed for deletion only, not arbitrary plain-text replacement. Live-data region exclusions remain shared by the editor and appliers. Deleted text targets are excluded from gallery placement validation.
+- Deletions remove the target’s inner HTML and leave a **hidden, empty outer tombstone** (`data-page-deleted`), with a CSS hiding rule; original deleted content is not left in that element. Original target identities are stamped before a section removal changes sibling indexes. The editor and runtime resolve these markers when reopening/saving, so a later paragraph does not accidentally inherit an earlier paragraph’s edit. Equivalent selector aliases resolving to one source element are handled without corrupting markup; the last supplied edit wins.
+- **Builder:** the existing `pageEdits` list still travels through local config, preview, BroadcastChannel/server backup and both ZIP-generation paths. No editor toolbar/contenteditable markup is packaged: only validated content/removal metadata and the actual rendered source changes are generated. Builder “Clear edits” can reset these source overrides as before.
+- **Live homepage:** normalized `pageEdits` now survive generated default configuration, both runtime `cleanSiteConfig` functions, owner settings writes and public configuration reads. The existing `tele_sites.config` JSONB stores them—no new table or migration. `site.js` applies saved edits/removals after refreshing config, so runtime defaults cannot overwrite saved text or resurrect deleted content.
+- **Live custom pages:** public `site.js` now refreshes an existing route’s title/content/gallery from saved configuration, instead of leaving the generated static copy unchanged after an owner save. This updates existing deployed pages in JavaScript-enabled browsers after config refresh; it does not create new static routes or rewrite deployment assets. Creating additional routes or changing the underlying template/package still requires regeneration/deployment.
+- New **`shared/public/owner-pages.js`** implements deployed-page editing; the dashboard mounts it through its ordinary signed-in workspace. The iframe strips scripts/event attributes and has no script permission. Server authentication, CSRF, site scoping and database requirements remain unchanged. Invalid page-edit requests return validation 400; anonymous attempts cannot write. A missing/unavailable database is a save failure, not a silent local-only success.
+
+#### Verification
+
+- **Before implementation:** full baseline **175 passed, 0 failed** (`npm test`).
+- New **`test/page-editor-save-delete.test.js`: 11 tests**. Covers explicit deletion validation; paragraph/section context controls in the actual builder iframe; local Export without a builder tab; removed content and stable sibling identity; selector-alias safety; Cloudflare/Vercel packaged source and saved runtime text on both Canopy/Brivon-light; live custom-page saving, final-paragraph deletion and failed-draft retention; actual deployed homepage controls and one direct Save; gallery placement reindex/release; and the actual dashboard’s one-click post save, CSRF header, duplicate-submit lock and failed-draft retention.
+- Extended the existing builder bridge regression: a real export message now includes a section deletion alongside text edits, and asserts local/server config, acknowledgement and refreshed preview carry it.
+- Extended both-target generated-runtime **PGlite/API integration**: save/reload homepage text and section-deletion flags; reject malformed flags with 400; reject anonymous writes; verify failed writes do not overwrite saved content; and retain an empty custom-page body/route with its unused image bank.
+- The existing #209/#214/#219 gallery, editor, draft privacy, security and packaging regressions remain part of the full suite. Module-evaluation DOM harnesses load the new shared imports rather than suppressing validation or rendering behavior.
+- **Final full suite:** `npm test` **186 passed, 0 failed, 0 skipped**.
+- **Builder `npm run check`: passed.** Fresh generated Cloudflare dry run and generated Vercel HTTP smoke passed, including the new page-editor runtime/public modules. `git diff --check` passed.
+
+**Deployment/testing limits:** no production deployment or production database was changed. Existing sites need one regenerated/redeployed package to receive this new dashboard/runtime code; subsequent page/post content saves use the deployed database and do not need another build. Local tests use JSDOM and real PostgreSQL via PGlite; they do not claim native-browser screenshots, live Neon acceptance, or production-worker verification outside the sandbox’s network allowlist.
+
+## Inconsistency #011
+
+**Audit date:** 2026-10-16. **Result: not every documented invariant is fully implemented, and some present-tense Markdown claims are stale.** This section is the current cross-check, not a claim that the findings below have been fixed.
+
+**Scope and method:** compared the requirements and implementation claims in `current_code.md`, `system-rules.md`, `README.md`, `inconsistency.md`, and `code-audit-findings.md` with the builder, shared package core, scaffold manifest, both generated runtimes, shared public modules, SQL and tests. Explicitly dated history and superseded #209/#214 behavior were treated as history, not instructions to undo #219. Confirmed edge cases were reproduced locally without changing application code or contacting a production database. This is a source/requirements audit, not formal proof of every deployment behavior.
+
+### 1. Requirements already present in source
+
+| Area | Source check / outcome |
+|---|---|
+| Basic CMS always on (#209 / G4) | **Implemented.** Both runtime `cleanSiteConfig()` functions force `features.blog = true`, including owner settings saves; missing-database owner operations explain `DATABASE_URL`. Draft/publish/edit/delete and stale `blog: false` have both-target API/PGlite coverage. The old pending plan is not an outstanding implementation task. |
+| Dynamic post URLs and optional cover (#214) | **Implemented.** Owner-editable/title-derived slugs, `/blog/<slug>` routing, URL-only optional cover, and published-only public reads are in the runtime/UI and tests. |
+| Gallery rules (#219) | **Implemented for the tested flows.** One titled URL-backed bank, successful-preview gating, individual placements, whole-set insertion, Grid/Horizontal strip, full-viewport viewer, singleton 100% / individual pair 50% widths, paragraph controls, and JSON/config/ZIP persistence are present. Do not reinstate #214's superseded gallery prohibition. See A05–A07 for remaining validation/budget edges. |
+| Deletion and Export versus Save (#219 follow-up) | **Implemented for ordinary tested flows.** Builder deletion records reach preview/package code; deployed Pages/Save page and Save post use their authenticated APIs. Empty custom-page content is retained, and failed writes retain drafts. A01–A03 are remaining edges, not evidence that these controls are absent. |
+| Other rule groups | Date-rotating owner access (A3), CSRF/cookie/header checks (B1–B2), `tele_` tables/site scoping/bootstrap/URL normalization (C1–C3), target-specific schedulers and raw-client sweeps (D1–D3), atomic booking/proof/review/cancellation guards (E1–E4), shared menu sanitization (F1), and token/vars/ZIP deployment rules (G1–G3) have implementation and existing regression coverage. This does not imply live-host acceptance or eliminate the explicit exceptions below. |
+
+### 2. Requirements or guarantees not fully implemented in code
+
+**A01 — P2: selector-alias order differs between exported HTML and live rendering.**
+- **Requirement:** the latest #219 follow-up says equivalent selectors resolving to the same element use the last supplied edit.
+- **Evidence:** `shared/public/page-edits.js:applyPageEdits()` deduplicates resolved source positions with a Map; `applyPageEditsToDocument()` instead applies the unresolved edit list in reverse without deduplicating elements.
+- **Reproduction:** edits for `#title` → `Earlier`, then `h1` → `Latest`, against `<h1 id="title">Original</h1>` produce **Latest** in the HTML applier but **Earlier** in the DOM applier.
+- **Still needed:** one consistent resolved-target conflict rule and a regression covering both appliers, not only exported HTML.
+
+**A02 — P2: “sections may only be deleted” validation is bypassed by an ID/class selector.**
+- **Requirement:** the deletion follow-up allows section deletion, not replacement of a section's structured markup with plain text.
+- **Evidence/reproduction:** `normalizePageEdits()` rejects `{selector:'section', text:...}` but checks only the selector's explicit tag. `{selector:'#content', index:0, text:'Replacement allowed'}` is accepted and `applyPageEdits()` replaces the contents of a `<section id="content">` with that text. The DOM applier also lacks a resolved-element section check.
+- **Still needed:** enforce the actual target-element restriction when resolving HTML/DOM targets, or explicitly narrow the documented guarantee. This is a validation gap; the ordinary UI already avoids offering section text editing.
+
+**A03 — P1: a locally retained Export can be overwritten by an older server copy.**
+- **Requirement:** the latest Export flow promises that an offline/no-builder-tab export remains usable by the next builder load/Generate.
+- **Evidence:** `public/page-editor.js:exportToBuilder()` saves configuration/meta but does not advance `canopy-page-edits-updated-at`. `public/app.js:mergePageEditsFromServer()` uses that separate timestamp to decide whether server data wins. The connected-builder bridge does update it, so the gap concerns the disconnected/local-only path.
+- **Reproduction:** retain a new local export with no timestamp; supply an older server record dated 2026-10-15; startup hydration replaces the new local text with that older record.
+- **Still needed:** persist local edit recency with every Export and test hydration after failed/missing server backup, including in-flight hydration races.
+
+**A04 — P1: malformed stored hashes can skip PBKDF2 despite the always-derive guarantee.**
+- **Requirement:** A2 and the password amendments promise dummy parameters for unusable hashes and derivation/comparison before deciding; malformed database hashes should not block the documented environment fallback.
+- **Evidence:** `shared/lib/admin-security.js:passwordHashWellFormed()` / `verifyPasswordHash()` and the runtime client verifiers check nonempty salt/digest fields, not decoded salt/digest validity. Shared/Cloudflare base64 decoding can throw before `deriveBits`. Boolean short-circuit returns also skip the comparison for some rejected inputs.
+- **Reproduction:** a dummy `pbkdf2$210000$@$<nonempty dummy digest>` is classified well-formed; owner verification returns false with **zero** instrumented PBKDF2 `deriveBits` calls. No real password/hash was used in this probe.
+- **Still needed:** validate decoded hash components, use valid dummy parameters for unusable hashes, consistently perform the prescribed comparison, and expand malformed-hash tests. This finding does not assert an authentication bypass or a measured production timing exploit.
+
+**A05 — P1: invalid custom-page gallery data can silently remove a page instead of rejecting the save.**
+- **Requirement:** gallery validation and Save-page failure handling should not turn an invalid draft into an apparently successful destructive save.
+- **Evidence:** both runtime `cleanCustomPages()` functions catch `normalizeContentGallery()` failures and return `[]` for that page; `PUT /api/site` can then persist the filtered config and return success.
+- **Reproduction:** a valid page is retained, but the same page with an unsupported gallery-set layout disappears from the cleaner's result in both targets instead of causing a validation error.
+- **Still needed:** reject invalid submitted page/gallery data before writing any site configuration; test that a failed save preserves the prior page and its route.
+
+**A06 — P2: builder banner-image validation and generated runtime validation disagree.**
+- **Requirement:** an accepted builder page should survive generated-runtime reads/settings saves with the same URL-only image contract.
+- **Evidence:** `public/package-core.js:safePageImage()` accepts credential-bearing HTTPS URLs (and is looser for root-relative paths); runtime `cleanBannerImage()` rejects credentials and some unsafe paths.
+- **Reproduction:** a page with a dummy credential-bearing HTTPS banner is accepted by `normalizeConfig()` but discarded by both runtime custom-page cleaners. Combined with A05, this is silent page loss, not merely a missing image.
+- **Still needed:** one shared banner URL policy across builder/runtime validation and a save/read round-trip test. No actual credential URL is reproduced here.
+
+**A07 — P2: accepted per-field edit/gallery limits can exceed the server preview budget.**
+- **Requirement/claim:** the preview-budget notes, including `code-audit-findings.md` F10, imply the full edit allowance fits the 128 KiB preview cap; #219 adds gallery metadata to the same payload.
+- **Evidence/reproduction:** a normalized bank of 24 valid long image URLs plus 64 × 2000-character ASCII text edits serializes to **178,291 bytes**, above the **131,072-byte** server preview cap but below the 256 KiB generation request cap. Unicode can increase byte usage further.
+- **Still needed:** coordinate aggregate byte limits with supported gallery/edit payloads or document/enforce the lower combined budget. Browser-local preview can work, so this is specifically a server preview/fallback guarantee gap, not a claim that every preview fails.
+
+**A08 — P1: credential-path error logging is not fully DEBUG-gated.**
+- **Requirement:** B3 explicitly requires every owner-account/credential error to use `debugError()` rather than logging a raw cause.
+- **Evidence:** both runtimes still call `console.error('owner account save failed', cause/error)` from the account-update catch. Client-registration catches and generic API error handlers also log raw errors on paths that can involve credentials. Seed/read paths using `debugError()` do not cover these other exits.
+- **Still needed:** audit/redact auth-path errors consistently and test default versus DEBUG logging. Raw database error objects can carry sensitive context; no production log exposure is claimed or printed in this audit.
+
+**A09 — P2, previously acknowledged limit: guest payment-account privacy is incomplete.**
+- **Requirement:** E5's broad summary says guests receive no GCash/Maya account details; its detailed text already acknowledges an exception.
+- **Evidence:** `shared/public/site-config.js` embeds the full public config, and `normalizeConfig()` includes payment names/numbers. Hiding them in the UI and gated API responses does not remove them from a readable script.
+- **Still needed if strict guest privacy remains the goal:** separate private payment configuration from publicly shipped assets and deliver account details only through an authenticated response. Keep this marked as an accepted limitation until explicitly resolved; do not describe it as complete secrecy.
+
+**A10 — P1, security hygiene still outstanding: credential-bearing files/history remain tracked.**
+- **Requirement:** README's “Do not commit secrets,” A2/B3 secret boundaries, and audit F1's cleanup action.
+- **Evidence:** `git ls-files` still lists root `.dev.vars`, `.env`, and `.wrangler/state/**`. Both `.dev.vars` and the F1 body in `code-audit-findings.md` contain credential-shaped PostgreSQL URLs. The repository is currently public. `.gitignore` does not remove existing index/history entries.
+- **Still needed:** verify/perform credential rotation as appropriate, untrack local environment/state artifacts, and sanitize exposed material/history under the owner's repository policy. Credential validity and prior rotation were not tested. No URL, password, token or hash value is copied into this report; existing source findings are not newly disclosed as examples.
+
+**A11 — P3: the “single password-bound definition, no literals” invariant is only partial.**
+- **Requirement:** `system-rules.md` A1 says never duplicate literal bounds and says changing the shared definition alone changes the policy.
+- **Evidence:** server validators import the constants, but `public/app.js:ADMIN_PASSWORD_POLICY` still embeds `{8,25}`, and builder/generated HTML still embeds `minlength="8"` / `maxlength="25"` and related copy. Those values currently agree; this is not a present-day length mismatch.
+- **Still needed:** derive browser constraints/patterns from shared bounds, or explicitly document the manual UI-update exception instead of promising a one-definition-only change.
+
+### 3. Inconsistent or stale facts in the Markdown files
+
+| ID | Location / inconsistent fact | Current source-backed interpretation |
+|---|---|---|
+| D01 | `current_code.md` introductory capability cross-check; README's final “To Be Implemented”; `system-rules.md` G4/completion plan; `inconsistency.md` remaining-gaps list still say runtime blog forcing, missing-database messaging and CMS verification are unfinished. | #209 implemented these in both runtimes and `test/cms-209.test.js`. The dated 2026-10-15 plan may stay as history, but unqualified present-tense pending claims are stale. Old deployments still need regeneration/redeployment. |
+| D02 | `current_code.md` opening/§8/password recap, `inconsistency.md` header/list, `system-rules.md` A1 and the later status table in `code-audit-findings.md` refer to **135** as the current suite. | The current rerun is **186 passed, 0 failed, 0 skipped**. Earlier explicitly dated counts (84/135/160/175 etc.) are historical results, not bugs or evidence that tests were removed. |
+| D03 | `current_code.md` §1 says the builder “does not use Neon”; other sections describe its Neon page-edit store. | ZIP generation needs no database, but optional builder page-edit persistence does use Neon through `src/database.js`, `src/page-edits-store.js` and `/api/page-editor`. “No practice appointments database in the builder” is different from “no database use.” |
+| D04 | `current_code.md` Page editor paragraph names `builder_page_edits`; §5 proof storage names `appointment_payment_proofs`; older CMS overviews emphasize `tele_blog_post_images` without the active #219 JSON contract. | Active tables are `tele_builder_page_edits` and `tele_appointment_payment_proofs`; unprefixed names are migration inputs/history. New paragraph galleries use `tele_blog_posts.content_gallery` JSONB / `contentGallery`, with optional `setPlacement`; the legacy images table is not the active new-gallery write model. |
+| D05 | `current_code.md` §5 “Booking and proof,” item 2, says 15 minutes is only a review threshold and never automatic cancellation, while its amended drop section says the opposite. | The sweep in `shared/lib/payment-reminders.js` cancels/expires unpaid, proofless bookings when due. E2/D3 and the amended section are authoritative; actual timing depends on the target's documented cron cadence. Proof upload itself does not independently enforce the deadline. |
+| D06 | README's Page editor overview describes text-only records and the earlier channel-first flow; early owner/dashboard summaries omit the new Pages editor, while later #219 records describe it. | Source has deletion records/context controls, local-first builder Export, and deployed Pages/Save page. The latest #219 record describes the intended distinction, subject to A01–A03. This is incomplete/stale overview documentation, not a missing Pages panel. |
+| D07 | A1's “change the single source of truth only” wording conflicts with the manual regex/HTML inventory already acknowledged in `current_code.md`'s password amendment. | Current values agree at 8–25, but browser literals still need separate updates. See A11; do not claim those UI constraints are already generated from the shared constants. |
+
+**Not counted as new inconsistencies:** the explicitly dated 2026-10-13 audit body and old work lists are snapshots; #209's cover fallback was superseded by #214, and #214's no-gallery rule by #219. The one-gallery-set exception and single-image 100% correction already have explicit current rules. Workers plan/cron latency, required database configuration, no automatic update of deployed templates, lack of live-host acceptance, and lack of native-browser visual verification remain documented operational/testing limits—not newly missing features.
+
+### 4. Verification and disposition
+
+- The first test invocation in this restored workspace could not load missing development/runtime packages. `npm ci` restored the lockfile dependencies (**80 packages, 0 reported vulnerabilities**); this was an environment issue, not a newly found source regression.
+- **`npm test`: 186 passed, 0 failed, 0 skipped** after installation; **`npm run check`: passed** (root Worker dry run); **`git diff --check`: passed**.
+- Seven focused scratch probes reproduced A01–A07 (including both-target cleaner behavior for A05/A06). They assert the observed defects, not that the behavior is correct. A08–A11 were confirmed by source/index checks. The existing passing suite does not cover all of these newly identified edges.
+- Only `current_code.md` was edited for this audit. The other Markdown files were reviewed and their discrepancies listed here, not silently rewritten. Application changes from completed #209/#214/#219 work remain included for the requested source commit; **none of A01–A11 was implemented/fixed by this audit**. Scratch probes, logs, generated fixtures and dependencies are not repository deliverables.
+- No production deployment/database/logging/credential-rotation action was performed. The session remains on `arena/6b41a2a7-telepractice-studio`; any integration into `main` must use a pull request from that branch, not a direct branch switch or push to `main`.

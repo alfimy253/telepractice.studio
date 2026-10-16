@@ -322,3 +322,17 @@ test('clearPageEditsFromDatabase removes the row from the tagged-SQL stub', asyn
   assert.equal(database.records.size, 0);
   assert.equal(database.queries.filter((query) => query.includes('DELETE FROM tele_builder_page_edits')).length, 2);
 });
+
+test('219: page gallery metadata survives the existing database store and validates before writes', async () => {
+  const gallery = { title: 'Saved page gallery', images: [{ id: 'photo', url: 'https://example.test/photo.jpg', paragraph: 1, target: '#heroText::0' }] };
+  const edits = normalizePageEdits([{ selector: '#heroText', index: 0, text: 'First\n\nSecond', pageGallery: gallery }]);
+  const database = databaseStub();
+  await savePageEditsToDatabase(database.sql, 'gallery-site', edits);
+  const stored = await loadPageEditsFromDatabase(database.sql, 'gallery-site');
+  assert.equal(stored.edits[0].pageGallery.title, gallery.title);
+  assert.equal(stored.edits[0].pageGallery.images[0].paragraph, 1);
+  const env = { ASSETS: assets, CSRF_SECRET: 'test-only' }, auth = await session(env);
+  const bad = { ...gallery, images: [{ ...gallery.images[0], paragraph: 99 }] };
+  const response = await postPageEdits(env, { siteId: 'gallery-site', edits: [{ selector: '#heroText', index: 0, text: 'First', pageGallery: bad }] }, auth);
+  assert.equal(response.status, 400, 'invalid placement must fail validation before the missing database');
+});

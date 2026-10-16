@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow"><title>Site owner studio</title>
   <link rel="stylesheet" href="/site.css"><link rel="stylesheet" href="/admin.css">
-  <script src="/site-config.js" defer></script><script src="/brivon-fonts.js" defer></script><script src="/admin.js" defer></script>
+  <script src="/site-config.js" defer></script><script src="/brivon-fonts.js" defer></script><script src="/admin.js" type="module"></script>
 </head>
 <body class="admin-body">
   <header class="admin-topbar"><a class="site-brand" href="/" aria-label="View website"><span class="brand-symbol" id="adminSymbol">✳</span><span><strong id="adminBrandName">Practice studio</strong><small>WEBSITE OWNER</small></span></a><div class="admin-top-actions"><span class="owner-pill" id="ownerIdentity" hidden><i></i><span id="ownerEmail"></span></span><button type="button" class="preview-link admin-logout" id="logoutButton" hidden>Sign out</button><a href="/" class="preview-link">View website ↗</a></div></header>
@@ -26,9 +26,14 @@
         <button type="button" data-admin-page-link="appointments" aria-controls="appointmentManager"><span class="admin-nav-number">07</span><span>Appointments</span></button>
         <button type="button" data-admin-page-link="payments" aria-controls="paymentsManager"><span class="admin-nav-number">08</span><span>Payments</span></button>
         <button type="button" data-admin-page-link="signin" aria-controls="adminPage-signin"><span class="admin-nav-number">09</span><span>Sign-in</span></button>
+        <button type="button" data-admin-page-link="pages"><span>↗</span><span>Pages</span></button>
         <small class="admin-page-nav-note">Your changes are saved to this practice site.</small>
       </nav>
       <div class="admin-main-column">
+        <section class="panel-admin admin-card" data-admin-page="pages" hidden>
+          <h2>Pages</h2><p>Open the homepage to edit text or delete paragraphs/sections. Custom pages use their content fields. Click Save page once to save directly to this deployed site—no export or rebuild is needed.</p>
+          <div id="ownerPagesEditor"></div>
+        </section>
         <section class="panel-admin admin-card" id="adminPage-identity" data-admin-page="identity">
           <div class="admin-card-heading"><div><span class="admin-section-index">01 / IDENTITY</span><h2>Practice details</h2><p>Keep your contact information current.</p></div><span class="card-icon">✳</span></div>
           <form id="siteForm" class="admin-form" method="post" action="/api/site">
@@ -53,10 +58,12 @@
           </form>
         </section>
         <section class="panel-admin admin-card blog-admin-card" id="blogEditor" data-admin-page="blog" hidden>
-          <div class="admin-card-heading"><div><span class="admin-section-index">04 / BLOG CMS</span><h2>Helpful notes, simply managed.</h2><p>Fixed post fields plus a required feature image and an optional image gallery.</p></div><span class="card-icon card-icon-blog">▤</span></div>
+          <div class="admin-card-heading"><div><span class="admin-section-index">04 / BLOG CMS</span><h2>Helpful notes, simply managed.</h2><p>One gallery per post. Separate paragraphs with two newlines. Insert individual images or the entire gallery as a set.</p></div><span class="card-icon card-icon-blog">▤</span></div>
+          <p id="postFormMessage" role="status" aria-live="polite"></p>
           <form id="postForm" class="admin-form post-form" method="post" action="/api/admin/posts">
             <input type="hidden" name="id">
-            <div class="admin-form-grid"><label><span>Post title</span><input name="title" maxlength="140" required placeholder="A useful note for your community"></label><label><span>URL slug</span><input name="slug" maxlength="160" placeholder="created-from-title"></label><label class="admin-full"><span>Short excerpt</span><input name="excerpt" maxlength="260" placeholder="A sentence or two that introduces the article"></label><label class="admin-full"><span>Article body</span><textarea name="body" rows="5" maxlength="12000" required placeholder="Write your article here. Plain text is supported."></textarea></label><label class="admin-full"><span>Feature image URL</span><input name="featureImageUrl" type="text" inputmode="url" maxlength="2048" placeholder="https://example.com/feature.jpg"><small>Required. Leave blank to use the first image in the post gallery below.</small></label><label class="admin-full"><span>Feature image alt text</span><input name="featureImageAlt" maxlength="180" placeholder="Describe the feature image"></label><div class="post-gallery-editor admin-full"><div class="post-gallery-heading"><span><strong>Article gallery</strong><small>Optional images appear after the article body.</small></span><button type="button" id="addPostGalleryImage">Add image</button></div><div class="post-gallery-note">If the feature image URL is blank, the first gallery image becomes the hero banner.</div><div id="postGalleryRows" class="post-gallery-rows"></div></div><label><span>Category</span><input name="category" maxlength="60" placeholder="Practice notes"></label><label><span>Publish status</span><select name="status"><option value="draft">Draft</option><option value="published">Published</option></select></label></div>
+            <figure class="post-image-preview" id="postImagePreviewWrap" hidden><img id="postImagePreview" alt="Blog image preview" referrerpolicy="no-referrer"><figcaption id="postImagePreviewMessage">Image URL preview</figcaption></figure>
+            <div class="admin-form-grid"><label><span>Post title</span><input name="title" maxlength="140" required placeholder="A useful note for your community"></label><label><span>Blog URL slug</span><input name="slug" maxlength="160" placeholder="created-from-title"><small id="postUrlPreview">/blog/created-from-title — leave blank to create it from the title.</small></label><label class="admin-full"><span>Short excerpt</span><input name="excerpt" maxlength="260" placeholder="A sentence or two that introduces the article"></label><label class="admin-full"><span>Article body</span><textarea name="body" rows="5" maxlength="12000" required placeholder="Write your article here. Plain text is supported."></textarea></label><div id="postParagraphGallery" class="admin-full"></div><label class="admin-full"><span>Feature image URL</span><input name="featureImageUrl" type="text" inputmode="url" maxlength="2048" placeholder="https://example.com/feature.jpg"><small>Optional cover image URL. Add paragraph images using the gallery below the article body. No uploads.</small></label><label class="admin-full"><span>Feature image alt text</span><input name="featureImageAlt" maxlength="180" placeholder="Describe the feature image"></label><label><span>Category</span><input name="category" maxlength="60" placeholder="Practice notes"></label><label><span>Publish status</span><select name="status"><option value="draft">Draft</option><option value="published">Published</option></select></label></div>
             <div class="admin-form-actions"><small>No custom post types or block editor—just the fields your team needs.</small><button type="submit" class="admin-primary">Save post</button></div>
           </form>
           <div class="posts-admin-list"><div class="posts-admin-header"><strong>Your posts</strong><span id="postCount">0 posts</span></div><div id="postsList" class="posts-list"><p class="empty-posts">Sign in to manage blog posts.</p></div></div>
