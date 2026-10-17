@@ -78,7 +78,7 @@ function ensureSiteRow() {
       await ensureSchema();
       // Bug Fix No. 204: refresh the compiled package theme onto an untouched
       // seed row. Owner-saved appearance stamps updated_at and is kept.
-      await client`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(DEFAULT_CONFIG)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config WHERE tele_sites.updated_at = tele_sites.created_at`;
+      await client`INSERT INTO tele_sites (site_id, email, config) VALUES (${SITE_ID}, ${contactEmail(DEFAULT_CONFIG.email)}, ${JSON.stringify(DEFAULT_CONFIG)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET email = EXCLUDED.email, config = EXCLUDED.config WHERE tele_sites.updated_at = tele_sites.created_at`;
     })().catch((cause) => { siteRowReady = null; throw cause; });
   }
   return siteRowReady;
@@ -351,6 +351,12 @@ async function adminGuard(req, res, next) {
 function cleanText(value, max, fallback = '') {
   return String(value ?? fallback).trim().slice(0, max);
 }
+// Bug Fix Session #224: `tele_sites.email` is the unique contact-email key.
+// Store the canonical lower-case form so the database index and the JSON
+// config always describe the same address.
+function contactEmail(value) {
+  return String(value ?? '').trim().toLowerCase().slice(0, 120);
+}
 function color(value, fallback) { return /^#[0-9a-f]{6}$/i.test(String(value || '')) ? String(value) : fallback; }
 function cleanTimeZone(value, fallback = 'Asia/Manila') {
   const candidate = cleanText(value, 64) || fallback;
@@ -402,7 +408,7 @@ function cleanSiteConfig(input = {}) {
     businessName: cleanText(merged.businessName, 80, DEFAULT_CONFIG.businessName),
     brandName: cleanText(merged.brandName, 80, DEFAULT_CONFIG.brandName),
     location: cleanText(merged.location, 100, DEFAULT_CONFIG.location),
-    email: cleanText(merged.email, 120, DEFAULT_CONFIG.email),
+    email: contactEmail(merged.email) || contactEmail(DEFAULT_CONFIG.email) || `hello@${DEFAULT_CONFIG.siteId}.example`,
     phone: cleanText(merged.phone, 30, DEFAULT_CONFIG.phone),
     timeZone: cleanTimeZone(merged.timeZone, DEFAULT_CONFIG.timeZone || 'Asia/Manila'),
     primaryColor: color(merged.primaryColor, DEFAULT_CONFIG.primaryColor),
@@ -1115,8 +1121,15 @@ app.put('/api/site', csrfGuard, adminGuard, asyncRoute(async (req, res) => {
   let config; try { config = cleanSiteConfig(req.body || {}); } catch (cause) { return res.status(400).json({ error: cause.message }); }
   if (!config.businessName || (config.email && !/^\S+@\S+\.\S+$/.test(config.email))) return res.status(400).json({ error: 'Check the practice name and contact email.' });
   const sql = getDb();
-  const rows = await sql`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(config)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now() RETURNING config`;
-  res.json({ config: rows[0].config });
+  try {
+    const rows = await sql`INSERT INTO tele_sites (site_id, email, config) VALUES (${SITE_ID}, ${contactEmail(config.email)}, ${JSON.stringify(config)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET email = EXCLUDED.email, config = EXCLUDED.config, updated_at = now() RETURNING config`;
+    res.json({ config: rows[0].config });
+  } catch (error) {
+    console.error('site config save failed', error);
+    // Bug Fix Session #224: the contact email is unique across tele_sites.
+    if (error?.code === '23505') return res.status(409).json({ error: 'That contact email is already used by another site in this database. Use a different practice email.' });
+    return res.status(503).json({ error: databaseErrorMessage(error, 'Could not save the site settings. Check the Neon schema and connection.') });
+  }
 }));
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found.' }));

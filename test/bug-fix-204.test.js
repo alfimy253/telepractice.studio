@@ -88,9 +88,9 @@ test('Brivon Light packages keep the light theme in HTML, config, seed and runti
     const runtime = runtimeFile(files, target);
     assert.match(runtime, /DEFAULT_CONFIG = \{/, `${label}: runtime defaults missing`);
     assert.match(runtime, /"theme":"brivon-light"/, `${label}: compiled DEFAULT_CONFIG is not Brivon Light`);
-    assert.match(runtime, /DO UPDATE SET config = EXCLUDED\.config WHERE tele_sites\.updated_at = tele_sites\.created_at/,
+    assert.match(runtime, /DO UPDATE SET email = EXCLUDED\.email, config = EXCLUDED\.config WHERE tele_sites\.updated_at = tele_sites\.created_at/,
       `${label}: untouched seed rows must pick up the rebuilt package theme`);
-    assert.doesNotMatch(runtime, /INSERT INTO tele_sites \(site_id, config\) VALUES \([\s\S]*?ON CONFLICT \(site_id\) DO NOTHING/,
+    assert.doesNotMatch(runtime, /INSERT INTO tele_sites \(site_id, email, config\) VALUES \([\s\S]*?ON CONFLICT \(site_id\) DO NOTHING/,
       `${label}: the old DO NOTHING seed would keep a previous Brivon Dark row`);
   }
 });

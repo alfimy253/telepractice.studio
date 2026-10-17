@@ -55,6 +55,10 @@ function json(data, status = 200, extra = {}) {
 }
 function error(message, status = 400) { return json({ error: message }, status); }
 function cleanText(value, max, fallback = '') { return String(value ?? fallback).trim().slice(0, max); }
+// Bug Fix Session #224: `tele_sites.email` is the unique contact-email key.
+// Store the canonical lower-case form so the database index and the JSON
+// config always describe the same address.
+function contactEmail(value) { return String(value ?? '').trim().toLowerCase().slice(0, 120); }
 function validColor(value, fallback) { return /^#[0-9a-f]{6}$/i.test(String(value || '')) ? String(value) : fallback; }
 function cleanTimeZone(value, fallback = 'Asia/Manila') {
   const candidate = cleanText(value, 64) || fallback;
@@ -106,7 +110,7 @@ function cleanSiteConfig(input = {}) {
     businessName: cleanText(merged.businessName, 80, DEFAULT_CONFIG.businessName),
     brandName: cleanText(merged.brandName, 80, DEFAULT_CONFIG.brandName),
     location: cleanText(merged.location, 100, DEFAULT_CONFIG.location),
-    email: cleanText(merged.email, 120, DEFAULT_CONFIG.email),
+    email: contactEmail(merged.email) || contactEmail(DEFAULT_CONFIG.email) || `hello@${DEFAULT_CONFIG.siteId}.example`,
     phone: cleanText(merged.phone, 30, DEFAULT_CONFIG.phone),
     timeZone: cleanTimeZone(merged.timeZone, DEFAULT_CONFIG.timeZone || 'Asia/Manila'),
     primaryColor: validColor(merged.primaryColor, DEFAULT_CONFIG.primaryColor),
@@ -274,7 +278,7 @@ function ensureSiteRow(env) {
       // appearance/identity stamps updated_at and is never overwritten, so a
       // rebuilt Brivon Light ZIP deployed onto a database that still holds the
       // first Brivon Dark seed actually becomes light.
-      await client`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(DEFAULT_CONFIG)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config WHERE tele_sites.updated_at = tele_sites.created_at`;
+      await client`INSERT INTO tele_sites (site_id, email, config) VALUES (${SITE_ID}, ${contactEmail(DEFAULT_CONFIG.email)}, ${JSON.stringify(DEFAULT_CONFIG)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET email = EXCLUDED.email, config = EXCLUDED.config WHERE tele_sites.updated_at = tele_sites.created_at`;
     })().catch((cause) => { siteRowReady = null; throw cause; });
   }
   return siteRowReady;
@@ -664,9 +668,15 @@ async function routeApi(request, env) {
     let config; try { config = cleanSiteConfig(body); } catch (cause) { return error(cause.message, 400); }
     if (!config.businessName || (config.email && !/^\S+@\S+\.\S+$/.test(config.email))) return error('Check the practice name and contact email.');
     try {
-      const rows = await sql(env)`INSERT INTO tele_sites (site_id, config) VALUES (${SITE_ID}, ${JSON.stringify(config)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now() RETURNING config`;
+      const rows = await sql(env)`INSERT INTO tele_sites (site_id, email, config) VALUES (${SITE_ID}, ${contactEmail(config.email)}, ${JSON.stringify(config)}::jsonb) ON CONFLICT (site_id) DO UPDATE SET email = EXCLUDED.email, config = EXCLUDED.config, updated_at = now() RETURNING config`;
       return json({ config: rows[0].config });
-    } catch (cause) { console.error('site config save failed', cause); return error(databaseErrorMessage(cause, 'Could not save the site settings. Check the Neon schema and connection.'), 503); }
+    } catch (cause) {
+      console.error('site config save failed', cause);
+      // Bug Fix Session #224: the contact email is unique across tele_sites.
+      // Report the conflict as an owner-actionable rejection, not a database outage.
+      if (cause?.code === '23505') return error('That contact email is already used by another site in this database. Use a different practice email.', 409);
+      return error(databaseErrorMessage(cause, 'Could not save the site settings. Check the Neon schema and connection.'), 503);
+    }
   }
   if (path === '/api/auth/register' && method === 'POST') {
     if (!await csrfOk(request, env)) return error('Cross-site request rejected or security token expired.', 403);

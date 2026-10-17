@@ -51,7 +51,7 @@ test('deployed packages create their own site record so client signup works afte
 
     assert.ok(files.has('lib/db-errors.js'), `${label}: actionable database errors library missing`);
     assert.match(runtime, /function ensureSiteRow/, `${label}: no site-record bootstrap`);
-    assert.match(runtime, /INSERT INTO tele_sites \(site_id, config\) VALUES \([\s\S]*?ON CONFLICT \(site_id\) DO UPDATE SET config = EXCLUDED\.config WHERE tele_sites\.updated_at = tele_sites\.created_at/,
+    assert.match(runtime, /INSERT INTO tele_sites \(site_id, email, config\) VALUES \([\s\S]*?ON CONFLICT \(site_id\) DO UPDATE SET email = EXCLUDED\.email, config = EXCLUDED\.config WHERE tele_sites\.updated_at = tele_sites\.created_at/,
       `${label}: the bootstrap must refresh an untouched seed without overwriting owner-edited settings`);
     // Every query must run through the wrapper, so no route can skip the record.
     if (target === 'cloudflare') {
@@ -98,7 +98,7 @@ test('seed.sql never overwrites owner edits and the packaged setup notes say so'
   for (const target of ['cloudflare', 'vercel']) {
     const files = await packageFiles(target);
     const seed = files.get('db/seed.sql');
-    assert.match(seed, /INSERT INTO tele_sites \(site_id, config\) VALUES \([\s\S]*?ON CONFLICT \(site_id\) DO NOTHING/,
+    assert.match(seed, /INSERT INTO tele_sites \(site_id, email, config\) VALUES \([\s\S]*?ON CONFLICT \(site_id\) DO NOTHING/,
       `${target}: re-running seed.sql would overwrite live settings`);
     assert.match(seed, /safe to rerun/, `${target}: seed.sql must explain that it is safe to rerun`);
     const readme = files.get('README.md');

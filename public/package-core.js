@@ -90,6 +90,7 @@ const DEMO_GALLERY = [
   { title: 'A little time to listen', imageUrl: '', altText: 'Illustrated gallery placeholder for a conversation with the care team', caption: 'Questions welcome. We will take the time.', category: 'Team', sortOrder: 3, status: 'published' }
 ];
 function clean(value, max, fallback = '') { return String(value ?? fallback).trim().slice(0, max); }
+function contactEmail(value) { return String(value ?? '').trim().toLowerCase().slice(0, 120); }
 function slugify(value) { return String(value || '').normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 45) || 'my-practice'; }
 function validColor(value, fallback) { return /^#[0-9a-f]{6}$/i.test(String(value || '')) ? String(value).toLowerCase() : fallback; }
 const MAX_CUSTOM_PAGES = 8;
@@ -170,7 +171,7 @@ function normalizeConfig(input = {}) {
   const editorialAccent = Object.hasOwn(EDITORIAL_ACCENTS, input.editorialAccent) ? input.editorialAccent : 'black';
   const preset = THEME_DEFAULTS[theme];
   const defaultPrimary = theme === 'editorial' ? EDITORIAL_ACCENTS[editorialAccent] : preset.primaryColor;
-  const email = clean(input.email, 120, `hello@${siteId}.example`);
+  const email = contactEmail(input.email) || `hello@${siteId}.example`;
   if (email && !/^\S+@\S+\.\S+$/.test(email)) throw new Error('Enter a valid practice email address.');
   // Every generated file (site-config.js, the runtime's compiled-in defaults,
   // manifest.json, db/seed.sql, db/apply-config.sql) embeds this configuration,
@@ -359,7 +360,7 @@ function createSeedSql(config) {
     '-- never overwrites owner edits or content changed in the dashboard. A deployed',
     '-- site also creates its own configuration row on first use, so the site works',
     '-- after schema.sql alone; this file only adds the generated sample content.', '',
-    `INSERT INTO tele_sites (site_id, config) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(JSON.stringify(config))}::jsonb) ON CONFLICT (site_id) DO NOTHING;`, ''
+    `INSERT INTO tele_sites (site_id, email, config) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(contactEmail(config.email))}, ${sqlLiteral(JSON.stringify(config))}::jsonb) ON CONFLICT (site_id) DO NOTHING;`, ''
   ];
   for (const post of config.demoPosts) {
     lines.push(`INSERT INTO tele_blog_posts (site_id, title, slug, excerpt, body, feature_image_url, feature_image_alt, category, status, published_at) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(post.title)}, ${sqlLiteral(post.slug)}, ${sqlLiteral(post.excerpt)}, ${sqlLiteral(post.body)}, ${sqlLiteral(post.featureImageUrl)}, ${sqlLiteral(post.featureImageAlt)}, ${sqlLiteral(post.category)}, 'published', now()) ON CONFLICT (site_id, slug) DO NOTHING;`);
@@ -383,8 +384,8 @@ function createApplyConfigSql(config) {
     '-- pages and menu links. It does not touch client accounts, bookings, payment',
     '-- proofs, schedules, notes or any other content.',
     '',
-    `INSERT INTO tele_sites (site_id, config) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(JSON.stringify(config))}::jsonb)`,
-    'ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config, updated_at = now();', ''
+    `INSERT INTO tele_sites (site_id, email, config) VALUES (${sqlLiteral(config.siteId)}, ${sqlLiteral(contactEmail(config.email))}, ${sqlLiteral(JSON.stringify(config))}::jsonb)`,
+    'ON CONFLICT (site_id) DO UPDATE SET email = EXCLUDED.email, config = EXCLUDED.config, updated_at = now();', ''
   ].join('\n');
 }
 function generatedReadme(config, secrets) {

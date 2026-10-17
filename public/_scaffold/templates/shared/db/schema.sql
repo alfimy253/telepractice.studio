@@ -25,10 +25,73 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS tele_sites (
   site_id text PRIMARY KEY,
+  -- Bug Fix Session #224: the practice contact email is a first-class column,
+  -- not only a string inside `config`. It is the one business-unique key on
+  -- this table: one contact email may own only one site row. `site_id` stays
+  -- the primary key because every other `tele_` table references it by
+  -- foreign key; the email column is the uniqueness rule the operator asked
+  -- for. It is nullable only so legacy rows that never stored an email can be
+  -- migrated without inventing one.
+  email varchar(120),
   config jsonb NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Bug Fix Session #224 — migrate existing databases in place.
+-- 1. Add the column when `tele_sites` was created by an older package.
+ALTER TABLE tele_sites ADD COLUMN IF NOT EXISTS email varchar(120);
+-- 2-4. Backfill, cleanup and duplicate resolution. Once the unique index exists
+--      this block is skipped: running the backfill again would try to restore a
+--      duplicate email that step 4 deliberately cleared, and the already-present
+--      index would reject the whole bootstrap transaction.
+DO $$ BEGIN
+  IF to_regclass('public.tele_sites_email_unique_idx') IS NULL THEN
+    -- Backfill from the contact email stored inside `config`. Lower-casing is
+    -- deliberate: email uniqueness is case-insensitive, and the column holds
+    -- the canonical value used by the unique index below.
+    UPDATE tele_sites
+    SET email = left(NULLIF(lower(btrim(config ->> 'email')), ''), 120)
+    WHERE email IS DISTINCT FROM left(NULLIF(lower(btrim(config ->> 'email')), ''), 120);
+    -- Never let a legacy malformed value block the unique index. The generated
+    -- runtimes validate the address before writing; this only cleans old rows.
+    UPDATE tele_sites
+    SET email = NULL
+    WHERE email IS NOT NULL
+      AND email !~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$';
+    -- Existing databases may already contain duplicate contact emails. Keep the
+    -- oldest row (then the lowest site_id as a deterministic tie-break) and
+    -- leave the later duplicates without a column value. Their `config.email`
+    -- is untouched, so no owner data is lost; the uniqueness rule simply cannot
+    -- represent two live sites with the same contact email.
+    UPDATE tele_sites AS duplicate
+    SET email = NULL
+    FROM tele_sites AS keeper
+    WHERE duplicate.email IS NOT NULL
+      AND keeper.email = duplicate.email
+      AND (keeper.created_at, keeper.site_id) < (duplicate.created_at, duplicate.site_id);
+  END IF;
+END $$;
+-- 5. Keep the column synchronized for every writer, including packages built
+--    before this column existed. Those packages still write only `config`, so
+--    a trigger derives the canonical email on insert and whenever `config`
+--    changes. Current packages also write the column explicitly; the trigger
+--    is the schema-level guarantee that the two can never drift apart.
+CREATE OR REPLACE FUNCTION tele_sites_sync_email() RETURNS trigger AS $$
+BEGIN
+  NEW.email := left(NULLIF(lower(btrim(NEW.config ->> 'email')), ''), 120);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS tele_sites_sync_email ON tele_sites;
+CREATE TRIGGER tele_sites_sync_email
+  BEFORE INSERT OR UPDATE OF config ON tele_sites
+  FOR EACH ROW EXECUTE FUNCTION tele_sites_sync_email();
+-- 6. The unique rule itself. The partial predicate permits multiple legacy
+--    rows with no email while rejecting every repeated non-null contact email.
+CREATE UNIQUE INDEX IF NOT EXISTS tele_sites_email_unique_idx
+  ON tele_sites (lower(email))
+  WHERE email IS NOT NULL;
 
 -- Owner sign-in accounts. The owner username, email and salted PBKDF2 password
 -- hash live here, in the same Neon database as tele_client_accounts. The

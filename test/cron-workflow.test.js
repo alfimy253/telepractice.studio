@@ -129,7 +129,7 @@ before(async () => {
   }
   const schemaLine = generated.split('\n').find((line) => line.startsWith('const SCHEMA_STATEMENTS'));
   const statements = JSON.parse(schemaLine.replace('const SCHEMA_STATEMENTS = ', '').replace(/;\s*$/, ''));
-  assert.equal(statements.length, 59);
+  assert.equal(statements.length, 65);
   for (const statement of statements) await db.exec(statement);
 
   slotDate = new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10);

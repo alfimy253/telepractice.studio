@@ -960,3 +960,115 @@ No production deployment was performed. The existing testing limits still apply:
 - Seven focused scratch probes reproduced A01–A07 (including both-target cleaner behavior for A05/A06). They assert the observed defects, not that the behavior is correct. A08–A11 were confirmed by source/index checks. The existing passing suite does not cover all of these newly identified edges.
 - Only `current_code.md` was edited for this audit. The other Markdown files were reviewed and their discrepancies listed here, not silently rewritten. Application changes from completed #209/#214/#219 work remain included for the requested source commit; **none of A01–A11 was implemented/fixed by this audit**. Scratch probes, logs, generated fixtures and dependencies are not repository deliverables.
 - No production deployment/database/logging/credential-rotation action was performed. The session remains on `arena/6b41a2a7-telepractice-studio`; any integration into `main` must use a pull request from that branch, not a direct branch switch or push to `main`.
+
+---
+
+## Bug Fix Session #224 — unique site contact email in `tele_sites` (2026-10-17)
+
+**Status:** implemented and locally verified for newly generated Cloudflare and Vercel packages. No production deployment or live Neon migration was performed. This is the requirement and solution record for **Bug Fix Session #224**. It supersedes the earlier statements in this file that the contact email exists only inside `tele_sites.config` and that `ensureSiteRow` writes only `config`.
+
+### Requirement (as requested)
+
+1. **Give `tele_sites` its own email column.** The contact email was only a string inside the `config` JSONB document. It must be a first-class `email` column on `tele_sites`, populated from the practice contact email.
+2. **Make the contact email the unique business key.** Two `tele_sites` rows must not represent the same contact email, including case differences. The email column is the only *additional* unique rule on `tele_sites`. `site_id` remains the primary key because every child table has a foreign key to `tele_sites(site_id)`; replacing it would break eight foreign keys and existing deployments. No other `UNIQUE` constraint or unique index is added to `tele_sites`.
+3. **Migrate existing databases without losing configuration.** Existing rows must be backfilled from `config.email`, malformed legacy values must not block the index, and existing duplicate emails must be resolved deterministically.
+4. **Keep the column synchronized on every write path.** The runtime bootstrap, the owner's Save-settings route, `db/seed.sql` and `db/apply-config.sql` must write it explicitly, and any writer that only knows the pre-#224 `(site_id, config)` shape must still keep the column equal to `config.email` once the migrated schema is in place.
+5. **Report a duplicate email as a user error, not a database outage.** An owner who tries to save an email already used by another site must receive a clear `409` message.
+6. **Preserve the password, owner-account and `tele_admin_users.email` rules.** The owner login email is a separate account field; this change applies to the practice contact email only.
+
+### Root cause
+
+`tele_sites` was created as:
+
+```sql
+CREATE TABLE IF NOT EXISTS tele_sites (
+  site_id text PRIMARY KEY,
+  config jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+`config.email` was validated for shape by `normalizeConfig()` and `cleanSiteConfig()`, but SQL could not enforce uniqueness on a string inside JSONB without a full scan, and two site rows could claim the same practice email. The bootstrap (`ensureSiteRow`), the owner save route (`PUT /api/site`), `db/seed.sql` and `db/apply-config.sql` wrote only `site_id` and `config`, so there was no column to index or query by email. The Vercel `PUT /api/site` route also had no local error handler, so a duplicate-key failure would have surfaced as a generic `500` instead of an actionable conflict.
+
+### Solution (implemented)
+
+**1. Schema and migration — `public/_scaffold/templates/shared/db/schema.sql`**
+
+- `tele_sites` now declares `email varchar(120)` beside `site_id`.
+- The migration is idempotent and runs in the same transaction as the rest of the packaged schema:
+  1. `ALTER TABLE tele_sites ADD COLUMN IF NOT EXISTS email varchar(120);`
+  2. backfill: `UPDATE tele_sites SET email = NULLIF(lower(btrim(config ->> 'email')), '') WHERE email IS DISTINCT FROM NULLIF(lower(btrim(config ->> 'email')), '');`
+  3. null out malformed legacy values so the index cannot fail on old data; the backfill truncates to the column's 120-character width first, so an over-long legacy address is cleaned instead of aborting the transaction with `22001`;
+  4. resolve existing duplicates by keeping the oldest row (`ORDER` comparison on `(created_at, site_id)`) and setting `email = NULL` on later duplicates. Their `config.email` is not destroyed;
+  5. `CREATE OR REPLACE FUNCTION tele_sites_sync_email()` plus a `BEFORE INSERT OR UPDATE OF config` trigger that sets `NEW.email = NULLIF(lower(btrim(NEW.config ->> 'email')), '')`. This is what keeps packages that only know the old write path (`INSERT … (site_id, config)`) synchronized with the column;
+  6. `CREATE UNIQUE INDEX IF NOT EXISTS tele_sites_email_unique_idx ON tele_sites (lower(email)) WHERE email IS NOT NULL;`.
+- Steps 2–4 are wrapped in a `DO` guard that runs only while `tele_sites_email_unique_idx` does not exist. A fresh Worker isolate reapplies this schema on its first request; a second backfill would otherwise try to restore the duplicate email that step 4 deliberately cleared, and the existing unique index would reject the whole bootstrap transaction.
+- The partial predicate keeps legacy rows with no email legal (they cannot accidentally share one empty string). Every non-null contact email is unique case-insensitively. New packages always set one.
+- After the change `splitSqlStatements()` sees **65 statements / 19,854 bytes** (the pre-#224 file was 59 statements / 16,331 bytes). `test/cron-workflow.test.js` now asserts 65.
+
+**2. Generated runtimes**
+
+- Both runtimes now have `contactEmail(value)` = trim, lower-case, maximum 120 characters.
+- `cleanSiteConfig()` stores the contact email in canonical lower-case form.
+- `ensureSiteRow()` writes the email column:
+  `INSERT INTO tele_sites (site_id, email, config) VALUES (…) ON CONFLICT (site_id) DO UPDATE SET email = EXCLUDED.email, config = EXCLUDED.config WHERE tele_sites.updated_at = tele_sites.created_at`.
+  The `updated_at = created_at` guard from Bug Fix No. 204 is unchanged, so an untouched seed still refreshes and an owner-edited row is kept.
+- Owner `PUT /api/site` writes `email = EXCLUDED.email` and catches `23505`:
+  **409** — “That contact email is already used by another site in this database. Use a different practice email.”
+- The Vercel route now has the same local `try/catch` as Cloudflare (other database errors remain `503` with `databaseErrorMessage`), instead of allowing the error to fall through to the generic `500` handler.
+
+**3. Builder and packaged SQL**
+
+- `public/package-core.js` exports the same canonical `contactEmail()` behavior through `normalizeConfig()`, so generated `site-config.js`, compiled `DEFAULT_CONFIG`, `db/seed.sql` and `db/apply-config.sql` all carry the lower-case contact email. A blank submitted address falls back to the compiled address (then `hello@<siteId>.example`), so a new package always writes a non-null contact email.
+- `createSeedSql()` writes `(site_id, email, config)` with `ON CONFLICT (site_id) DO NOTHING`.
+- `createApplyConfigSql()` writes `(site_id, email, config)` and updates both `email` and `config`.
+
+**4. Tests**
+
+- New `test/bug-fix-224.test.js` (3 tests):
+  - both generated targets contain the column, backfill, trigger and unique index, and both runtimes write the email on bootstrap and owner save with the `23505`/409 path;
+  - `normalizeConfig()` returns the lower-case contact email;
+  - a real PostgreSQL-compatible PGlite database created with the pre-#224 `tele_sites` shape is migrated by the generated package’s own `SCHEMA_STATEMENTS`: emails are backfilled, the oldest duplicate keeps the address, later duplicates become `NULL`, a config-only insert/update gets a `23505`, and two rows without an email remain legal.
+- Updated existing pins that intentionally name the old query shape: `test/deployment-fixes.test.js` (bootstrap and seed), `test/bug-fix-204.test.js` (theme refresh), and `test/cron-workflow.test.js` (schema statement count).
+
+### Compatibility and migration notes
+
+- **Existing databases:** the first request from a regenerated package applies the new migration inside the normal schema transaction. Existing `config` rows are backfilled. A duplicate email cannot be represented after migration: the oldest site row keeps `email`; later rows keep their `config.email` but have `email = NULL`. If such a later site's owner saves settings that still carry the duplicate contact email, the trigger recomputes the duplicate and the unique index rejects the save. The operator must give that site a different contact email. This is deliberate: uniqueness is the requirement, and silently overwriting another site's email would be worse.
+- **Already-deployed packages:** Rule G3 still applies. They do not update themselves; regenerate the ZIP and redeploy. Their old `INSERT … (site_id, config)` path remains schema-compatible because the trigger fills `email`. Running the new `db/schema.sql` manually is also safe and idempotent.
+- **A second package that reuses a contact email:** if another site row in the same database already owns that address, the new package's `ensureSiteRow()` insert is rejected by the unique index (PostgreSQL `23505`), so that deployment cannot serve requests until it is given a different contact email. This is the uniqueness requirement applied at bootstrap; the owner-save path reports the same condition as a `409`.
+- **`site_id`:** remains `text PRIMARY KEY`; it is referenced by `tele_admin_users`, `tele_blog_posts`, `tele_gallery_items`, `tele_client_accounts`, `tele_client_sessions`, `tele_monthly_schedules`, `tele_appointments` and `tele_consultation_notes`. The email column is the only added uniqueness rule.
+- **Owner account email:** `tele_admin_users.email` is untouched. It identifies the sign-in account, not the public practice contact email.
+
+### Verification (2026-10-17)
+
+- `node --test test/*.test.js`: **189 passed, 0 failed, 0 skipped** (about 45.7 s). This is the pre-#224 186-test suite plus the 3 new #224 tests.
+- `test/bug-fix-224.test.js`: **3/3 passed** (including a double application of `SCHEMA_STATEMENTS` and a 213-character legacy email).
+- `npm run check` (`wrangler deploy --dry-run`): **passed**; the root Worker still exposes only the `ASSETS` binding.
+- `git diff --check`: **passed**.
+- Not verified here: a live Neon database migration, a hosted Vercel/Cloudflare deployment, or the operator's production data. PGlite exercises real PostgreSQL DDL/trigger/unique behavior; it is not a live Neon round-trip.
+
+---
+
+## Inconsistent Code
+
+**Audit date:** 2026-10-17. **Scope:** this file versus the working tree. Entries already recorded in `Inconsistency #011` are marked with their #011 ID; they are repeated here because the text still says something the code does not do. Items marked **changed by #224** are called out separately because the code change intentionally moved the target. Nothing in this table was fixed except the `tele_sites` schema described in #224; the old Markdown paragraphs remain as dated snapshots unless stated otherwise.
+
+| ID | Location in this file | Inconsistency | Code evidence / current truth |
+|---|---|---|---|
+| IC-01 | Top summary (line 3), §8 verification (line 372), password amendment (line 173) | `npm test` is stated as **135/135**. | The suite passed **186/186** before #224 and **189/189** after adding the three #224 tests. The file also contains `186 passed` in #219/#011, so 135 contradicts both the code and this file’s own later records. (#011 D02.) |
+| IC-02 | User flow (line 13), system rules (line 27), §6 bootstrapping description (lines 305 and 308) | The schema is stated as **59 statements / ~16.3 KB**. | Before #224 that was exact (59 statements / 16,331 bytes as measured through `splitSqlStatements()`). After #224 the packaged schema is **65 statements / 19,854 bytes**; every “59” reference now describes the pre-#224 tree. |
+| IC-03 | §1 line 203 | “The builder itself does not use Neon or retain practice appointments.” | The builder does not retain practice appointments, but it does use Neon when `DATABASE_URL` is configured: `src/database.js` creates the client, `src/page-edits-store.js` reads/writes `tele_builder_page_edits`, and `src/index.js` serves `GET/POST/DELETE /api/page-editor`. (#011 D03.) |
+| IC-04 | §1 line 208 | “`src/generator.js` validates the setup, normalizes the site configuration, creates deployment secrets, reads the scaffold templates, and builds the ZIP.” | `src/generator.js` is a thin adapter. It imports `buildPreviewDocument`, `generateBundle`, `normalizeAdminAccount`, `normalizeConfig` and `normalizePageEdits` from `public/package-core.js` and supplies only the `ASSETS`-backed `readScaffold()` reader. Validation, normalization, secret creation and ZIP assembly live in `public/package-core.js`. |
+| IC-05 | Page editor section, line 187 | The page-edit store is named `builder_page_edits`. | The active table is `tele_builder_page_edits`; `src/page-edits-store.js` renames legacy `builder_page_edits` in place and then creates/queries `tele_builder_page_edits`. The same file correctly says `tele_builder_page_edits` at line 496. (#011 D04; internal contradiction.) |
+| IC-06 | §5 “Booking and proof,” item 2 | “The 15-minute point is a **review threshold**, not an automatic cancellation deadline. The appointment and its time slot remain reserved unless the client or owner cancels/releases it.” | `shared/lib/payment-reminders.js` `markDroppedBookings()` sets `status = 'cancelled'`, `payment_status = 'expired'` and `payment_owner_attention_at = now()` when `payment_due_at <= now()` and no proof exists. The §6 amended timeline in the same file says the same thing. (#011 D05; internal contradiction.) |
+| IC-07 | §6 line 305 and the 2026-10-12 work list, line 500 | `ensureSiteRow()` is described as `ON CONFLICT (site_id) DO UPDATE SET config = EXCLUDED.config WHERE updated_at = created_at`. | After #224 the statement also writes the email column: `DO UPDATE SET email = EXCLUDED.email, config = EXCLUDED.config …`. The `updated_at = created_at` predicate is unchanged. This is a **changed-by-#224** entry; the #224 section above is authoritative. |
+| IC-08 | §3 feature-toggle paragraph, line 103 | “The generated runtime’s `cleanSiteConfig()` still merges the database `features` object without forcing `blog: true`, so a stale `tele_sites.config` with `blog: false` can hide Journal until that merge is finished (see *To Be Implemented*).” | Both runtimes force `blog: true` after the spread: Cloudflare `src/index.js` line 122 and Vercel `api/index.js` line 420 use `features: { ...DEFAULT_CONFIG.features, ...(merged.features || {}), blog: true, … }`. #209 implemented this; the pending note is stale. (#011 D01.) |
+| IC-09 | §5 proof-table name, line 273 (also the historical line 433) | `appointment_payment_proofs` is named without the `tele_` prefix. | The active table is `tele_appointment_payment_proofs`. The unprefixed name is the legacy migration input, not an active table. (#011 D04.) |
+| IC-10 | §6 bootstrapping description, line 305 | The schema “has 12 `CREATE TABLE` lines, some inside `DO` bodies.” | The file has 12 `CREATE TABLE` statements and all 12 are top-level; the four `DO $$ … $$` blocks contain only `RENAME`/`ALTER TABLE`/`UPDATE` migrations (legacy renames, the #214 blog-image columns and #224 email migration, and the appointment foreign keys), never a table creation. |
+
+**Code-level defect found while checking the schema (fixed by #224, recorded for completeness):** `tele_sites` had no unique constraint keyed on the practice contact email. `config.email` was validated as text but could repeat across rows, and there was no `email` column for SQL to index or look up. That is the requirement gap #224 closes; see the section above for the migration, trigger and 409 handling.
+
+**Out-of-scope files observed but not edited:** `inconsistency.md` and `system-rules.md` still contain the pre-#224 “59 statements / 16.3 KB” and “135/135” claims, and `system-rules.md` still shows the old config-only `ensureSiteRow` upsert. They were not part of the requested `current_code.md` verification pass; treat this section and the #224 record as the current description.
+
+**Test/verification context for this section:** the 189/189 run, `npm run check` and `git diff --check` were executed on the working tree; no production database, hosted site or cron invocation was contacted. The dated audit in #011 (186/186, branch `arena/6b41a2a7-telepractice-studio`) is the preceding snapshot, not the current branch state.
